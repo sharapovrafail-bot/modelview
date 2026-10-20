@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ModelView</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 29 9v14l-13 7-13-7V9z' fill='%232f7bff'/%3E%3Cpath d='M16 16 29 9M16 16v14M16 16 3 9' stroke='%23fff' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "./lib/three/three.module.js",
+  "three/addons/": "./lib/three/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== Логотип ===== -->
+  <div id="logo">
+    <svg viewBox="0 0 32 32" class="logo-mark"><path d="M16 2 29 9v14l-13 7-13-7V9z" fill="#2f7bff"/><path d="M16 16 29 9M16 16v14M16 16 3 9" stroke="#fff" stroke-width="2" fill="none" stroke-linejoin="round"/></svg>
+    <span class="logo-text">ModelView</span>
+    <span class="badge">PRO</span>
+  </div>
+
+  <!-- ===== Верхняя панель инструментов ===== -->
+  <nav id="tools" class="glass">
+    <button class="tool on" data-tool="rotate"><i data-icon="rotate"></i><span>Вращение</span></button>
+    <button class="tool" data-tool="pan"><i data-icon="pan"></i><span>Панорама</span></button>
+    <button class="tool" data-tool="zoom"><i data-icon="zoom"></i><span>Масштаб</span></button>
+    <button class="tool" data-tool="select"><i data-icon="select"></i><span>Выделить</span></button>
+    <button class="tool" data-tool="section" data-toggle><i data-icon="section"></i><span>Сечение</span></button>
+    <button class="tool" data-tool="measure"><i data-icon="measure"></i><span>Измерение</span></button>
+    <button class="tool" data-tool="hide"><i data-icon="hide"></i><span>Скрыть</span></button>
+    <button class="tool" data-tool="style" data-toggle><i data-icon="style"></i><span>Стиль</span></button>
+    <button class="tool" data-tool="animate" data-toggle><i data-icon="animate"></i><span>Анимация</span></button>
+  </nav>
+
+  <!-- ===== Правый верх: быстрые кнопки ===== -->
+  <div id="quick">
+    <button class="qbtn" id="qFit" title="Вписать в экран (F)"><i data-icon="fit"></i></button>
+    <button class="qbtn" id="qShowAll" title="Показать все скрытые детали"><i data-icon="eye"></i></button>
+    <button class="qbtn" id="qShot" title="Снимок экрана PNG (P)"><i data-icon="camera"></i></button>
+    <button class="qbtn" id="qProps" title="Панель свойств"><i data-icon="panel"></i></button>
+    <button class="qbtn" id="qFull" title="Полный экран (F11)"><i data-icon="fullscreen"></i></button>
+  </div>
+
+  <!-- ===== Левое меню ===== -->
+  <aside id="nav" class="glass">
+    <button class="nav-item primary" id="navOpen"><i data-icon="folder"></i><span>Открыть</span></button>
+    <button class="nav-item" data-page="recent"><i data-icon="clock"></i><span>Последние</span></button>
+    <button class="nav-item" data-page="favorites"><i data-icon="star"></i><span>Избранное</span></button>
+    <div class="nav-gap"></div>
+    <button class="nav-item on" data-page="model"><i data-icon="home"></i><span>Модель</span></button>
+    <button class="nav-item" data-page="sections"><i data-icon="sectionBox"></i><span>Секции</span></button>
+    <button class="nav-item" data-page="measures"><i data-icon="measure"></i><span>Измерения</span></button>
+    <button class="nav-item" data-page="analysis"><i data-icon="analysis"></i><span>Анализ</span></button>
+    <button class="nav-item" data-page="props"><i data-icon="props"></i><span>Свойства</span></button>
+    <button class="nav-item" data-page="export"><i data-icon="export"></i><span>Экспорт</span></button>
+    <input type="file" id="fileInput" hidden accept=".step,.stp,.iges,.igs,.brep,.brp,.stl,.obj,.ply,.3mf,.glb,.gltf">
+  </aside>
+
+  <!-- ===== Левая панель (страницы) ===== -->
+  <section id="side">
+    <!-- Модель: дерево + карточка -->
+    <div class="page on" data-page="model">
+      <div class="glass panel tree-panel">
+        <div class="panel-head">
+          <i data-icon="fileCad" class="accent"></i>
+          <span id="treeTitle">Нет модели</span>
+          <button class="mini" id="treeCollapse" title="Свернуть всё"><i data-icon="chevUp"></i></button>
+        </div>
+        <div id="treeBody" class="scroll"><div class="empty">Откройте файл STEP, IGES, STL…</div></div>
+      </div>
+      <div class="glass panel card" id="card" hidden>
+        <div class="thumb"><img id="cardImg" alt=""><button class="mini fav" id="cardFav" title="В избранное"><i data-icon="star"></i></button></div>
+        <div class="card-body">
+          <b id="cardName"></b>
+          <div id="cardInfo"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Последние -->
+    <div class="page" data-page="recent">
+      <div class="glass panel fill">
+        <div class="panel-head"><i data-icon="clock" class="accent"></i><span>Последние файлы</span></div>
+        <div id="recentList" class="scroll file-list"></div>
+      </div>
+    </div>
+
+    <!-- Избранное -->
+    <div class="page" data-page="favorites">
+      <div class="glass panel fill">
+        <div class="panel-head"><i data-icon="star" class="accent"></i><span>Избранное</span></div>
+        <div id="favList" class="scroll file-list"></div>
+      </div>
+    </div>
+
+    <!-- Секции -->
+    <div class="page" data-page="sections">
+      <div class="glass panel">
+        <div class="panel-head"><i data-icon="sectionBox" class="accent"></i><span>Сечение</span></div>
+        <div class="pad">
+          <div class="seg" id="secAxis">
+            <button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z" class="on">Z</button>
+          </div>
+          <div class="slider-row"><input type="range" id="secPos" min="0" max="1000" value="500"><span id="secVal">—</span></div>
+          <label class="switch-row">Показать сечение <input type="checkbox" id="secOn"><span class="sw"></span></label>
+          <label class="switch-row">Заливка сечения <input type="checkbox" id="secFill" checked><span class="sw"></span></label>
+          <label class="switch-row">Обратная сторона <input type="checkbox" id="secFlip"><span class="sw"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Измерения -->
+    <div class="page" data-page="measures">
+      <div class="glass panel">
+        <div class="panel-head"><i data-icon="measure" class="accent"></i><span>Измерение</span></div>
+        <div class="pad">
+          <div class="seg" id="measMode">
+            <button data-m="dist" class="on" title="Расстояние между точками"><i data-icon="ruler"></i></button>
+            <button data-m="dims" title="Габаритные размеры на модели"><i data-icon="dims"></i></button>
+            <button data-m="clear" title="Очистить"><i data-icon="trash"></i></button>
+          </div>
+          <div class="sub">Результат</div>
+          <div id="measResult" class="kv"><div class="muted">Кликните две точки на модели</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Анализ -->
+    <div class="page" data-page="analysis">
+      <div class="glass panel">
+        <div class="panel-head"><i data-icon="analysis" class="accent"></i><span>Анализ</span></div>
+        <div class="pad kv" id="analysisBody"><div class="muted">Нет модели</div></div>
+      </div>
+    </div>
+
+    <!-- Свойства (дублирует правую панель на узких экранах) -->
+    <div class="page" data-page="props">
+      <div class="glass panel">
+        <div class="panel-head"><i data-icon="props" class="accent"></i><span>Свойства</span></div>
+        <div class="pad">
+          <label class="field">Плотность материала, г/см³
+            <select id="density">
+              <option value="7.85" selected>Сталь — 7,85</option>
+              <option value="7.2">Чугун — 7,2</option>
+              <option value="2.7">Алюминий — 2,7</option>
+              <option value="8.5">Латунь — 8,5</option>
+              <option value="8.9">Медь — 8,9</option>
+              <option value="4.5">Титан — 4,5</option>
+              <option value="1.2">Пластик (ABS/PLA) — 1,2</option>
+            </select>
+          </label>
+          <label class="field">Точность триангуляции STEP/IGES
+            <select id="quality">
+              <option value="fast">Быстро</option>
+              <option value="normal" selected>Норма</option>
+              <option value="fine">Точно</option>
+            </select>
+          </label>
+          <label class="switch-row">Рёбра <input type="checkbox" id="optEdges" checked><span class="sw"></span></label>
+          <label class="switch-row">Размеры на модели <input type="checkbox" id="optDims" checked><span class="sw"></span></label>
+          <label class="switch-row">Тени и отражения <input type="checkbox" id="optShadows" checked><span class="sw"></span></label>
+          <label class="switch-row">Сетка <input type="checkbox" id="optGrid"><span class="sw"></span></label>
+          <label class="switch-row">Ортогональная проекция <input type="checkbox" id="optOrtho"><span class="sw"></span></label>
+          <label class="switch-row">Вертикальная ось Y (вместо Z) <input type="checkbox" id="optYUp"><span class="sw"></span></label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Экспорт -->
+    <div class="page" data-page="export">
+      <div class="glass panel">
+        <div class="panel-head"><i data-icon="export" class="accent"></i><span>Экспорт</span></div>
+        <div class="pad stack">
+          <button class="wide" id="expPng"><i data-icon="camera"></i>Снимок PNG</button>
+          <button class="wide" id="expStl"><i data-icon="export"></i>Сохранить как STL</button>
+          <button class="wide" id="expObj"><i data-icon="export"></i>Сохранить как OBJ</button>
+          <div class="muted small">Экспортируются видимые детали.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 3D-окно ===== -->
+  <main id="viewport">
+    <canvas id="canvas"></canvas>
+    <div id="labels"></div>
+
+    <div id="viewcube" title="Клик по грани — вид">
+      <div class="vc-axis">Z</div>
+      <div class="vc-scene"><div class="vc-cube" id="vcCube">
+        <div class="vc-face" data-face="top">Z</div>
+        <div class="vc-face" data-face="bottom">−Z</div>
+        <div class="vc-face" data-face="front">−Y</div>
+        <div class="vc-face" data-face="back">Y</div>
+        <div class="vc-face" data-face="right">X</div>
+        <div class="vc-face" data-face="left">−X</div>
+      </div></div>
+      <button class="vc-iso" id="vcIso" title="Изометрия (0)">ISO</button>
+    </div>
+
+    <div id="stylePop" class="glass pop" hidden>
+      <div class="sub">Стиль</div>
+      <label class="switch-row">Рёбра <input type="checkbox" data-link="optEdges"><span class="sw"></span></label>
+      <label class="switch-row">Размеры <input type="checkbox" data-link="optDims"><span class="sw"></span></label>
+      <label class="switch-row">Тени <input type="checkbox" data-link="optShadows"><span class="sw"></span></label>
+      <label class="switch-row">Сетка <input type="checkbox" data-link="optGrid"><span class="sw"></span></label>
+      <label class="switch-row">Орто <input type="checkbox" data-link="optOrtho"><span class="sw"></span></label>
+    </div>
+
+    <div id="welcome">
+      <div class="drop">
+        <svg viewBox="0 0 24 24"><path d="M12 3 21 8v8l-9 5-9-5V8z"/><path d="M12 13 21 8M12 13v8M12 13 3 8"/></svg>
+        <h1>Перетащите файл сюда</h1>
+        <p>или нажмите <b>Открыть</b> (Ctrl+O)</p>
+        <p class="muted">STEP · STP · IGES · BREP · STL · OBJ · PLY · 3MF · GLB</p>
+      </div>
+    </div>
+    <div id="dropOverlay" hidden><div>Отпустите файл для открытия</div></div>
+    <div id="loading" hidden><div class="spinner"></div><div id="loadingText">Загрузка…</div></div>
+
+    <div id="modes" class="glass">
+      <button class="mode on" data-mode="real"><i data-icon="cubeSolid"></i><span>Реалистичный</span></button>
+      <button class="mode" data-mode="wire"><i data-icon="cubeWire"></i><span>Каркас</span></button>
+      <button class="mode" data-mode="hidden"><i data-icon="cubeLines"></i><span>Скрытые линии</span></button>
+      <button class="mode" data-mode="shaded"><i data-icon="cubeShaded"></i><span>Тонированный</span></button>
+      <button class="mode" data-mode="xray"><i data-icon="cubeXray"></i><span>Рентген</span></button>
+    </div>
+  </main>
+
+  <!-- ===== Правая панель свойств ===== -->
+  <aside id="props" class="glass">
+    <div class="panel-head"><span>Свойства</span><button class="mini" id="propsClose" title="Скрыть"><i data-icon="close"></i></button></div>
+    <div class="tabs" id="propTabs">
+      <button class="on" data-tab="model">Модель</button>
+      <button data-tab="material">Материал</button>
+      <button data-tab="analysis">Анализ</button>
+    </div>
+    <div class="scroll prop-body">
+      <div class="tab on" data-tab="model">
+        <div class="kv" id="pModel"></div>
+        <div class="sub">Центр масс</div>
+        <div class="kv-icon"><div class="kv" id="pCom"></div><i data-icon="com" class="big"></i></div>
+        <div class="sub">Диапазон размеров</div>
+        <div class="kv" id="pRange"></div>
+      </div>
+      <div class="tab" data-tab="material">
+        <div class="kv" id="pMaterial"></div>
+      </div>
+      <div class="tab" data-tab="analysis">
+        <div class="kv" id="pAnalysis"></div>
+      </div>
+    </div>
+    <button class="wide copy" id="propsCopy"><i data-icon="copy"></i>Копировать</button>
+  </aside>
+</div>
+
+<script type="module" src="viewer.js"></script>
+</body>
+</html>
