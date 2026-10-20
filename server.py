@@ -21,6 +21,24 @@ mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("text/javascript", ".js")
 
 initial_file = None
+files = {}  # id -> путь: файлы, переданные окну (первый — из командной строки, дальше — из других запусков)
+_next_id = [1]
+
+
+def register_file(path):
+    """Регистрирует файл для окна и возвращает его id для /api/file?id=…"""
+    fid = _next_id[0]
+    _next_id[0] += 1
+    files[fid] = os.path.abspath(path)
+    return fid
+
+
+def file_info(fid):
+    path = files.get(fid)
+    if not path or not os.path.isfile(path):
+        return {}
+    st = os.stat(path)
+    return {"id": fid, "name": os.path.basename(path), "size": st.st_size, "mtime": int(st.st_mtime * 1000)}
 jobs = {}  # id -> bytes: данные файлов для генератора эскизов (modelview.py --thumbs)
 
 
@@ -55,12 +73,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         p = url.path
 
+        query = urllib.parse.parse_qs(url.query)
+
         if p == "/api/initial":
-            info = {}
-            if initial_file and os.path.isfile(initial_file):
-                info = {"name": os.path.basename(initial_file),
-                        "size": os.path.getsize(initial_file)}
-            return self._send(200, json.dumps(info).encode())
+            # файл из командной строки (id=0), если он есть
+            if initial_file and os.path.isfile(initial_file) and 0 not in files:
+                files[0] = initial_file
+            return self._send(200, json.dumps(file_info(0)).encode())
+
+        if p == "/api/info":
+            fid = int((query.get("id") or ["-1"])[0])
+            return self._send(200, json.dumps(file_info(fid)).encode())
 
         if p.startswith("/api/job/"):
             data = jobs.get(p[len("/api/job/"):])
@@ -69,9 +92,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, data, "application/octet-stream")
 
         if p == "/api/file":
-            if not (initial_file and os.path.isfile(initial_file)):
+            fid = int((query.get("id") or ["0"])[0])
+            if fid == 0 and initial_file:
+                files.setdefault(0, initial_file)
+            path = files.get(fid)
+            if not path or not os.path.isfile(path):
                 return self._send(404, b"{}")
-            return self._send_file(initial_file, "application/octet-stream")
+            return self._send_file(path, "application/octet-stream")
 
         # статика из app/
         rel = urllib.parse.unquote(p).lstrip("/") or "index.html"

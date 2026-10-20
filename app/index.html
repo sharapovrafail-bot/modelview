@@ -57,7 +57,7 @@
     <button class="nav-item" data-page="analysis"><i data-icon="analysis"></i><span>Анализ</span></button>
     <button class="nav-item" data-page="props"><i data-icon="props"></i><span>Свойства</span></button>
     <button class="nav-item" data-page="export"><i data-icon="export"></i><span>Экспорт</span></button>
-    <input type="file" id="fileInput" hidden accept=".step,.stp,.iges,.igs,.brep,.brp,.stl,.obj,.ply,.3mf,.glb,.gltf">
+    <input type="file" id="fileInput" hidden multiple accept=".step,.stp,.iges,.igs,.brep,.brp,.stl,.obj,.ply,.3mf,.glb,.gltf">
   </aside>
 
   <!-- ===== Левая панель (страницы) ===== -->
@@ -190,6 +190,7 @@
   <!-- ===== 3D-окно ===== -->
   <main id="viewport">
     <canvas id="canvas"></canvas>
+    <div id="docTabs" hidden></div>
     <div id="labels"></div>
 
     <div id="viewcube" title="Клик по грани — вид">
@@ -223,7 +224,7 @@
       </div>
     </div>
     <div id="dropOverlay" hidden><div>Отпустите файл для открытия</div></div>
-    <div id="loading" hidden><div class="spinner"></div><div id="loadingText">Загрузка…</div></div>
+    <div id="loading" hidden><div class="spinner"></div><div id="loadingText">Загрузка…</div><button id="loadCancel" class="wide" hidden>Отмена</button></div>
 
     <div id="modes" class="glass">
       <button class="mode on" data-mode="real"><i data-icon="cubeSolid"></i><span>Реалистичный</span></button>

@@ -203,15 +203,28 @@ const model = {
 };
 
 // ---- воркер OpenCascade ----
-const worker = new Worker('occt-worker.js');
+let worker = null;
 let jobId = 0;
 const jobs = new Map();
-worker.onmessage = (ev) => {
-	const job = jobs.get(ev.data.id);
-	if (!job) return;
-	jobs.delete(ev.data.id);
-	ev.data.error ? job.reject(new Error(ev.data.error)) : job.resolve(ev.data.result);
-};
+function startWorker() {
+	worker = new Worker('occt-worker.js');
+	worker.onmessage = (ev) => {
+		const job = jobs.get(ev.data.id);
+		if (!job) return;
+		jobs.delete(ev.data.id);
+		ev.data.error ? job.reject(new Error(ev.data.error)) : job.resolve(ev.data.result);
+	};
+}
+startWorker();
+// «Отмена»: разбор в OpenCascade не прерывается изнутри — останавливаем воркер целиком
+function cancelLoad() {
+	loadToken++;
+	for (const j of jobs.values()) j.reject(new Error('cancel'));
+	jobs.clear();
+	worker.terminate();
+	startWorker();
+	hideLoading();
+}
 function occtParse(format, buffer, params) {
 	return new Promise((resolve, reject) => {
 		const id = ++jobId;
@@ -333,11 +346,18 @@ function detectFormat(ext, buffer) {
 async function parseModel(name, buffer) {
 	const ext = name.split('.').pop().toLowerCase();
 	if (OCCT_FORMATS[ext]) {
-		const q = QUALITY[settings.quality] || QUALITY.normal;
-		const res = await occtParse(OCCT_FORMATS[ext], buffer, {
-			linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio', ...q,
-		});
-		return { object: occtToObject(res, name), yUp: false };
+		// повторное открытие того же файла — сетка из кэша, без OpenCascade
+		const key = meshCacheKey(name, buffer);
+		let res = await meshCacheGet(key);
+		const cached = !!res;
+		if (!res) {
+			const q = QUALITY[settings.quality] || QUALITY.normal;
+			res = await occtParse(OCCT_FORMATS[ext], buffer, {
+				linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio', ...q,
+			});
+			meshCachePut(key, res);
+		}
+		return { object: occtToObject(res, name), yUp: false, cached };
 	}
 	switch (ext) {
 		case 'stl': return { object: geometryToObject(new STLLoader().parse(buffer), name), yUp: false };
@@ -356,26 +376,44 @@ async function parseModel(name, buffer) {
 // Загрузка
 // =====================================================================
 let loadToken = 0;
-async function openBuffer(name, buffer, opts = {}) {
+// файлы открываются строго по очереди (несколько сразу — каждый своей вкладкой)
+let openChain = Promise.resolve();
+function openBuffer(name, buffer, opts = {}) {
+	openChain = openChain.then(() => openBufferNow(name, buffer, opts)).catch(() => { });
+	return openChain;
+}
+async function openBufferNow(name, buffer, opts) {
 	const ext = name.split('.').pop().toLowerCase();
 	if (!SUPPORTED.includes(ext)) { alert('Формат .' + ext + ' не поддерживается'); return; }
 	const token = ++loadToken;
 	const t0 = performance.now();
-	showLoading(`Открываю ${name}…`);
+	showLoading(`Открываю ${name}…`, true);
 	const timer = setInterval(() => {
 		$('loadingText').textContent = `Открываю ${name}… ${((performance.now() - t0) / 1000).toFixed(1)} с`;
 	}, 200);
 	try {
-		const { object, yUp } = await parseModel(name, buffer);
-		if (token !== loadToken) return;
+		const { object, yUp, cached } = await parseModel(name, buffer);
+		if (token !== loadToken) { disposeObject(object); return; }
+		if (opts.replace && activeDoc >= 0) {
+			// та же вкладка (например, сменили точность) — старая модель удаляется в setModel
+		} else {
+			saveActiveDoc();
+			if (model.object) { clearMeasure(); select(null); modelRoot.remove(model.object); }
+			model.object = null;
+			docs.push({});
+			activeDoc = docs.length - 1;
+		}
 		Object.assign(model, { name, buffer, ext, size: buffer.byteLength, format: detectFormat(ext, buffer) });
 		model.loadTime = (performance.now() - t0) / 1000;
+		model.cached = !!cached;
 		object.name = object.name || name;
 		setModel(object, yUp);
-		document.title = name + ' — ModelView';
-		if (window.pywebview && window.pywebview.api) window.pywebview.api.set_title(document.title);
+		docs[activeDoc] = snapshotDoc();
+		setWindowTitle();
+		renderTabs();
 		if (!opts.noRecent) saveRecent();
 	} catch (e) {
+		if (e && e.message === 'cancel') return;
 		console.error(e);
 		if (token === loadToken) alert('Не удалось открыть файл:\n' + (e.message || e));
 	} finally {
@@ -922,7 +960,7 @@ function updateProps() {
 		['Треугольников:', fmtInt(Math.round(st.tris))],
 		['Min:', `${fix2(st.box.min.x)}; ${fix2(st.box.min.y)}; ${fix2(st.box.min.z)}`],
 		['Max:', `${fix2(st.box.max.x)}; ${fix2(st.box.max.y)}; ${fix2(st.box.max.z)}`],
-		['Открыт за:', model.loadTime ? model.loadTime.toFixed(2) + ' с' : '—'],
+		['Открыт за:', model.loadTime ? model.loadTime.toFixed(2) + ' с' + (model.cached ? ' (из кэша)' : '') : '—'],
 	];
 	$('pAnalysis').innerHTML = kv(anRows);
 	$('analysisBody').innerHTML = kv(anRows);
@@ -977,16 +1015,191 @@ function updateCard() {
 }
 
 // =====================================================================
+// Вкладки: несколько моделей в одном окне
+// =====================================================================
+const docs = [];
+let activeDoc = -1;
+const DOC_KEYS = ['name', 'buffer', 'ext', 'size', 'format', 'object', 'meshes', 'radius', 'triangles',
+	'edgesBuilt', 'yUp', 'stats', 'thumb', 'loadTime', 'cached'];
+
+function snapshotDoc() {
+	const d = {};
+	for (const k of DOC_KEYS) d[k] = model[k];
+	d.box = model.box.clone();
+	d.cam = { pos: camera.position.clone(), target: controls.target.clone(), orthoHalf, zoom: camera.zoom };
+	return d;
+}
+function saveActiveDoc() { if (activeDoc >= 0 && model.object) docs[activeDoc] = snapshotDoc(); }
+
+function setWindowTitle() {
+	document.title = (model.name ? model.name + ' — ' : '') + 'ModelView';
+	if (window.pywebview && window.pywebview.api) window.pywebview.api.set_title(document.title);
+}
+
+function loadDoc(i) {
+	const d = docs[i];
+	activeDoc = i;
+	for (const k of DOC_KEYS) model[k] = d[k];
+	model.box.copy(d.box);
+	modelRoot.add(model.object);
+	applyUpAxis();
+	applyMode();
+	buildTree();
+	updateBounds();
+	$('welcome').classList.add('hidden');
+	// камера — как была на этой вкладке
+	const R = model.radius;
+	for (const c of [persp, ortho]) { c.near = Math.max(R * 1e-3, 1e-5); c.far = d.cam.pos.distanceTo(d.cam.target) + R * 50; }
+	ortho.near = -R * 50;
+	camera.position.copy(d.cam.pos);
+	controls.target.copy(d.cam.target);
+	orthoHalf = d.cam.orthoHalf;
+	camera.zoom = d.cam.zoom;
+	updateOrthoFrustum();
+	persp.updateProjectionMatrix();
+	controls.update();
+	if (sectionOn) setupSection();
+	updateProps();
+	updateCard();
+	setWindowTitle();
+	renderTabs();
+	requestRender();
+}
+
+function switchDoc(i) {
+	if (i === activeDoc || !docs[i]) return;
+	saveActiveDoc();
+	clearMeasure();
+	select(null);
+	if (model.object) modelRoot.remove(model.object);
+	loadDoc(i);
+}
+
+function closeDoc(i) {
+	if (!docs[i]) return;
+	if (i === activeDoc) {
+		clearMeasure();
+		select(null);
+		if (model.object) { modelRoot.remove(model.object); disposeObject(model.object); }
+		docs.splice(i, 1);
+		activeDoc = -1;
+		model.object = null;
+		if (docs.length) loadDoc(Math.min(i, docs.length - 1));
+		else showEmpty();
+	} else {
+		disposeObject(docs[i].object);
+		docs.splice(i, 1);
+		if (i < activeDoc) activeDoc--;
+	}
+	renderTabs();
+}
+
+function showEmpty() {
+	Object.assign(model, { name: '', buffer: null, ext: '', size: 0, format: '', object: null, meshes: [], triangles: 0, stats: null, thumb: '' });
+	model.box.makeEmpty();
+	buildTree();
+	updateProps();
+	updateCard();
+	$('welcome').classList.remove('hidden');
+	setWindowTitle();
+	requestRender();
+}
+
+function renderTabs() {
+	const bar = $('docTabs');
+	bar.hidden = docs.length < 2;
+	bar.innerHTML = '';
+	docs.forEach((d, i) => {
+		const t = document.createElement('div');
+		t.className = 'doc-tab' + (i === activeDoc ? ' on' : '');
+		t.title = d.name;
+		t.innerHTML = `<span class="dt-name"></span><button class="dt-close" title="Закрыть (Ctrl+W)">${icon('close')}</button>`;
+		t.querySelector('.dt-name').textContent = d.name;
+		t.onclick = () => switchDoc(i);
+		t.onauxclick = (e) => { if (e.button === 1) closeDoc(i); };
+		t.querySelector('.dt-close').onclick = (e) => { e.stopPropagation(); closeDoc(i); };
+		bar.append(t);
+	});
+}
+
+// =====================================================================
+// Кэш триангуляции STEP/IGES (IndexedDB): повторное открытие без OpenCascade
+// =====================================================================
+const MESH_CACHE_MAX = 1536 * 1024 * 1024; // байт на все модели
+const MESH_CACHE_ITEM = 400 * 1024 * 1024;
+function meshCacheKey(name, buffer) {
+	// отпечаток содержимого: FNV-1a по 64 участкам файла + размер + точность
+	const u = new Uint8Array(buffer);
+	let h = 0x811c9dc5;
+	const chunks = 64, len = 4096;
+	for (let c = 0; c < chunks; c++) {
+		const start = Math.floor((u.length - len) * c / (chunks - 1));
+		for (let i = Math.max(0, start), e = Math.min(u.length, start + len); i < e; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); }
+	}
+	return `${u.length}:${(h >>> 0).toString(16)}:${settings.quality}`;
+}
+function meshCacheMeta() { return safeJson(lsGet('mvMeshCache')).items || []; }
+function meshCacheSaveMeta(items) { try { localStorage.setItem('mvMeshCache', JSON.stringify({ items })); } catch { } }
+async function meshCacheGet(key) {
+	try {
+		// кэш не должен задерживать открытие файла
+		const d = await Promise.race([db(), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))]);
+		const rec = await new Promise((res) => {
+			const r = d.transaction('meshcache').objectStore('meshcache').get(key);
+			r.onsuccess = () => res(r.result); r.onerror = () => res(null);
+		});
+		if (rec) {
+			const items = meshCacheMeta().map((it) => it.key === key ? { ...it, date: Date.now() } : it);
+			meshCacheSaveMeta(items);
+		}
+		return rec ? rec.res : null;
+	} catch { return null; }
+}
+async function meshCachePut(key, res) {
+	try {
+		let bytes = 0;
+		for (const m of res.meshes) {
+			bytes += m.attributes.position.array.byteLength + (m.attributes.normal ? m.attributes.normal.array.byteLength : 0) + (m.index ? m.index.array.byteLength : 0);
+		}
+		if (bytes > MESH_CACHE_ITEM) return;
+		const d = await db();
+		const tx = d.transaction('meshcache', 'readwrite');
+		const store = tx.objectStore('meshcache');
+		store.put({ key, res });
+		// самые давние — вон, пока не уложимся в лимит
+		let items = meshCacheMeta().filter((it) => it.key !== key);
+		items.push({ key, bytes, date: Date.now() });
+		items.sort((a, b) => b.date - a.date);
+		let total = 0;
+		const keep = [];
+		for (const it of items) {
+			if (total + it.bytes <= MESH_CACHE_MAX && keep.length < 30) { keep.push(it); total += it.bytes; }
+			else store.delete(it.key);
+		}
+		meshCacheSaveMeta(keep);
+	} catch { }
+}
+
+// =====================================================================
 // Последние файлы и избранное (IndexedDB)
 // =====================================================================
 const DB_MAX_BUFFER = 150 * 1024 * 1024;
 let dbp = null;
 function db() {
 	if (!dbp) dbp = new Promise((res, rej) => {
-		const r = indexedDB.open('modelview', 1);
-		r.onupgradeneeded = () => r.result.createObjectStore('files', { keyPath: 'key' });
-		r.onsuccess = () => res(r.result);
+		const r = indexedDB.open('modelview', 2);
+		r.onupgradeneeded = () => {
+			const d = r.result;
+			if (!d.objectStoreNames.contains('files')) d.createObjectStore('files', { keyPath: 'key' });
+			if (!d.objectStoreNames.contains('meshcache')) d.createObjectStore('meshcache', { keyPath: 'key' });
+		};
+		r.onsuccess = () => {
+			// другая вкладка/окно обновляет базу — уступаем, чтобы не блокировать её
+			r.result.onversionchange = () => { r.result.close(); dbp = null; };
+			res(r.result);
+		};
 		r.onerror = () => rej(r.error);
+		r.onblocked = () => rej(new Error('IndexedDB занята другим окном'));
 	});
 	return dbp;
 }
@@ -1445,7 +1658,7 @@ $('density').onchange = (e) => { settings.density = e.target.value; saveSettings
 $('quality').value = settings.quality;
 $('quality').onchange = (e) => {
 	settings.quality = e.target.value; saveSettings();
-	if (model.buffer && OCCT_FORMATS[model.ext]) openBuffer(model.name, model.buffer, { noRecent: true });
+	if (model.buffer && OCCT_FORMATS[model.ext]) openBuffer(model.name, model.buffer, { noRecent: true, replace: true });
 };
 $$('#modes .mode').forEach((b) => b.onclick = () => { settings.mode = b.dataset.mode; saveSettings(); applyMode(); });
 
@@ -1505,15 +1718,16 @@ async function openFile(file) {
 	showPage('model');
 	openBuffer(file.name, await file.arrayBuffer());
 }
-$('fileInput').onchange = (e) => { if (e.target.files[0]) openFile(e.target.files[0]); e.target.value = ''; };
+$('fileInput').onchange = (e) => { for (const f of e.target.files) openFile(f); e.target.value = ''; };
+$('loadCancel').onclick = cancelLoad;
 let dragDepth = 0;
 window.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; $('dropOverlay').hidden = false; });
 window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('dropOverlay').hidden = true; } });
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => {
 	e.preventDefault(); dragDepth = 0; $('dropOverlay').hidden = true;
-	const f = e.dataTransfer.files[0];
-	if (f) openFile(f);
+	// можно бросить сразу несколько файлов — каждый откроется своей вкладкой
+	for (const f of e.dataTransfer.files) openFile(f);
 });
 
 // ---- клавиатура ----
@@ -1521,6 +1735,12 @@ window.addEventListener('keydown', (e) => {
 	if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'range') return;
 	if (e.target.tagName === 'SELECT') return;
 	if (e.ctrlKey && e.code === 'KeyO') { e.preventDefault(); $('fileInput').click(); return; }
+	if (e.ctrlKey && e.code === 'KeyW') { e.preventDefault(); if (activeDoc >= 0) closeDoc(activeDoc); return; }
+	if (e.ctrlKey && e.code === 'Tab') {
+		e.preventDefault();
+		if (docs.length > 1) switchDoc((activeDoc + (e.shiftKey ? docs.length - 1 : 1)) % docs.length);
+		return;
+	}
 	if (e.ctrlKey || e.altKey || e.metaKey) return;
 	const view = (v) => () => model.object && setView(v);
 	const map = {
@@ -1540,7 +1760,11 @@ window.addEventListener('keydown', (e) => {
 // =====================================================================
 // Утилиты
 // =====================================================================
-function showLoading(t) { $('loadingText').textContent = t; $('loading').hidden = false; }
+function showLoading(t, cancellable = false) {
+	$('loadingText').textContent = t;
+	$('loadCancel').hidden = !cancellable;
+	$('loading').hidden = false;
+}
 function hideLoading() { $('loading').hidden = true; }
 function fix2(v) { return (Math.abs(v) < 0.005 ? 0 : v).toFixed(2); }
 function fix3(v) { return (Math.abs(v) < 0.0005 ? 0 : v).toFixed(3); }
@@ -1555,16 +1779,23 @@ function niceStep(x) {
 	return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p;
 }
 
+async function openServerFile(id, info) {
+	try {
+		if (!info) info = await (await fetch('api/info?id=' + id)).json();
+		if (!info.name) return;
+		showPage('model');
+		showLoading(`Читаю ${info.name}…`);
+		const buf = await (await fetch('api/file?id=' + id)).arrayBuffer();
+		openBuffer(info.name, buf);
+	} catch (e) { hideLoading(); }
+}
+window.openServerFile = openServerFile;
+
 // =====================================================================
 // Связь с локальным сервером
 // =====================================================================
 if (location.protocol.startsWith('http')) {
-	fetch('api/initial').then((r) => r.json()).then(async (info) => {
-		if (!info.name) return;
-		showLoading(`Читаю ${info.name}…`);
-		const buf = await (await fetch('api/file')).arrayBuffer();
-		openBuffer(info.name, buf);
-	}).catch(() => { });
+	fetch('api/initial').then((r) => r.json()).then((info) => { if (info.name) openServerFile(0, info); }).catch(() => { });
 }
 
 toggleProps(settings.props);
