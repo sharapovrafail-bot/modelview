@@ -21,6 +21,7 @@ mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("text/javascript", ".js")
 
 initial_file = None
+jobs = {}  # id -> bytes: данные файлов для генератора эскизов (modelview.py --thumbs)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -61,6 +62,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "size": os.path.getsize(initial_file)}
             return self._send(200, json.dumps(info).encode())
 
+        if p.startswith("/api/job/"):
+            data = jobs.get(p[len("/api/job/"):])
+            if data is None:
+                return self._send(404, b"{}")
+            return self._send(200, data, "application/octet-stream")
+
         if p == "/api/file":
             if not (initial_file and os.path.isfile(initial_file)):
                 return self._send(404, b"{}")
@@ -81,8 +88,8 @@ class Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = False
 
 
-def make_server():
-    for port in (PREFERRED_PORT, 0):
+def make_server(port=None):
+    for port in ((port,) if port is not None else (PREFERRED_PORT, 0)):
         try:
             return Server(("127.0.0.1", port), Handler)
         except OSError:

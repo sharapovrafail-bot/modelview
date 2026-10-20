@@ -38,6 +38,10 @@ def main():
     if "--serve" in args:          # режим отладки: только сервер, открыть в любом браузере
         server.main()
         return
+    if "--thumbs" in args:         # генератор эскизов для Проводника (запускает ModelViewThumbs.dll)
+        import thumbs
+        thumbs.run()
+        return
 
     try:
         import webview

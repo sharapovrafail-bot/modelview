@@ -1,6 +1,6 @@
 ﻿; Установщик ModelView (Inno Setup 6). Собирается из build\build.bat.
-; По умолчанию ставится для текущего пользователя без прав администратора;
-; в мастере можно выбрать установку для всех пользователей.
+; Ставится для всех пользователей (нужны права администратора): обработчик эскизов
+; Проводника работает в системном процессе-суррогате, который видит только регистрацию в HKLM.
 
 #define AppName "ModelView"
 #ifndef AppVersion
@@ -8,6 +8,8 @@
 #endif
 #define AppExe "ModelView.exe"
 #define ProgId "ModelView.Model"
+#define ThumbClsid "{{8B1C7E52-3F4A-4D6B-9C2E-5A7D0F1B3E64}"
+#define ThumbIface "{{e357fccd-a995-4576-b01f-234630154e96}"
 
 [Setup]
 AppId={{6E2F3B1A-7C4D-4E8B-9A51-0D3C2B7F8E41}
@@ -19,8 +21,7 @@ AppComments=Быстрый просмотрщик STEP, IGES, STL и други�
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequired=admin
 OutputDir=..
 OutputBaseFilename=ModelView-Setup-{#AppVersion}
 SetupIconFile=modelview.ico
@@ -31,6 +32,9 @@ SolidCompression=yes
 WizardStyle=modern
 ChangesAssociations=yes
 CloseApplications=yes
+; закрывать только ModelView.exe; DLL эскизов, занятая Проводником, меняется при перезагрузке
+CloseApplicationsFilter=*.exe
+RestartApplications=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
@@ -43,7 +47,9 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 Name: "assoc"; Description: "Открывать файлы STEP, IGES, STL, OBJ… двойным кликом в ModelView"; GroupDescription: "Файлы:"
 
 [Files]
-Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#DistDir}\*"; DestDir: "{app}"; Excludes: "ModelViewThumbs.dll"; Flags: ignoreversion recursesubdirs createallsubdirs
+; DLL эскизов может быть занята Проводником — тогда заменится после перезагрузки
+Source: "{#DistDir}\ModelViewThumbs.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
@@ -142,5 +148,34 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\shell\ModelVie
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\shell\ModelView"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\shell\ModelView\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""
 
+; обработчик эскизов (миниатюры моделей в Проводнике)
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbClsid}"; ValueType: string; ValueData: "ModelView Thumbnail Provider"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbClsid}\InprocServer32"; ValueType: string; ValueData: "{app}\ModelViewThumbs.dll"
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
+Root: HKA; Subkey: "Software\Classes\.step\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.step\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.stp\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.stp\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.iges\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.iges\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.igs\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.igs\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.brep\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.brep\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.brp\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.brp\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.stl\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.stl\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.obj\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.obj\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.ply\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.ply\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.3mf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.3mf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.glb\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.glb\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.gltf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "Запустить ModelView"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "Запустить ModelView"; Flags: nowait postinstall skipifsilent runasoriginaluser

@@ -75,6 +75,8 @@ const QUALITY = {
 	fine: { linearDeflection: 0.0002, angularDeflection: 0.2 },
 };
 const DEFAULT_COLOR = new THREE.Color().setRGB(0.74, 0.76, 0.8, THREE.SRGBColorSpace);
+// почти чёрный серый цвет из CAD (часто «цвет по умолчанию» в IGES) показываем сталью
+const isDarkGrey = (c) => { const h = c.getHSL({}); return h.s < 0.15 && h.l < 0.3; };
 const EDGE_AUTO_LIMIT = 800000;
 
 const settings = Object.assign(
@@ -227,7 +229,8 @@ function occtToObject(res, name) {
 		if (!m.attributes.normal) g.computeVertexNormals();
 
 		const own = !!m.color;
-		const base = own ? new THREE.Color().setRGB(m.color[0], m.color[1], m.color[2], THREE.SRGBColorSpace) : DEFAULT_COLOR;
+		let base = own ? new THREE.Color().setRGB(m.color[0], m.color[1], m.color[2], THREE.SRGBColorSpace) : DEFAULT_COLOR;
+		if (isDarkGrey(base)) base = DEFAULT_COLOR;
 		const col = new Float32Array(pos.length);
 		for (let k = 0; k < col.length; k += 3) { col[k] = base.r; col[k + 1] = base.g; col[k + 2] = base.b; }
 		let faceColors = false;
@@ -237,6 +240,7 @@ function occtToObject(res, name) {
 				if (!f.color) continue;
 				faceColors = true;
 				c.setRGB(f.color[0], f.color[1], f.color[2], THREE.SRGBColorSpace);
+				if (isDarkGrey(c)) c.copy(DEFAULT_COLOR); // чёрная «бесцветная» грань -> сталь
 				for (let t = f.first; t <= f.last; t++) {
 					for (let j = 0; j < 3; j++) {
 						const v = idx[t * 3 + j] * 3;
@@ -475,6 +479,7 @@ function makeMaterial(mesh, mode) {
 			// ненасыщенные (серые/белые) детали показываем как сталь
 			const hsl = (ud.color || DEFAULT_COLOR).getHSL({});
 			const metal = hsl.s < 0.15 && !ud.map;
+			if (metal && !vc && hsl.l < 0.3) color.copy(DEFAULT_COLOR); // чёрный «бесцветный» -> сталь
 			m = new THREE.MeshStandardMaterial({
 				...common, color: metal ? (vc ? new THREE.Color(0xb4b9c0) : color.clone().multiplyScalar(0.8)) : color,
 				vertexColors: vc, map: ud.map || null,

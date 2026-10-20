@@ -1,0 +1,4 @@
+LIBRARY ModelViewThumbs
+EXPORTS
+	DllGetClassObject PRIVATE
+	DllCanUnloadNow PRIVATE
