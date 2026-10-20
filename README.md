@@ -18,8 +18,8 @@
 - Запуск из исходников: `ModelView.bat` (нужны Python 3 и `pip install pywebview`).
 - Отладка в браузере: `python server.py [файл]` — печатает адрес `http://127.0.0.1:47615/`.
 - Сборка установщика: `pip install pyinstaller pillow pywebview`, Inno Setup 6
-  (`winget install JRSoftware.InnoSetup`), затем `builduild.bat` → `ModelView-Setup-<версия>.exe`.
-  Версия задаётся в `builduild.bat`.
+  (`winget install JRSoftware.InnoSetup`), затем `build\build.bat` → `ModelView-Setup-<версия>.exe`.
+  Версия задаётся в `build\build.bat`.
 
 ## Возможности
 - Режимы: Реалистичный (металл, отражения, тени), Каркас, Скрытые линии, Тонированный, Рентген.
