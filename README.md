@@ -17,7 +17,7 @@
 
 **Из исходников:** `ModelView.bat` (нужен Python 3). Режим без окна для отладки: `python server.py --serve [файл]`.
 
-**Сборка exe:** `python -m pip install pyinstaller pillow`, затем `builduild.bat` → `ModelView.exe`.
+**Сборка exe:** `python -m pip install pyinstaller pillow`, затем `build\build.bat` → `ModelView.exe`.
 
 ## Возможности
 - Режимы: Реалистичный (металл, отражения, тени), Каркас, Скрытые линии, Тонированный, Рентген.
