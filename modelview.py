@@ -160,7 +160,7 @@ class Api:
         ext = os.path.splitext(name)[1].lower().lstrip(".")
         kinds = {"pdf": "PDF", "png": "Изображение PNG", "stl": "STL", "obj": "OBJ"}
         types = (f"{kinds.get(ext, ext.upper())} (*.{ext})", "Все файлы (*.*)") if ext else ("Все файлы (*.*)",)
-        res = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=name, file_types=types)
+        res = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=name, file_types=types)
         if not res:
             return ""
         path = res if isinstance(res, str) else res[0]
