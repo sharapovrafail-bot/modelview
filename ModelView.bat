@@ -1,3 +1,3 @@
 @echo off
-rem Запуск просмотрщика ModelView. Можно передать путь к файлу.
-start "" pythonw "%~dp0server.py" %*
+rem Запуск ModelView из исходников (нужен Python 3 и pip install pywebview).
+start "" pythonw "%~dp0modelview.py" %*

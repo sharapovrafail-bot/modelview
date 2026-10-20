@@ -1,46 +1,26 @@
-"""Быстрый просмотрщик 3D/CAD файлов (STEP, IGES, BREP, STL, OBJ, PLY, 3MF, GLB).
+"""Встроенный HTTP-сервер ModelView: отдаёт интерфейс (app/) и открываемый файл.
 
-Запуск:  pythonw server.py [путь_к_файлу]
-Поднимает локальный HTTP-сервер (только 127.0.0.1) и открывает окно Edge/Chrome
-в режиме приложения. Сервер сам завершается после закрытия окна.
+Используется окном программы (modelview.py). Отдельно, для отладки в браузере:
+    python server.py [путь_к_файлу]   -> печатает адрес http://127.0.0.1:порт/
+Слушает только 127.0.0.1.
 """
 import http.server
 import json
 import mimetypes
 import os
 import shutil
-import socket
-import subprocess
 import sys
-import threading
-import time
 import urllib.parse
-import webbrowser
 
-# в собранном ModelView.exe (PyInstaller) файлы интерфейса распакованы в sys._MEIPASS
+# в собранной программе (PyInstaller) файлы интерфейса лежат в sys._MEIPASS
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 APP_DIR = os.path.join(BASE_DIR, "app")
 PREFERRED_PORT = 47615
-IDLE_TIMEOUT = 180      # сек без пинга -> выход (страница пингует раз в 5 с, в фоне реже)
-BYE_GRACE = 4           # сек после закрытия окна, чтобы пережить перезагрузку страницы
-STARTUP_TIMEOUT = 90    # сек на первое подключение окна
 
 mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("text/javascript", ".js")
 
 initial_file = None
-last_ping = time.time()
-got_ping = False
-bye_at = None
-lock = threading.Lock()
-
-
-def touch():
-    global last_ping, got_ping, bye_at
-    with lock:
-        last_ping = time.time()
-        got_ping = True
-        bye_at = None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -70,26 +50,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             shutil.copyfileobj(f, self.wfile, 1 << 20)
 
-    def do_POST(self):
-        global bye_at
-        n = int(self.headers.get("Content-Length") or 0)
-        if n:
-            self.rfile.read(n)
-        if self.path == "/api/bye":
-            with lock:
-                bye_at = time.time()
-        self._send(204, b"")
-
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         p = url.path
 
-        if p == "/api/ping":
-            touch()
-            return self._send(200, b"{}")
-
         if p == "/api/initial":
-            touch()
             info = {}
             if initial_file and os.path.isfile(initial_file):
                 info = {"name": os.path.basename(initial_file),
@@ -125,64 +90,13 @@ def make_server():
     raise RuntimeError("Не удалось открыть порт")
 
 
-def find_browser():
-    candidates = []
-    for env in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
-        base = os.environ.get(env)
-        if base:
-            candidates.append(os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"))
-            candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return shutil.which("msedge") or shutil.which("chrome")
-
-
-def open_window(url):
-    exe = find_browser()
-    if not exe:
-        webbrowser.open(url)
-        return
-    profile = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FastCadViewer", "profile")
-    os.makedirs(profile, exist_ok=True)
-    subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={profile}",
-                      "--no-first-run", "--no-default-browser-check",
-                      "--window-size=1400,900"],
-                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-
-
-def watchdog(server):
-    start = time.time()
-    while True:
-        time.sleep(1)
-        now = time.time()
-        with lock:
-            if not got_ping and now - start > STARTUP_TIMEOUT:
-                break
-            if got_ping and now - last_ping > IDLE_TIMEOUT:
-                break
-            if bye_at and now - bye_at > BYE_GRACE:
-                break
-    server.shutdown()
-
-
 def main():
     global initial_file
-    args = [a for a in sys.argv[1:] if a.strip()]
-    if "--install" in args or "--uninstall" in args:
-        import installer
-        sys.exit(installer.install() if "--install" in args else installer.uninstall())
-    serve_only = "--serve" in args          # только сервер, без окна и автозакрытия
-    args = [a for a in args if a != "--serve"]
+    args = [a for a in sys.argv[1:] if a.strip() and a != "--serve"]
     if args:
         initial_file = os.path.abspath(args[0].strip().strip('"'))
     server = make_server()
-    port = server.server_address[1]
-    if serve_only:
-        print(f"http://127.0.0.1:{port}/", flush=True)
-    else:
-        threading.Thread(target=watchdog, args=(server,), daemon=True).start()
-        open_window(f"http://127.0.0.1:{port}/")
+    print(f"http://127.0.0.1:{server.server_address[1]}/", flush=True)
     server.serve_forever()
 
 

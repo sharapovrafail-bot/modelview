@@ -358,6 +358,7 @@ async function openBuffer(name, buffer, opts = {}) {
 		object.name = object.name || name;
 		setModel(object, yUp);
 		document.title = name + ' — ModelView';
+		if (window.pywebview && window.pywebview.api) window.pywebview.api.set_title(document.title);
 		if (!opts.noRecent) saveRecent();
 	} catch (e) {
 		console.error(e);
@@ -1266,6 +1267,7 @@ $('qShot').onclick = $('expPng').onclick = () => {
 	canvas.toBlob((blob) => download(blob, baseName() + '.png'));
 };
 $('qFull').onclick = () => {
+	if (window.pywebview && window.pywebview.api) { window.pywebview.api.toggle_fullscreen(); return; }
 	if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => { });
 };
 
@@ -1367,9 +1369,6 @@ function niceStep(x) {
 // Связь с локальным сервером
 // =====================================================================
 if (location.protocol.startsWith('http')) {
-	fetch('api/ping').catch(() => { });
-	setInterval(() => fetch('api/ping').catch(() => { }), 5000);
-	window.addEventListener('pagehide', () => navigator.sendBeacon('api/bye', ''));
 	fetch('api/initial').then((r) => r.json()).then(async (info) => {
 		if (!info.name) return;
 		showLoading(`Читаю ${info.name}…`);
