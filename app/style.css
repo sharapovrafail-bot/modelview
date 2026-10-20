@@ -272,3 +272,11 @@ button.wide:hover { background: rgba(47,123,255,.2); border-color: var(--accent)
 .dt-close:hover { background: rgba(255,255,255,.1); color: #fff; }
 .dt-close svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
 #loadCancel { margin-top: 6px; padding: 0 22px; }
+
+/* сравнение */
+.cmp-name { color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+input.num { background: rgba(0,0,0,.3); border: 1px solid var(--line2); border-radius: 7px; height: 30px; padding: 0 8px; color: var(--text); width: 100%; }
+button.primary-btn { background: linear-gradient(180deg, #3584ff, #2266e0); border-color: #3584ff; color: #fff; }
+button.primary-btn:disabled { opacity: .45; cursor: default; }
+.legend { display: flex; flex-direction: column; gap: 5px; margin: 12px 0 10px; font-size: 12px; color: var(--text2); }
+.legend i { display: inline-block; width: 22px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }

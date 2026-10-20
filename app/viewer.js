@@ -9,6 +9,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { faceTriangles, analyzeFace, relate, mergeCoaxialFaces } from './measure-math.js';
+import { compareSoups } from './compare.js';
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -50,6 +51,7 @@ const ICONS = {
 	copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
 	com: `<path d="${CUBE}"/><path d="${CUBE_IN}" stroke-dasharray="1.6 1.6"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/>`,
 	dims: '<path d="M4 8h16M4 5v6M20 5v6"/><path d="M4 18h10M4 15v6M14 15v6"/>',
+	compare: '<path d="M4 5h7v14H4z"/><path d="M13 5h7v14h-7z" stroke-dasharray="2 1.6"/><path d="M12 3v18"/>',
 	diameter: '<circle cx="12" cy="12" r="8"/><path d="M6.3 17.7 17.7 6.3"/><path d="M15 6.3h2.7V9M9 17.7H6.3V15"/>',
 	faces: '<path d="M4 6h7v12H4z"/><path d="M13 6h7v12h-7z" opacity=".55"/><path d="M8 12h8M14 10l2 2-2 2M10 10l-2 2 2 2"/>',
 	trash: '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 13h10l1-13"/>',
@@ -83,7 +85,7 @@ const isDarkGrey = (c) => { const h = c.getHSL({}); return h.s < 0.15 && h.l < 0
 const EDGE_AUTO_LIMIT = 800000;
 
 const settings = Object.assign(
-	{ edges: true, dims: true, shadows: true, grid: false, ortho: false, props: true, quality: 'normal', density: '7.85', mode: 'real' },
+	{ edges: true, dims: true, shadows: true, grid: false, ortho: false, props: true, quality: 'normal', density: '7.85', mode: 'real', meshUnit: 'mm' },
 	safeJson(lsGet('mvSettings')));
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function safeJson(s) { try { return JSON.parse(s) || {}; } catch { return {}; } }
@@ -94,7 +96,7 @@ function saveSettings() { try { localStorage.setItem('mvSettings', JSON.stringif
 // =====================================================================
 const canvas = $('canvas');
 const viewport = $('viewport');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, stencil: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.localClippingEnabled = true;
 renderer.shadowMap.enabled = true;
@@ -359,6 +361,15 @@ async function parseModel(name, buffer) {
 		}
 		return { object: occtToObject(res, name), yUp: false, cached };
 	}
+	const r = await parseMeshFormat(ext, name, buffer);
+	const k = MESH_UNITS[settings.meshUnit] || 1;
+	if (k !== 1 && ext !== 'glb' && ext !== 'gltf') r.object.scale.multiplyScalar(k);
+	return r;
+}
+// единицы в файлах-сетках не записаны: по умолчанию миллиметры, можно сменить в «Свойствах»
+const MESH_UNITS = { mm: 1, cm: 10, m: 1000, in: 25.4 };
+const MESH_UNIT_NAMES = { mm: 'мм', cm: 'см', m: 'м', in: 'дюймы' };
+async function parseMeshFormat(ext, name, buffer) {
 	switch (ext) {
 		case 'stl': return { object: geometryToObject(new STLLoader().parse(buffer), name), yUp: false };
 		case 'ply': return { object: geometryToObject(new PLYLoader().parse(buffer), name), yUp: false };
@@ -397,6 +408,7 @@ async function openBufferNow(name, buffer, opts) {
 		if (opts.replace && activeDoc >= 0) {
 			// та же вкладка (например, сменили точность) — старая модель удаляется в setModel
 		} else {
+			exitCompare();
 			saveActiveDoc();
 			if (model.object) { clearMeasure(); select(null); modelRoot.remove(model.object); }
 			model.object = null;
@@ -430,6 +442,7 @@ function disposeObject(obj) {
 }
 
 function setModel(object, yUp) {
+	exitCompare();
 	clearMeasure();
 	if (model.object) { modelRoot.remove(model.object); disposeObject(model.object); }
 	model.object = object;
@@ -457,7 +470,7 @@ function setModel(object, yUp) {
 	computeStats();
 	$('welcome').classList.add('hidden');
 	setView('iso');
-	if (sectionOn) setupSection();
+	if (sectionOn) { refreshCaps(); setupSection(); }
 	makeThumb();
 	updateProps();
 	updateCard();
@@ -519,7 +532,7 @@ function patchSection(m) {
 
 function makeMaterial(mesh, mode) {
 	const ud = mesh.userData;
-	const common = { side: THREE.DoubleSide, clippingPlanes: clipping, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
+	const common = { side: THREE.DoubleSide, clippingPlanes: clipping, clipShadows: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
 	const vc = !!ud.vertexColors;
 	const color = vc ? new THREE.Color(0xffffff) : (ud.color || DEFAULT_COLOR).clone();
 	let m;
@@ -586,6 +599,7 @@ function applyMode() {
 	const wantEdges = mode === 'hidden' || mode === 'xray' || (settings.edges && mode !== 'wire');
 	if (wantEdges && model.object) ensureEdges(); else setEdgesVisible(false);
 	if (selected) highlight(selected.obj, true);
+	if (sectionOn) { refreshCaps(); setupSection(); }
 	requestRender();
 }
 
@@ -859,6 +873,7 @@ $('treeCollapse').onclick = () => {
 
 function setVisible(obj, v) {
 	obj.visible = v;
+	if (sectionOn) refreshCaps();
 	const row = rowOf.get(obj);
 	if (row) {
 		row.classList.toggle('off', !v);
@@ -931,7 +946,7 @@ function updateProps() {
 	const S = st.size;
 	const modelRows = [
 		['Имя:', selected ? (selected.obj.name || 'Тело') : model.name],
-		['Формат:', model.format],
+		['Формат:', model.format + (OCCT_FORMATS[model.ext] || model.ext === 'glb' || model.ext === 'gltf' ? '' : ', единицы: ' + MESH_UNIT_NAMES[settings.meshUnit])],
 		['Размер:', fmtSize(model.size)],
 		['Деталей:', String(selected ? countLeaves(selected.obj) : parts.parts)],
 		['Тела:', String(st.bodies)],
@@ -1058,7 +1073,7 @@ function loadDoc(i) {
 	updateOrthoFrustum();
 	persp.updateProjectionMatrix();
 	controls.update();
-	if (sectionOn) setupSection();
+	if (sectionOn) { refreshCaps(); setupSection(); }
 	updateProps();
 	updateCard();
 	setWindowTitle();
@@ -1068,6 +1083,7 @@ function loadDoc(i) {
 
 function switchDoc(i) {
 	if (i === activeDoc || !docs[i]) return;
+	exitCompare();
 	saveActiveDoc();
 	clearMeasure();
 	select(null);
@@ -1077,6 +1093,7 @@ function switchDoc(i) {
 
 function closeDoc(i) {
 	if (!docs[i]) return;
+	if (compareState && (i === activeDoc || docs[i] === compareState.B)) exitCompare();
 	if (i === activeDoc) {
 		clearMeasure();
 		select(null);
@@ -1106,6 +1123,7 @@ function showEmpty() {
 }
 
 function renderTabs() {
+	fillCompareTargets();
 	const bar = $('docTabs');
 	bar.hidden = docs.length < 2;
 	bar.innerHTML = '';
@@ -1179,6 +1197,136 @@ async function meshCachePut(key, res) {
 		meshCacheSaveMeta(keep);
 	} catch { }
 }
+
+// =====================================================================
+// Сравнение двух ревизий
+// =====================================================================
+let compareState = null;
+
+// треугольники видимых тел документа в координатах модели (без поворота Y↑/Z↑)
+function soupOf(obj) {
+	obj.updateMatrixWorld(true);
+	const inv = new THREE.Matrix4().copy(obj.matrixWorld).invert();
+	const parts = [];
+	let total = 0;
+	obj.traverse((m) => {
+		if (!m.isMesh || !isShown(m) || (m.name && m.name.startsWith('__'))) return;
+		const M = new THREE.Matrix4().multiplyMatrices(inv, m.matrixWorld);
+		const g = m.geometry, P = g.attributes.position.array, I = g.index ? g.index.array : null;
+		const n = I ? I.length : P.length / 3;
+		const out = new Float32Array(n * 3);
+		const v = new THREE.Vector3();
+		for (let k = 0; k < n; k++) {
+			const i = (I ? I[k] : k) * 3;
+			v.set(P[i], P[i + 1], P[i + 2]).applyMatrix4(M);
+			out[k * 3] = v.x; out[k * 3 + 1] = v.y; out[k * 3 + 2] = v.z;
+		}
+		parts.push(out); total += out.length;
+	});
+	const soup = new Float32Array(total);
+	let o = 0;
+	for (const p of parts) { soup.set(p, o); o += p.length; }
+	return soup;
+}
+
+function fillCompareTargets() {
+	const sel = $('cmpB');
+	const prev = sel.value;
+	sel.innerHTML = '';
+	docs.forEach((d, i) => {
+		if (i === activeDoc) return;
+		const o = document.createElement('option');
+		o.value = i; o.textContent = d.name;
+		sel.append(o);
+	});
+	if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+	$('cmpA').textContent = model.name || '—';
+	$('cmpRun').disabled = !model.object || !sel.options.length;
+	$('cmpHint').hidden = sel.options.length > 0;
+	if (model.object && !$('cmpTol').dataset.user) {
+		// допуск не меньше погрешности триангуляции, иначе кривые поверхности «отличаются»
+		const s = model.box.getSize(new THREE.Vector3());
+		const q = (QUALITY[settings.quality] || QUALITY.normal).linearDeflection;
+		const tol = Math.max(0.01, 2 * q * (s.x + s.y + s.z) / 3);
+		$('cmpTol').value = Number(tol.toPrecision(2));
+	}
+}
+
+async function runCompare() {
+	const bi = +$('cmpB').value;
+	const B = docs[bi];
+	if (!model.object || !B) return;
+	const tol = Math.max(1e-4, parseFloat(String($('cmpTol').value).replace(',', '.')) || 0.05);
+	exitCompare();
+	clearMeasure();
+	select(null);
+	showLoading('Сравниваю модели…');
+	await new Promise((r) => setTimeout(r, 30));
+	try {
+		const soupA = soupOf(model.object);
+		const soupB = soupOf(B.object);
+		const res = await compareSoups(soupA, soupB, tol, (which, f) => {
+			$('loadingText').textContent = `Сравниваю модели… ${which === 'A' ? 'A → B' : 'B → A'} ${Math.round(f * 100)}%`;
+		});
+		// вид сравнения: A окрашена по отклонению, добавленное в B — зелёным
+		const group = new THREE.Group();
+		group.position.copy(model.object.position);
+		group.quaternion.copy(model.object.quaternion);
+		group.scale.copy(model.object.scale);
+		const gA = new THREE.BufferGeometry();
+		gA.setAttribute('position', new THREE.BufferAttribute(soupA, 3));
+		gA.setAttribute('color', new THREE.BufferAttribute(res.colors, 3));
+		gA.computeVertexNormals();
+		group.add(new THREE.Mesh(gA, patchSection(new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, metalness: 0.1, roughness: 0.6, clippingPlanes: clipping }))));
+		if (res.added.length) {
+			const gB = new THREE.BufferGeometry();
+			gB.setAttribute('position', new THREE.BufferAttribute(res.added, 3));
+			gB.computeVertexNormals();
+			group.add(new THREE.Mesh(gB, new THREE.MeshStandardMaterial({ color: 0x22c55e, transparent: true, opacity: 0.8, side: THREE.DoubleSide, metalness: 0.1, roughness: 0.5, clippingPlanes: clipping, polygonOffset: true, polygonOffsetFactor: -1 })));
+		}
+		group.traverse((o) => { o.raycast = () => { }; });
+		model.object.visible = false;
+		modelRoot.add(group);
+		compareState = { group, B, res };
+		refreshCaps();
+		const sA = model.stats, sB = statsFor(B.object);
+		const pct = (a, b) => (b > 0 ? ' (' + fmtNum(100 * a / b, 1) + '%)' : '');
+		const same = res.areaRemoved < res.areaA * 1e-4 && res.areaAdded < res.areaB * 1e-4;
+		$('cmpResult').innerHTML = `<div class="mres"><b>${same ? 'Модели совпадают в пределах допуска' : 'Найдены отличия'}</b><div class="kv">${kv([
+			['Допуск:', fmtNum(tol, 3) + ' мм'],
+			['Изменено в A:', fmtNum(res.areaRemoved, 1) + ' мм²' + pct(res.areaRemoved, res.areaA)],
+			['Добавлено в B:', fmtNum(res.areaAdded, 1) + ' мм²' + pct(res.areaAdded, res.areaB)],
+			['Макс. отклонение:', (res.maxDev > tol ? fmtNum(res.maxDev, 3) + ' мм' : '≤ допуска') + (res.missing ? '; есть элементы, отсутствующие в B (дальше ' + fmtNum(tol * 10, 2) + ' мм)' : '')],
+			['Габариты A:', `${fix2(sA.size.x)} × ${fix2(sA.size.y)} × ${fix2(sA.size.z)}`],
+			['Габариты B:', `${fix2(sB.size.x)} × ${fix2(sB.size.y)} × ${fix2(sB.size.z)}`],
+			['Объём A / B:', (sA.closed ? fmtNum(sA.vol / 1000, 2) : '—') + ' / ' + (sB.closed ? fmtNum(sB.vol / 1000, 2) : '—') + ' см³'],
+		])}</div></div>`;
+		$('cmpExit').hidden = false;
+	} catch (e) {
+		console.error(e);
+		alert('Не удалось сравнить модели:\n' + (e.message || e));
+	} finally {
+		hideLoading();
+		requestRender();
+	}
+}
+
+function exitCompare() {
+	if (!compareState) return;
+	modelRoot.remove(compareState.group);
+	compareState.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+	compareState = null;
+	if (model.object) model.object.visible = true;
+	$('cmpExit').hidden = true;
+	$('cmpResult').innerHTML = '';
+	refreshCaps();
+	requestRender();
+}
+
+$('cmpRun').onclick = runCompare;
+$('cmpExit').onclick = exitCompare;
+$('cmpOpen').onclick = () => $('fileInput').click();
+$('cmpTol').oninput = () => { $('cmpTol').dataset.user = '1'; };
 
 // =====================================================================
 // Последние файлы и избранное (IndexedDB)
@@ -1289,7 +1437,10 @@ function setupSection() {
 	clipPlane.normal.copy(n);
 	clipPlane.constant = flip ? -pos : pos;
 	$('secVal').textContent = fix2(pos) + ' мм';
-	sectionUniform.value = sectionOn && $('secFill').checked ? 1 : 0;
+	const fill = sectionOn && $('secFill').checked;
+	// в прозрачных режимах сплошной срез не строим — подсвечиваем внутренность
+	sectionUniform.value = fill && !capsSupported() ? 1 : 0;
+	updateCapPlane();
 	requestRender();
 }
 function setSection(on) {
@@ -1300,7 +1451,60 @@ function setSection(on) {
 	$$('.tool[data-tool=section]').forEach((b) => b.classList.toggle('on', on));
 	scene.traverse((o) => { if (o.material) o.material.needsUpdate = true; });
 	edgeMaterial.needsUpdate = true;
+	refreshCaps();
 	setupSection();
+}
+
+// ---------- сплошная заливка среза (трафаретный буфер) ----------
+// Для каждого тела рисуем в трафарет задние грани (+1) и передние (−1) без цвета;
+// там, где после этого трафарет ≠ 0, плоскость сечения проходит внутри материала —
+// туда рисуется «крышка».
+const capGroup = new THREE.Group();
+capGroup.renderOrder = 1;
+scene.add(capGroup);
+const capMat = new THREE.MeshStandardMaterial({
+	color: 0x3d7dff, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide,
+	stencilWrite: true, stencilRef: 0, stencilFunc: THREE.NotEqualStencilFunc,
+	stencilFail: THREE.ReplaceStencilOp, stencilZFail: THREE.ReplaceStencilOp, stencilZPass: THREE.ReplaceStencilOp,
+});
+const capPlane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), capMat);
+capPlane.renderOrder = 3;
+capPlane.raycast = () => { };
+capPlane.onAfterRender = (r) => r.clearStencil();
+const stencilMat = (side, op) => new THREE.MeshBasicMaterial({
+	side, colorWrite: false, depthWrite: false, depthTest: false, clippingPlanes: [clipPlane],
+	stencilWrite: true, stencilFunc: THREE.AlwaysStencilFunc, stencilFail: op, stencilZFail: op, stencilZPass: op,
+});
+const stencilBack = stencilMat(THREE.BackSide, THREE.IncrementWrapStencilOp);
+const stencilFront = stencilMat(THREE.FrontSide, THREE.DecrementWrapStencilOp);
+
+function capsSupported() { return settings.mode !== 'xray' && settings.mode !== 'wire'; }
+function refreshCaps() {
+	capGroup.clear();
+	if (!(sectionOn && $('secFill').checked && model.object && capsSupported() && !compareState)) return;
+	modelRoot.updateMatrixWorld(true);
+	for (const m of model.meshes) {
+		if (!m.isMesh || !isShown(m)) continue;
+		for (const mat of [stencilBack, stencilFront]) {
+			const h = new THREE.Mesh(m.geometry, mat);
+			h.matrixAutoUpdate = false;
+			h.matrix.copy(m.matrixWorld);
+			h.renderOrder = 2;
+			h.raycast = () => { };
+			capGroup.add(h);
+		}
+	}
+	capGroup.add(capPlane);
+	updateCapPlane();
+}
+function updateCapPlane() {
+	if (!capPlane.parent) return;
+	const c = model.box.getCenter(new THREE.Vector3());
+	const R = model.radius * 2.5;
+	clipPlane.projectPoint(c, capPlane.position);
+	capPlane.lookAt(capPlane.position.clone().add(clipPlane.normal));
+	capPlane.scale.set(R, R, 1);
+	capPlane.updateMatrix();
 }
 $$('#secAxis button').forEach((b) => b.onclick = () => {
 	secAxis = b.dataset.axis;
@@ -1309,7 +1513,7 @@ $$('#secAxis button').forEach((b) => b.onclick = () => {
 });
 $('secPos').oninput = setupSection;
 $('secFlip').onchange = setupSection;
-$('secFill').onchange = setupSection;
+$('secFill').onchange = () => { refreshCaps(); setupSection(); };
 $('secOn').onchange = (e) => setSection(e.target.checked);
 
 // =====================================================================
@@ -1626,6 +1830,7 @@ function showPage(p) {
 	$$('.nav-item[data-page]').forEach((b) => b.classList.toggle('on', b.dataset.page === p));
 	$$('#side .page').forEach((x) => x.classList.toggle('on', x.dataset.page === p));
 	if (p === 'recent' || p === 'favorites') refreshLists();
+	if (p === 'compare') fillCompareTargets();
 }
 $$('.nav-item[data-page]').forEach((b) => b.onclick = () => showPage(b.dataset.page));
 $('navOpen').onclick = () => $('fileInput').click();
@@ -1655,6 +1860,11 @@ $('optYUp').onchange = (e) => {
 };
 $('density').value = settings.density;
 $('density').onchange = (e) => { settings.density = e.target.value; saveSettings(); updateProps(); };
+$('meshUnit').value = settings.meshUnit;
+$('meshUnit').onchange = (e) => {
+	settings.meshUnit = e.target.value; saveSettings();
+	if (model.buffer && !OCCT_FORMATS[model.ext]) openBuffer(model.name, model.buffer, { noRecent: true, replace: true });
+};
 $('quality').value = settings.quality;
 $('quality').onchange = (e) => {
 	settings.quality = e.target.value; saveSettings();

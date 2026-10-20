@@ -54,6 +54,7 @@
     <button class="nav-item on" data-page="model"><i data-icon="home"></i><span>Модель</span></button>
     <button class="nav-item" data-page="sections"><i data-icon="sectionBox"></i><span>Секции</span></button>
     <button class="nav-item" data-page="measures"><i data-icon="measure"></i><span>Измерения</span></button>
+    <button class="nav-item" data-page="compare"><i data-icon="compare"></i><span>Сравнение</span></button>
     <button class="nav-item" data-page="analysis"><i data-icon="analysis"></i><span>Анализ</span></button>
     <button class="nav-item" data-page="props"><i data-icon="props"></i><span>Свойства</span></button>
     <button class="nav-item" data-page="export"><i data-icon="export"></i><span>Экспорт</span></button>
@@ -132,6 +133,35 @@
       </div>
     </div>
 
+    <!-- Сравнение -->
+    <div class="page" data-page="compare">
+      <div class="glass panel">
+        <div class="panel-head"><i data-icon="compare" class="accent"></i><span>Сравнение ревизий</span></div>
+        <div class="pad">
+          <div class="field">Модель A (текущая вкладка)<b id="cmpA" class="cmp-name">—</b></div>
+          <label class="field">Сравнить с моделью B
+            <select id="cmpB"></select>
+          </label>
+          <div id="cmpHint" class="muted small">Откройте вторую ревизию — она появится здесь.</div>
+          <button class="wide" id="cmpOpen" style="margin:6px 0 10px"><i data-icon="folder"></i>Открыть вторую модель…</button>
+          <label class="field">Допуск, мм
+            <input id="cmpTol" type="number" min="0.001" step="0.01" value="0.05" class="num">
+          </label>
+          <div class="stack">
+            <button class="wide primary-btn" id="cmpRun"><i data-icon="compare"></i>Сравнить</button>
+            <button class="wide" id="cmpExit" hidden>Выйти из сравнения</button>
+          </div>
+          <div class="legend">
+            <span><i style="background:#b9c1cc"></i>совпадает</span>
+            <span><i style="background:linear-gradient(90deg,#ffc23d,#ff3b3b)"></i>отклонение / только в A</span>
+            <span><i style="background:#22c55e"></i>только в B</span>
+          </div>
+          <div id="cmpResult" class="mlist"></div>
+          <div class="muted small">Модели сравниваются в общей системе координат — как они расположены в файлах.</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Анализ -->
     <div class="page" data-page="analysis">
       <div class="glass panel">
@@ -154,6 +184,14 @@
               <option value="8.9">Медь — 8,9</option>
               <option value="4.5">Титан — 4,5</option>
               <option value="1.2">Пластик (ABS/PLA) — 1,2</option>
+            </select>
+          </label>
+          <label class="field">Единицы STL / OBJ / PLY / 3MF
+            <select id="meshUnit">
+              <option value="mm" selected>Миллиметры</option>
+              <option value="cm">Сантиметры</option>
+              <option value="m">Метры</option>
+              <option value="in">Дюймы</option>
             </select>
           </label>
           <label class="field">Точность триангуляции STEP/IGES
