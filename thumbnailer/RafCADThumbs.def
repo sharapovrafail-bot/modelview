@@ -1,4 +1,4 @@
-LIBRARY ModelViewThumbs
+LIBRARY RafCADThumbs
 EXPORTS
 	DllGetClassObject PRIVATE
 	DllCanUnloadNow PRIVATE

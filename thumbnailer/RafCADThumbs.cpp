@@ -1,8 +1,8 @@
-// ModelViewThumbs.dll — обработчик эскизов Проводника для 3D-файлов (STEP, IGES, STL, OBJ…).
+// RafCADThumbs.dll — обработчик эскизов RafCAD View: эскизов Проводника для 3D-файлов (STEP, IGES, STL, OBJ…).
 //
 // Проводник передаёт содержимое файла (IInitializeWithStream) и просит картинку
 // нужного размера (IThumbnailProvider). Сама отрисовка делается генератором
-// ModelView.exe --thumbs (лежит рядом с DLL): DLL отправляет ему файл по
+// RafCADView.exe --thumbs (лежит рядом с DLL): DLL отправляет ему файл по
 // 127.0.0.1:47621 и получает PNG. Если генератор не запущен — запускает его.
 //
 // Регистрация — установщиком (HKCU\Software\Classes\CLSID\{...}), см. build\setup.iss.
@@ -25,7 +25,7 @@
 #pragma comment(lib, "windowscodecs.lib")
 
 // {8B1C7E52-3F4A-4D6B-9C2E-5A7D0F1B3E64}
-static const CLSID CLSID_ModelViewThumbs =
+static const CLSID CLSID_RafCADThumbs =
 	{ 0x8b1c7e52, 0x3f4a, 0x4d6b, { 0x9c, 0x2e, 0x5a, 0x7d, 0x0f, 0x1b, 0x3e, 0x64 } };
 
 static const unsigned short THUMB_PORT = 47621;
@@ -34,11 +34,11 @@ static const ULONGLONG MAX_BYTES = 300ull * 1024 * 1024;
 static HMODULE g_module = nullptr;
 static long g_refs = 0;
 
-// Журнал для диагностики: %TEMP%\ModelViewThumbs.log (пишется, только если файл уже существует)
+// Журнал для диагностики: %TEMP%\RafCADThumbs.log (пишется, только если файл уже существует)
 static void Log(const char* fmt, ...) {
 	wchar_t path[MAX_PATH];
 	if (!GetTempPathW(MAX_PATH, path)) return;
-	wcscat_s(path, L"ModelViewThumbs.log");
+	wcscat_s(path, L"RafCADThumbs.log");
 	if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return;
 	char buf[512];
 	va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
@@ -79,7 +79,7 @@ static void StartGenerator() {
 	wchar_t path[MAX_PATH];
 	if (!GetModuleFileNameW(g_module, path, MAX_PATH)) return;
 	PathRemoveFileSpecW(path);
-	PathAppendW(path, L"ModelView.exe");
+	PathAppendW(path, L"RafCADView.exe");
 	std::wstring cmd = L"\"" + std::wstring(path) + L"\" --thumbs";
 	STARTUPINFOW si = { sizeof(si) };
 	PROCESS_INFORMATION pi = {};
@@ -304,7 +304,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv) {
 	*ppv = nullptr;
 	Log("DllGetClassObject");
-	if (clsid != CLSID_ModelViewThumbs) return CLASS_E_CLASSNOTAVAILABLE;
+	if (clsid != CLSID_RafCADThumbs) return CLASS_E_CLASSNOTAVAILABLE;
 	Factory* f = new (std::nothrow) Factory();
 	if (!f) return E_OUTOFMEMORY;
 	HRESULT hr = f->QueryInterface(riid, ppv);

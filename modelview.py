@@ -1,6 +1,6 @@
-"""ModelView — настольное приложение (собственное окно на WebView2, без браузера).
+"""RafCAD View — настольное приложение (собственное окно на WebView2, без браузера).
 
-Запуск:  ModelView.exe [путь_к_файлу]
+Запуск:  RafCADView.exe [путь_к_файлу]
 Интерфейс отдаётся встроенным сервером из server.py (только 127.0.0.1) и
 показывается в окне WebView2 — том же движке, что использует Windows для
 своих приложений. Ни Edge, ни профилей браузера, ни входа в аккаунт.
@@ -21,8 +21,33 @@ import time
 
 import server
 
-DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ModelView")
+_LOCAL = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+DATA_DIR = os.path.join(_LOCAL, "RafCADView")
+OLD_DATA_DIR = os.path.join(_LOCAL, "ModelView")  # прежнее название программы
 INSTANCE_FILE = os.path.join(DATA_DIR, "instance.json")
+APP_NAME = "RafCAD View"
+
+
+def app_version():
+    try:
+        with open(os.path.join(server.APP_DIR, "version.json"), encoding="utf-8") as f:
+            return json.load(f).get("version", "")
+    except Exception:
+        return ""
+
+
+APP_TITLE = (APP_NAME + " " + app_version()).strip()
+
+
+def migrate_old_data():
+    """Настройки, последние файлы и кэш от ModelView переезжают в папку RafCADView."""
+    if os.path.isdir(OLD_DATA_DIR) and not os.path.exists(DATA_DIR):
+        try:
+            os.rename(OLD_DATA_DIR, DATA_DIR)
+        except OSError:
+            pass
+
+
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
@@ -34,7 +59,7 @@ class InstanceLock:
     """Именованный мьютекс сессии: запуски по одному решают, кто главное окно."""
 
     def __enter__(self):
-        self.h = kernel32.CreateMutexW(None, False, "Local\\ModelView.SingleInstance")
+        self.h = kernel32.CreateMutexW(None, False, "Local\\RafCADView.SingleInstance")
         if self.h:
             kernel32.WaitForSingleObject(self.h, 15000)
         return self
@@ -112,7 +137,7 @@ def remove_instance_file():
 
 
 def fail(text):
-    ctypes.windll.user32.MessageBoxW(None, text, "ModelView", 0x10)
+    ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, 0x10)
     sys.exit(1)
 
 
@@ -134,7 +159,7 @@ def main():
     if "--serve" in args:          # режим отладки: только сервер, открыть в любом браузере
         server.main()
         return
-    if "--thumbs" in args:         # генератор эскизов для Проводника (запускает ModelViewThumbs.dll)
+    if "--thumbs" in args:         # генератор эскизов для Проводника (запускает RafCADThumbs.dll)
         import thumbs
         thumbs.run()
         return
@@ -145,6 +170,7 @@ def main():
         fail(f"Не найден компонент окна (pywebview):\n{e}")
 
     path = os.path.abspath(args[0].strip().strip('"')) if args else ""
+    migrate_old_data()
 
     lock = InstanceLock().__enter__()
     if forward_to_running(path):
@@ -173,9 +199,9 @@ def main():
     control = start_control_server(on_file)
     lock.__exit__()
 
-    title = "ModelView"
+    title = APP_TITLE
     if server.initial_file:
-        title = os.path.basename(server.initial_file) + " — ModelView"
+        title = os.path.basename(server.initial_file) + " — " + APP_TITLE
 
     webview.settings["ALLOW_DOWNLOADS"] = True          # экспорт PNG / STL / OBJ
     webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False

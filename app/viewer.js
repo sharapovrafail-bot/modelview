@@ -69,6 +69,14 @@ function renderIcons(root = document) {
 }
 renderIcons();
 
+// название и версия программы (app/version.json пишет сборка из файла VERSION)
+let APP_TITLE = 'RafCAD View';
+fetch('version.json').then((r) => r.json()).then((v) => {
+	APP_TITLE = (v.name || 'RafCAD View') + ' ' + v.version;
+	$('verBadge').textContent = 'v' + v.version;
+	if (!model.name) document.title = APP_TITLE;
+}).catch(() => { });
+
 // =====================================================================
 // Константы и настройки
 // =====================================================================
@@ -1047,7 +1055,7 @@ function snapshotDoc() {
 function saveActiveDoc() { if (activeDoc >= 0 && model.object) docs[activeDoc] = snapshotDoc(); }
 
 function setWindowTitle() {
-	document.title = (model.name ? model.name + ' — ' : '') + 'ModelView';
+	document.title = (model.name ? model.name + ' — ' : '') + APP_TITLE;
 	if (window.pywebview && window.pywebview.api) window.pywebview.api.set_title(document.title);
 }
 

@@ -1,6 +1,6 @@
-"""Генератор эскизов для Проводника: ModelView.exe --thumbs
+"""Генератор эскизов для Проводника: RafCADView.exe --thumbs
 
-Запускается обработчиком эскизов ModelViewThumbs.dll при первом запросе и
+Запускается обработчиком эскизов RafCADThumbs.dll при первом запросе и
 сам завершается после простоя. Один экземпляр на пользователя (порт 47621).
 
 Протокол (127.0.0.1:47621, little-endian):
@@ -89,7 +89,7 @@ def run():
     threading.Thread(target=http.serve_forever, daemon=True).start()
     threading.Thread(target=tcp.serve_forever, daemon=True).start()
 
-    window = webview.create_window("ModelView thumbnails", f"http://127.0.0.1:{port}/thumb.html",
+    window = webview.create_window("RafCAD View thumbnails", f"http://127.0.0.1:{port}/thumb.html",
                                    hidden=True, width=400, height=400)
 
     def worker():
