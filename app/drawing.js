@@ -4,13 +4,14 @@
 // Виды рендерятся отдельным WebGL-рендером в ортогональной проекции: белые грани,
 // контур (обратная оболочка) и рёбра CAD — чёрным.
 import * as THREE from 'three';
+import { segText } from './techproc.js';
 
 const DPI = 200;
 const MM = DPI / 25.4;            // пикселей на мм листа
 const W = 297, H = 210;           // A4 альбом, мм
 const FRAME = { l: 20, t: 5, r: 5, b: 5 };
 const SCALES = [5, 4, 2.5, 2, 1, 0.5, 0.4, 0.25, 0.2, 0.1, 0.05, 0.04, 0.025, 0.02, 0.01];
-const f2 = (v) => (Math.round(v * 100) / 100).toLocaleString('ru-RU');
+const f2 = (v) => (Math.round(v * 100) / 100 + 0).toLocaleString('ru-RU').replace(/^-0$/, '0');
 // погрешность подгонки ~0,01 мм: 87,99 -> 88, если рядом «круглое» значение
 const snap = (v) => { const r = Math.round(v * 20) / 20; return Math.abs(v - r) < 0.015 ? r : v; };
 const scaleLabel = (s) => (s >= 1 ? `${s}:1`.replace('.', ',') : `1:${(1 / s).toString().replace('.', ',')}`);
@@ -216,8 +217,14 @@ function sketchSheet(meshes, part, meta) {
 		const left = makeView(box, w, u);
 		const nOut = Math.min(3, part.outer.length);
 		const gap = 20 + nOut * 7;
-		s = SCALES.find((k) => (main.w + left.w) * k + gap + 22 <= area.w + 8 && Math.max(main.h, left.h) * k + 40 <= area.h) || 0.01;
-		views = [{ v: main, x: area.x + 18, y: area.y + 16 }, { v: left, x: area.x + 18 + main.w * s + gap, y: area.y + 16 }];
+		const fits = (k, withLeft) => (main.w + (withLeft ? left.w : 0)) * k + (withLeft ? gap : 12) + 22 <= area.w + 8 && Math.max(main.h, left.h) * k + 40 <= area.h;
+		const sWith = SCALES.find((k) => fits(k, true)) || 0.01;
+		const sMain = SCALES.find((k) => fits(k, false)) || 0.01;
+		// вид слева (круг) нужен, только если не мешает крупному главному виду
+		const withLeft = sWith >= sMain;
+		s = withLeft ? sWith : sMain;
+		views = [{ v: main, x: area.x + 18, y: area.y + 16 }];
+		if (withLeft) views.push({ v: left, x: area.x + 18 + main.w * s + gap, y: area.y + 16 });
 	} else {
 		const sz = box.getSize(new THREE.Vector3());
 		const X = sz.y > sz.x ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
@@ -254,12 +261,41 @@ function sketchSheet(meshes, part, meta) {
 		const R = part.D / 2;
 		// общая длина — над видом
 		dim(ctx, P(at(0, R)), P(at(part.length, R)), -(7 * MM), f2(part.length));
-		// цепочка длин ступеней — под видом
-		const cuts = [...new Set(part.outer.flatMap((sg) => [sg.t0, sg.t1]).map((v) => Math.round(v * 100) / 100))].sort((p, q) => p - q);
-		if (cuts.length > 2 && cuts.length < 12) {
-			for (let i = 0; i < cuts.length - 1; i++) {
-				if (cuts[i + 1] - cuts[i] < 0.5) continue;
-				dim(ctx, P(at(cuts[i], -R)), P(at(cuts[i + 1], -R)), 6 * MM, f2(cuts[i + 1] - cuts[i]));
+		// цепочка длин — под видом: по всем точкам профиля (если он есть), иначе по цилиндрам
+		const pr = part.profile && part.profile.outer.points.length >= 2 ? part.profile.outer : null;
+		let cuts = pr ? pr.points.map((q) => q.t) : part.outer.flatMap((sg) => [sg.t0, sg.t1]);
+		cuts = [...new Set([0, part.length, ...cuts].map((v) => Math.round(v * 100) / 100))].sort((p, q) => p - q);
+		// слишком мелкие участки на листе объединяем, чтобы подписи не налезали
+		const minMm = 4.5 / s;
+		const keep = [cuts[0]];
+		for (const v of cuts.slice(1, -1)) if (v - keep[keep.length - 1] >= minMm) keep.push(v);
+		const lastCut = cuts[cuts.length - 1];
+		if (keep.length > 1 && lastCut - keep[keep.length - 1] < minMm) keep.pop();   // крошечный последний участок — к соседнему
+		keep.push(lastCut);
+		if (keep.length > 2 && keep.length < 25) {
+			for (let i = 0; i < keep.length - 1; i++) dim(ctx, P(at(keep[i], -R)), P(at(keep[i + 1], -R)), 6 * MM, f2(keep[i + 1] - keep[i]));
+		}
+		// радиусы дуг профиля — подписью с выноской
+		if (pr) {
+			for (const sg of pr.segs) {
+				if (sg.el.kind !== 'arc') continue;
+				const e = sg.el;
+				const a0 = pr.points[sg.from], a1 = pr.points[sg.to];
+				const ang0 = Math.atan2(a0.r - e.rc, a0.t - e.tc), ang1 = Math.atan2(a1.r - e.rc, a1.t - e.tc);
+				let sweep = ang1 - ang0;               // дуги профиля меньше 180°: берём короткую сторону
+				while (sweep > Math.PI) sweep -= Math.PI * 2;
+				while (sweep <= -Math.PI) sweep += Math.PI * 2;
+				const am = ang0 + sweep / 2;
+				const mt = e.tc + e.R * Math.cos(am), mr = e.rc + e.R * Math.sin(am);
+				const [px, py] = P(at(mt, mr));
+				const [cx, cy] = P(at(e.tc, e.rc));
+				const dx = px - cx, dy = py - cy, l = Math.hypot(dx, dy) || 1;
+				const ex = px + dx / l * 7 * MM, ey = py + dy / l * 7 * MM;
+				pen(ctx, 0.15);
+				ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.lineTo(ex + (dx >= 0 ? 9 : -9) * MM, ey); ctx.stroke();
+				arrow(ctx, px, py, Math.atan2(py - ey, px - ex));
+				font(ctx, 3); ctx.textAlign = dx >= 0 ? 'left' : 'right'; ctx.textBaseline = 'bottom';
+				ctx.fillText('R' + f2(e.R), ex + (dx >= 0 ? 0.5 : -0.5) * MM, ey - 0.4 * MM);
 			}
 		}
 		// диаметры ступеней: на широкой ступени — прямо на виде, на узкой — выносом вправо
@@ -279,9 +315,11 @@ function sketchSheet(meshes, part, meta) {
 			}
 		}
 		// вид слева: наружный диаметр
-		const P2 = proj[1];
-		const c0 = ax.center.clone().addScaledVector(ax.axis, ax.tmin);
-		dim(ctx, P2(c0.clone().addScaledVector(ax.w, -R)), P2(c0.clone().addScaledVector(ax.w, R)), -(R * s * MM + 7 * MM), 'Ø' + f2(part.D));
+		if (proj[1]) {
+			const P2 = proj[1];
+			const c0 = ax.center.clone().addScaledVector(ax.axis, ax.tmin);
+			dim(ctx, P2(c0.clone().addScaledVector(ax.w, -R)), P2(c0.clone().addScaledVector(ax.w, R)), -(R * s * MM + 7 * MM), 'Ø' + f2(part.D));
+		}
 		// осевая линия на главном виде
 		pen(ctx, 0.18); ctx.setLineDash([6 * MM / 2, 1.2 * MM, 1 * MM, 1.2 * MM]);
 		const a0 = P(at(-3 / s, 0)), a1 = P(at(part.length + 3 / s, 0));
@@ -333,12 +371,13 @@ function sketchSheet(meshes, part, meta) {
 	const notes = [
 		'1. Эскиз построен по 3D-модели, размеры для справок.',
 		'2. Резьбы, допуски, шероховатость, фаски — по чертежу заказчика.',
-		`3. Заготовка: ${meta.blank || '—'}.`,
-		`4. Масса детали ${meta.mass || '—'}.`,
+		...(part.type === 'rotational' && part.profile && part.profile.outer.points.length >= 2 ? ['Полный профиль с координатами точек — лист 2.'] : []),
+		`Заготовка: ${meta.blank || '—'}.`,
+		`Масса детали ${meta.mass || '—'}.`,
 	];
 	let ly = ny + 6;
 	font(ctx, 2.7);
-	for (const n of notes) {
+	for (const n of notes.map((t, i) => `${i + 1}. ` + t.replace(/^\d+\.\s*/, ''))) {
 		const ls = wrapLines(ctx, n, 76 * MM);
 		for (const l of ls) { text(ctx, l, nx, ly, 2.7); ly += 3.8; }
 	}
@@ -366,6 +405,113 @@ function elementRows(part) {
 	}
 	if (part.fillets && part.fillets.length) rows.push(['Скругления:', part.fillets.map((r) => 'R' + r).join(', ')]);
 	return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Лист «Профиль для токарной обработки»: главный вид с номерами точек + таблица
+// ---------------------------------------------------------------------------
+function profileSheets(meshes, part, meta) {
+	const pr = part.profile;
+	const ax = part.axis;
+	const box = part.box;
+	const radius = box.getSize(new THREE.Vector3()).length();
+	const main = makeView(box, ax.axis, ax.u);
+	const area = { x: FRAME.l + 14, y: FRAME.t + 22, w: 248, h: 78 };
+	const s = SCALES.find((k) => main.w * k <= area.w && main.h * k <= area.h) || 0.01;
+	const { c, ctx } = newSheet();
+	text(ctx, 'ПРОФИЛЬ ДЛЯ ТОКАРНОЙ ОБРАБОТКИ', (FRAME.l + W - FRAME.r) / 2, FRAME.t + 6, 4.5, 'center', true);
+	text(ctx, `${meta.name}   ·   Масштаб ${scaleLabel(s)}   ·   Z — от левого торца, Z′ — от правого`, (FRAME.l + W - FRAME.r) / 2, FRAME.t + 12, 2.8, 'center');
+	const x0 = area.x + (area.w - main.w * s) / 2, y0 = area.y + (area.h - main.h * s) / 2;
+	const sc = buildScene(meshes, 0.3 / s);
+	const P = drawView(ctx, sc, main, x0, y0, s, radius);
+	sc.dispose();
+	const at = (t, r) => ax.center.clone().addScaledVector(ax.axis, ax.tmin + t).addScaledVector(ax.u, r);
+	// осевая
+	pen(ctx, 0.18); ctx.setLineDash([3 * MM, 1.2 * MM, 1 * MM, 1.2 * MM]);
+	const a0 = P(at(-4 / s, 0)), a1 = P(at(part.length + 4 / s, 0));
+	ctx.beginPath(); ctx.moveTo(a0[0], a0[1]); ctx.lineTo(a1[0], a1[1]); ctx.stroke(); ctx.setLineDash([]);
+	dim(ctx, P(at(0, part.D / 2)), P(at(part.length, part.D / 2)), -(6 * MM), f2(part.length));
+
+	// номера точек: наружный контур — сверху, расточка — снизу
+	const mark = (pts, sign, prefix) => {
+		let lastX = -1e9, level = 0;
+		pts.forEach((q, i) => {
+			const [px, py] = P(at(q.t, sign * q.r));
+			level = px - lastX < 6.5 * MM ? (level + 1) % 3 : 0;
+			lastX = px;
+			const ly = py - sign * (5 + level * 4.2) * MM;
+			pen(ctx, 0.15);
+			ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, ly + sign * 1.8 * MM); ctx.stroke();
+			ctx.beginPath(); ctx.arc(px, py, 0.6 * MM, 0, Math.PI * 2); ctx.fill();
+			ctx.fillStyle = '#fff';
+			ctx.beginPath(); ctx.arc(px, ly, 1.9 * MM, 0, Math.PI * 2); ctx.fill();
+			pen(ctx, 0.18);
+			ctx.beginPath(); ctx.arc(px, ly, 1.9 * MM, 0, Math.PI * 2); ctx.stroke();
+			font(ctx, 2.2, true); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+			ctx.fillText(prefix + (i + 1), px, ly + 0.1 * MM);
+		});
+	};
+	mark(pr.outer.points, 1, '');
+	if (pr.inner.points.length) mark(pr.inner.points, -1, 'В');
+
+	// таблица точек: две колонки под видом
+	const rows = [];
+	const L = part.length;
+	const addRows = (prof, prefix) => prof.points.forEach((q, i) => {
+		const sg = prof.segs.find((x) => x.from === i);
+		const nx = prof.points[i + 1];
+		const txt = sg ? segText(sg, prof.points)
+			: !nx ? 'конец контура'
+			: Math.abs(nx.t - q.t) < 0.02 ? `торец (уступ) до Ø${f2(nx.r * 2)}`
+			: 'переход — по модели';
+		rows.push([prefix + (i + 1), f2(q.t), f2(L - q.t), f2(q.r * 2), txt]);
+	});
+	addRows(pr.outer, '');
+	if (pr.inner.points.length) { rows.push(['', '', '', '', 'Расточка (внутренний контур):']); addRows(pr.inner, 'В'); }
+
+	const pages = [{ c, ctx }];
+	const colW = [9, 16, 16, 17, 76];
+	const tableTop = area.y + area.h + 8;
+	const rowH = 4.3;
+	const bottom = H - FRAME.b - 15;
+	const perCol = Math.floor((bottom - tableTop - 6) / rowH);
+	let pageIdx = 0, col = 0, row = 0;
+	const header = (cx, ty, cctx) => {
+		const heads = ['№', 'Z', 'Z′', 'Ø', 'Участок до следующей точки'];
+		pen(cctx, 0.3);
+		let x = cx;
+		cctx.fillStyle = '#eef1f5'; cctx.fillRect(cx * MM, ty * MM, colW.reduce((p, q) => p + q, 0) * MM, 5.5 * MM); cctx.fillStyle = '#000';
+		heads.forEach((h, i) => { text(cctx, h, x + (i < 4 ? colW[i] / 2 : 1.5), ty + 2.8, 2.6, i < 4 ? 'center' : 'left', true); x += colW[i]; });
+		pen(cctx, 0.25); rect(cctx, cx, ty, colW.reduce((p, q) => p + q, 0), 5.5);
+	};
+	const colX = (k) => FRAME.l + 4 + k * 136;
+	header(colX(0), tableTop, ctx);
+	for (const r of rows) {
+		if (row >= perCol) {
+			row = 0; col++;
+			if (col > 1) {
+				col = 0; pageIdx++;
+				const np = newSheet();
+				text(np.ctx, 'ПРОФИЛЬ ДЛЯ ТОКАРНОЙ ОБРАБОТКИ (продолжение)', (FRAME.l + W - FRAME.r) / 2, FRAME.t + 6, 4.5, 'center', true);
+				pages.push(np);
+			}
+			const top = pageIdx ? FRAME.t + 14 : tableTop;
+			header(colX(col), top, pages[pageIdx].ctx);
+		}
+		const cctx = pages[pageIdx].ctx;
+		const top = (pageIdx ? FRAME.t + 14 : tableTop) + 5.5 + row * rowH;
+		let x = colX(col);
+		r.forEach((v, i) => {
+			if (i < 4) text(cctx, v, x + colW[i] / 2, top + rowH / 2, 2.6, 'center', i === 0);
+			else { font(cctx, 2.4); const l = wrapLines(cctx, v, (colW[i] - 2) * MM)[0]; text(cctx, l, x + 1.2, top + rowH / 2, 2.4); }
+			x += colW[i];
+		});
+		pen(cctx, 0.12); line(cctx, colX(col), top + rowH, colX(col) + colW.reduce((p, q) => p + q, 0), top + rowH);
+		row++;
+	}
+	const note = 'Точки и размеры — по 3D-модели (вершины сетки лежат на поверхности). Допуски и шероховатость — по чертежу заказчика.';
+	pages.forEach((pg) => text(pg.ctx, note, FRAME.l + 4, H - FRAME.b - 9, 2.4));
+	return pages;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,18 +574,21 @@ function routeSheets(route, meta) {
 // ---------------------------------------------------------------------------
 export function renderSheets({ meshes, part, route, meta }) {
 	const sketch = sketchSheet(meshes, part, meta);
+	const prof = part.type === 'rotational' && part.profile && part.profile.outer.points.length >= 2 ? profileSheets(meshes, part, meta) : [];
 	const routes = routeSheets(route, meta);
-	const total = 1 + routes.length;
+	const total = 1 + prof.length + routes.length;
 	const m = { ...meta, scale: sketch.scale };
 	titleBlock(sketch.c.getContext('2d'), m, 1, total, 'Эскиз детали');
-	routes.forEach((p, i) => {
-		// на листах маршрутной карты — малая надпись
-		const ctx = p.ctx;
+	const small = (ctx, label, no) => {
 		const x = W - FRAME.r - 110, y = H - FRAME.b - 12;
 		pen(ctx, 0.35); rect(ctx, x, y, 110, 12);
-		text(ctx, `${meta.designation} — маршрутная карта`, x + 3, y + 6, 3, 'left', true);
-		text(ctx, `Лист ${i + 2} / ${total}`, x + 107, y + 6, 3, 'right');
-		text(ctx, `${meta.author ? 'Разраб. ' + meta.author + '   ' : ''}${meta.date}`, FRAME.l + 2, H - FRAME.b - 6, 2.8);
+		text(ctx, `${meta.designation} — ${label}`, x + 3, y + 6, 3, 'left', true);
+		text(ctx, `Лист ${no} / ${total}`, x + 107, y + 6, 3, 'right');
+	};
+	prof.forEach((p, i) => small(p.ctx, 'профиль', 2 + i));
+	routes.forEach((p, i) => {
+		small(p.ctx, 'маршрутная карта', 2 + prof.length + i);
+		text(p.ctx, `${meta.author ? 'Разраб. ' + meta.author + '   ' : ''}${meta.date}`, FRAME.l + 2, H - FRAME.b - 6, 2.8);
 	});
-	return [sketch.c, ...routes.map((p) => p.c)];
+	return [sketch.c, ...prof.map((p) => p.c), ...routes.map((p) => p.c)];
 }

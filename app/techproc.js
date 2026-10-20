@@ -46,6 +46,7 @@ function collectFaces(meshes, onProgress) {
 				for (let i = 0; i < tris.length; i++) tris[i] = f.first + i;
 				const a = analyzeFace(m, tris);
 				a.points = null;
+				a.mesh = m; a.tris = tris;
 				faces.push(a);
 				done++;
 			});
@@ -60,6 +61,7 @@ function collectFaces(meshes, onProgress) {
 				for (const x of tris) seen[x] = 1;
 				const a = analyzeFace(m, tris);
 				a.points = null;
+				a.mesh = m; a.tris = tris;
 				faces.push(a);
 			}
 			done++;
@@ -98,6 +100,167 @@ function lineDist(c, a, p) {
 	const d = p.clone().sub(c);
 	d.addScaledVector(a, -d.dot(a));
 	return d.length();
+}
+
+// ---------------------------------------------------------------------------
+// Профиль тела вращения (образующая) для токарной обработки.
+// Вершины сетки лежат точно на поверхности, поэтому для поверхности вращения
+// вокруг оси детали точки (Z, R) каждой грани ложатся ровно на её образующую:
+// прямую (цилиндр, конус, торец) или дугу (сфера, тор). Грани, у которых точки
+// не ложатся ни на прямую, ни на дугу (лыски, боковые отверстия), в профиль не входят.
+// ---------------------------------------------------------------------------
+function revolutionProfile(faces, rot) {
+	const a = rot.axis, c = rot.center, L = rot.tmax - rot.tmin;
+	const tolFit = Math.max(0.004, L * 2e-5);
+	const els = [];
+	const v = new THREE.Vector3(), A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(), n = new THREE.Vector3();
+	for (const f of faces) {
+		if (!f.mesh || !f.tris) continue;
+		const g = f.mesh.geometry, P = g.attributes.position.array, I = g.index ? g.index.array : null, M = f.mesh.matrixWorld;
+		const seen = new Map();
+		const pts = [];
+		let orient = 0, area = 0, nt = 0, nr = 0;
+		const tr = (vi) => {
+			let q = seen.get(vi);
+			if (!q) {
+				v.set(P[vi * 3], P[vi * 3 + 1], P[vi * 3 + 2]).applyMatrix4(M).sub(c);
+				const t = v.dot(a);
+				const r = Math.sqrt(Math.max(0, v.lengthSq() - t * t));
+				q = { t: t - rot.tmin, r, p: v.clone() };
+				seen.set(vi, q); pts.push(q);
+			}
+			return q;
+		};
+		for (const t of f.tris) {
+			const q0 = tr(I ? I[t * 3] : t * 3), q1 = tr(I ? I[t * 3 + 1] : t * 3 + 1), q2 = tr(I ? I[t * 3 + 2] : t * 3 + 2);
+			A.subVectors(q1.p, q0.p); B.subVectors(q2.p, q0.p); n.crossVectors(A, B);
+			const s2 = n.length(); if (!s2) continue;
+			n.divideScalar(s2);
+			C.copy(q0.p).add(q1.p).add(q2.p).divideScalar(3);
+			const ct = C.dot(a);
+			C.addScaledVector(a, -ct);
+			const rl = C.length();
+			const radial = rl > 1e-9 ? C.divideScalar(rl) : null;
+			const w = s2 / 2;
+			area += w;
+			nt += n.dot(a) * w;
+			if (radial) { const d = n.dot(radial); orient += d * w; nr += d * w; }
+		}
+		if (pts.length < 2 || area <= 0) continue;
+		const fit = fitLine(pts) ;
+		let el = null;
+		if (fit.dev < tolFit) {
+			el = { kind: 'line', p0: fit.p0, p1: fit.p1 };
+		} else if (pts.length >= 4) {
+			const cf = fitCircle2(pts);
+			if (cf && cf.dev < tolFit * 2 && cf.R < L * 50) {
+				const angs = pts.map((q) => Math.atan2(q.r - cf.rc, q.t - cf.tc)).sort((x, y) => x - y);
+				let gap = angs[0] + Math.PI * 2 - angs[angs.length - 1], a0 = angs[0], a1 = angs[angs.length - 1];
+				for (let i = 1; i < angs.length; i++) if (angs[i] - angs[i - 1] > gap) { gap = angs[i] - angs[i - 1]; a0 = angs[i]; a1 = angs[i - 1]; }
+				const end = (ang) => ({ t: cf.tc + cf.R * Math.cos(ang), r: Math.max(0, cf.rc + cf.R * Math.sin(ang)) });
+				// выпуклость: нормаль смотрит от центра дуги
+				const mid = end(a0 + (Math.PI * 2 - gap) / 2);
+				const convex = (mid.t - cf.tc) * nt + (mid.r - cf.rc) * nr > 0;
+				el = { kind: 'arc', p0: end(a0), p1: end(a1), R: cf.R, tc: cf.tc, rc: cf.rc, convex };
+			}
+		}
+		if (!el) continue;
+		el.orient = orient / area;     // >0 — наружная, <0 — внутренняя (расточка)
+		el.area = area;
+		// направление обхода — по возрастанию Z
+		if (el.p1.t < el.p0.t - 1e-9 || (Math.abs(el.p1.t - el.p0.t) < 1e-9 && el.p1.r < el.p0.r)) [el.p0, el.p1] = [el.p1, el.p0];
+		els.push(el);
+	}
+
+	const vertical = (e) => e.kind === 'line' && Math.abs(e.p1.t - e.p0.t) < tolFit * 3;
+	const outer = els.filter((e) => !vertical(e) && e.orient > 0.02);
+	const inner = els.filter((e) => !vertical(e) && e.orient < -0.02);
+	return { outer: chain(outer, tolFit), inner: chain(inner, tolFit), L };
+}
+
+// склеивает соседние куски одной образующей и строит точки контура
+function chain(list, tol) {
+	list.sort((x, y) => x.p0.t - y.p0.t || x.p1.t - y.p1.t);
+	const merged = [];
+	for (const e of list) {
+		const last = merged[merged.length - 1];
+		if (last && same(last, e, tol) && Math.abs(last.p1.t - e.p0.t) < tol * 5 && Math.abs(last.p1.r - e.p0.r) < tol * 5) {
+			last.p1 = e.p1;
+			continue;
+		}
+		// перекрывающиеся куски (например, две половинки цилиндра) — тоже в один
+		const dup = merged.find((m) => same(m, e, tol) && e.p0.t < m.p1.t + tol && e.p1.t > m.p0.t - tol);
+		if (dup) { if (e.p0.t < dup.p0.t) dup.p0 = e.p0; if (e.p1.t > dup.p1.t) dup.p1 = e.p1; continue; }
+		merged.push({ ...e });
+	}
+	merged.sort((x, y) => x.p0.t - y.p0.t);
+	const pts = [];
+	const push = (p) => {
+		const q = pts[pts.length - 1];
+		if (q && Math.abs(q.t - p.t) < tol * 5 && Math.abs(q.r - p.r) < tol * 5) return pts.length - 1;
+		pts.push({ t: p.t, r: p.r });
+		return pts.length - 1;
+	};
+	const segs = [];
+	for (const e of merged) {
+		const i0 = push(e.p0), i1 = push(e.p1);
+		if (i1 > i0) segs.push({ from: i0, to: i1, el: e });
+	}
+	return { points: pts, segs, elements: merged };
+}
+function same(a, b, tol) {
+	if (a.kind !== b.kind) return false;
+	if (a.kind === 'arc') return Math.abs(a.R - b.R) < tol * 3 && Math.abs(a.tc - b.tc) < tol * 3 && Math.abs(a.rc - b.rc) < tol * 3;
+	// прямые: одна и та же прямая в плоскости (Z, R)
+	const dx = a.p1.t - a.p0.t, dy = a.p1.r - a.p0.r, l = Math.hypot(dx, dy) || 1;
+	const d = (p) => Math.abs((p.t - a.p0.t) * dy - (p.r - a.p0.r) * dx) / l;
+	return d(b.p0) < tol * 3 && d(b.p1) < tol * 3;
+}
+function fitLine(pts) {
+	let mt = 0, mr = 0;
+	for (const q of pts) { mt += q.t; mr += q.r; }
+	mt /= pts.length; mr /= pts.length;
+	let stt = 0, srr = 0, str = 0;
+	for (const q of pts) { const dt = q.t - mt, dr = q.r - mr; stt += dt * dt; srr += dr * dr; str += dt * dr; }
+	const ang = 0.5 * Math.atan2(2 * str, stt - srr);
+	const ux = Math.cos(ang), uy = Math.sin(ang);
+	let dev = 0, lo = Infinity, hi = -Infinity;
+	for (const q of pts) {
+		const dt = q.t - mt, dr = q.r - mr;
+		dev = Math.max(dev, Math.abs(-dt * uy + dr * ux));
+		const s = dt * ux + dr * uy;
+		lo = Math.min(lo, s); hi = Math.max(hi, s);
+	}
+	return { dev, p0: { t: mt + ux * lo, r: mr + uy * lo }, p1: { t: mt + ux * hi, r: mr + uy * hi } };
+}
+function fitCircle2(pts) {
+	let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0;
+	const n = pts.length;
+	for (const q of pts) { const x = q.t, y = q.r, z = x * x + y * y; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z; sz += z; }
+	const m = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], rhs = [-sxz, -syz, -sz];
+	const det = (q) => q[0][0] * (q[1][1] * q[2][2] - q[1][2] * q[2][1]) - q[0][1] * (q[1][0] * q[2][2] - q[1][2] * q[2][0]) + q[0][2] * (q[1][0] * q[2][1] - q[1][1] * q[2][0]);
+	const d = det(m);
+	if (Math.abs(d) < 1e-300) return null;
+	const sol = [0, 1, 2].map((col) => det(m.map((row, i) => row.map((val, j) => (j === col ? rhs[i] : val)))) / d);
+	const tc = -sol[0] / 2, rc = -sol[1] / 2, rr = tc * tc + rc * rc - sol[2];
+	if (!(rr > 0)) return null;
+	const R = Math.sqrt(rr);
+	let dev = 0;
+	for (const q of pts) dev = Math.max(dev, Math.abs(Math.hypot(q.t - tc, q.r - rc) - R));
+	return { tc, rc, R, dev };
+}
+
+// описание участка профиля между точками
+export function segText(seg, pts) {
+	const a = pts[seg.from], b = pts[seg.to], e = seg.el;
+	if (e.kind === 'arc') {
+		return `дуга R${f2(e.R)} ${e.convex ? 'выпуклая' : 'вогнутая'}, центр Z${f2(e.tc)} Ø${f2(Math.max(0, e.rc) * 2)}`;
+	}
+	if (Math.abs(b.r - a.r) < 0.005) return 'цилиндр';
+	if (Math.abs(b.t - a.t) < 0.005) return 'торец';
+	const ang = Math.atan2(Math.abs(b.r - a.r), Math.abs(b.t - a.t)) * 180 / Math.PI;
+	if (Math.abs(b.t - a.t) < 3 && Math.abs(b.r - a.r) < 3) return `фаска ${f2(Math.abs(b.t - a.t))}×${f1(ang)}°`;
+	return `конус, угол ${f1(ang)}° к оси (${f1(ang * 2)}° при вершине)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,8 +368,9 @@ export function analyzePart(meshes, onProgress) {
 		const offHoles = holeGroups(cyl.filter((g) => g.hole && !onAxis(g) && g.sweep > Math.PI * 1.6));
 		const sidePlanes = planes.filter((p) => Math.abs(p.normal.dot(rot.axis)) < 0.999);
 		const faceCount = planes.length - sidePlanes.length;
+		const profile = revolutionProfile(faces, rot);
 		return {
-			type: 'rotational', axis: rot, length: L, D: rot.D,
+			type: 'rotational', axis: rot, length: L, D: rot.D, profile,
 			outer: merge(outer), bores: merge(bores).map((b) => ({ ...b, through: b.len > L - 0.5 })),
 			holes: offHoles.map((h) => ({ ...h, through: !h.blind })), sidePlanes: sidePlanes.length, facePlanes: faceCount,
 			fillets, size, box,
@@ -267,8 +431,11 @@ export function buildRoute(part, blank, o) {
 		const outer = [...part.outer].sort((a, b) => b.d - a.d);
 		const bores = [...part.bores].sort((a, b) => a.d - b.d);
 		const L = part.length;
+		const pr = part.profile;
+		const np = pr && pr.outer.points.length;
 		const rough = ['Установ А: закрепить заготовку в патроне', 'Подрезать торец'];
-		for (const s of outer) rough.push(`Точить Ø${f2(s.d)} на длину ${f2(s.len)} мм предварительно, припуск 0,5–1 мм на сторону`);
+		if (np >= 2) rough.push(`Точить наружный контур т.1–т.${np} (лист «Профиль») предварительно, припуск 0,5–1 мм на сторону`);
+		else for (const s of outer) rough.push(`Точить Ø${f2(s.d)} на длину ${f2(s.len)} мм предварительно, припуск 0,5–1 мм на сторону`);
 		for (const b of bores) {
 			const dr = b.d > 24 ? Math.max(10, Math.floor(b.d - 6)) : null;
 			rough.push(b.through
@@ -279,7 +446,17 @@ export function buildRoute(part, blank, o) {
 		add('Токарная (черновая)', eq.lathe, rough);
 
 		const fin = ['Установ А', 'Подрезать торец начисто'];
-		for (const s of outer) fin.push(`Точить Ø${f2(s.d)} на длину ${f2(s.len)} мм начисто${grindAllow}`);
+		if (np >= 2) {
+			fin.push(`Точить наружный контур т.1–т.${np} начисто${grindAllow}`);
+			const arcs = [...new Set(pr.outer.segs.filter((sg) => sg.el.kind === 'arc').map((sg) => 'R' + f2(sg.el.R)))];
+			const cones = pr.outer.segs.filter((sg) => sg.el.kind === 'line' && Math.abs(pr.outer.points[sg.to].r - pr.outer.points[sg.from].r) > 0.005 && Math.abs(pr.outer.points[sg.to].t - pr.outer.points[sg.from].t) > 0.005).length;
+			const dias = [...new Set(pr.outer.segs.filter((sg) => sg.el.kind === 'line' && Math.abs(pr.outer.points[sg.to].r - pr.outer.points[sg.from].r) < 0.005).map((sg) => 'Ø' + f2(pr.outer.points[sg.from].r * 2)))];
+			if (dias.length) fin.push(`в т.ч. цилиндры: ${dias.join(', ')}`);
+			if (cones) fin.push(`в т.ч. конусы и фаски: ${cones} уч.`);
+			if (arcs.length) fin.push(`в т.ч. радиусы: ${arcs.join(', ')}`);
+			const concave = pr.outer.segs.filter((sg) => sg.el.kind === 'arc' && !sg.el.convex).map((sg) => sg.el.R);
+			if (concave.length) fin.push(`Вогнутые радиусы: резец с радиусом при вершине не более R${f2(Math.min(...concave))}`);
+		} else for (const s of outer) fin.push(`Точить Ø${f2(s.d)} на длину ${f2(s.len)} мм начисто${grindAllow}`);
 		for (const b of bores) fin.push(`Расточить отверстие Ø${f2(b.d)}${b.through ? '' : ` на глубину ${f2(b.len)} мм`} начисто${grindAllow}`);
 		fin.push('Снять фаски, выполнить канавки и резьбы — по чертежу');
 		fin.push('Установ Б', `Подрезать торец в размер ${f2(L)} мм начисто`, 'Снять фаски — по чертежу');
