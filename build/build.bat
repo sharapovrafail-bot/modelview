@@ -6,7 +6,7 @@ rem            Visual Studio Build Tools (C++) — для ModelViewThumbs.dll
 rem            Inno Setup 6         winget install JRSoftware.InnoSetup
 rem Результат: ..\ModelView-Setup-<версия>.exe
 setlocal
-set "VERSION=1.2"
+set "VERSION=1.3"
 set "ROOT=%~dp0.."
 set "WORK=%TEMP%\modelview-build"
 set "DIST=%WORK%\dist"
