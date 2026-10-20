@@ -119,12 +119,15 @@
         <div class="panel-head"><i data-icon="measure" class="accent"></i><span>Измерение</span></div>
         <div class="pad">
           <div class="seg" id="measMode">
-            <button data-m="dist" class="on" title="Расстояние между точками"><i data-icon="ruler"></i></button>
+            <button data-m="diameter" class="on" title="Диаметр и радиус: отверстие, вал, скругление"><i data-icon="diameter"></i></button>
+            <button data-m="faces" title="Две грани: толщина, межосевое расстояние, угол"><i data-icon="faces"></i></button>
+            <button data-m="points" title="Расстояние между точками (привязка к вершинам)"><i data-icon="ruler"></i></button>
             <button data-m="dims" title="Габаритные размеры на модели"><i data-icon="dims"></i></button>
-            <button data-m="clear" title="Очистить"><i data-icon="trash"></i></button>
+            <button data-m="clear" title="Очистить все измерения (Esc)"><i data-icon="trash"></i></button>
           </div>
-          <div class="sub">Результат</div>
-          <div id="measResult" class="kv"><div class="muted">Кликните две точки на модели</div></div>
+          <div class="seg-labels"><span>Ø / R</span><span>Грани</span><span>Точки</span><span>Габарит</span><span>Сброс</span></div>
+          <div class="sub">Результаты</div>
+          <div id="measResult" class="mlist scroll"></div>
         </div>
       </div>
     </div>

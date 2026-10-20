@@ -8,6 +8,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
+import { faceTriangles, analyzeFace, relate, mergeCoaxialFaces } from './measure-math.js';
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -49,6 +50,8 @@ const ICONS = {
 	copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
 	com: `<path d="${CUBE}"/><path d="${CUBE_IN}" stroke-dasharray="1.6 1.6"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/>`,
 	dims: '<path d="M4 8h16M4 5v6M20 5v6"/><path d="M4 18h10M4 15v6M14 15v6"/>',
+	diameter: '<circle cx="12" cy="12" r="8"/><path d="M6.3 17.7 17.7 6.3"/><path d="M15 6.3h2.7V9M9 17.7H6.3V15"/>',
+	faces: '<path d="M4 6h7v12H4z"/><path d="M13 6h7v12h-7z" opacity=".55"/><path d="M8 12h8M14 10l2 2-2 2M10 10l-2 2 2 2"/>',
 	trash: '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 13h10l1-13"/>',
 	part: `<path d="${CUBE}"/><path d="${CUBE_IN}"/>`,
 	assembly: '<path d="M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2h8A1.5 1.5 0 0 1 20.5 9v9a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z"/>',
@@ -250,6 +253,12 @@ function occtToObject(res, name) {
 			}
 		}
 		g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+		if (idx && m.brep_faces && m.brep_faces.length) {
+			const faceOf = new Int32Array(idx.length / 3);
+			m.brep_faces.forEach((f, fi) => faceOf.fill(fi, f.first, f.last + 1));
+			g.userData.faceOf = faceOf;
+			g.userData.faces = m.brep_faces.map((f) => ({ first: f.first, last: f.last }));
+		}
 		const mesh = new THREE.Mesh(g);
 		mesh.name = m.name || `Тело ${i + 1}`;
 		mesh.userData = { color: base.clone(), vertexColors: true, ownColor: own || faceColors };
@@ -261,7 +270,9 @@ function occtToObject(res, name) {
 		grp.name = node.name || (depth === 0 ? name : 'Сборка');
 		for (const mi of node.meshes || []) {
 			const src = meshes[mi];
-			grp.add(src.parent ? src.clone() : src);
+			let inst = src;
+			if (src.parent) { inst = src.clone(); inst.userData = src.userData; }
+			grp.add(inst);
 		}
 		for (const ch of node.children || []) grp.add(build(ch, depth + 1));
 		return grp;
@@ -1091,47 +1102,212 @@ $('secOn').onchange = (e) => setSection(e.target.checked);
 // =====================================================================
 // Измерение
 // =====================================================================
-const measure = { points: [], group: new THREE.Group(), labels: [], last: null };
+// Режимы: points — расстояние между точками (привязка к вершинам);
+// diameter — Ø/R отверстия, вала, скругления; faces — две грани: толщина,
+// межосевое расстояние, расстояние от оси до плоскости или угол.
+const measure = { mode: 'diameter', pending: [], items: [], group: new THREE.Group(), labels: [] };
 scene.add(measure.group);
 const mPointMat = new THREE.PointsMaterial({ color: 0x4d93ff, size: 10, sizeAttenuation: false, depthTest: false });
 const mLineMat = new THREE.LineBasicMaterial({ color: 0x4d93ff, depthTest: false });
+const faceMat = (color) => new THREE.MeshBasicMaterial({
+	color, transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
+	polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+});
+const mFaceMats = [faceMat(0x2f7bff), faceMat(0xff9a1f)];
+const MODE_HINT = {
+	points: 'Кликните две точки на модели. Рядом с вершиной точка привязывается к ней.',
+	diameter: 'Кликните по отверстию, валу или скруглению — покажу Ø и R. По плоскости — площадь.',
+	faces: 'Кликните две грани: толщина между плоскостями, межосевое расстояние отверстий, от оси до плоскости или угол.',
+};
+
+const toModelPoint = (v) => v.clone().applyMatrix4(new THREE.Matrix4().copy(modelRoot.matrixWorld).invert());
+const toModelDir = (v) => v.clone().transformDirection(new THREE.Matrix4().copy(modelRoot.matrixWorld).invert());
+
+function mAdd(obj, order = 998) { obj.renderOrder = order; obj.raycast = () => { }; measure.group.add(obj); return obj; }
+function mPoint(p) { return mAdd(new THREE.Points(new THREE.BufferGeometry().setFromPoints([p]), mPointMat), 999); }
+function mLine(a, b, mat = mLineMat) { return mAdd(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), mat)); }
+function mLabel(pos, html) {
+	const el = document.createElement('div');
+	el.className = 'mlabel';
+	el.innerHTML = html;
+	$('labels').append(el);
+	measure.labels.push({ el, pos: pos.clone() });
+}
+// подсветка выбранной грани
+function mFace(mesh, tris, mat) {
+	const g = mesh.geometry, P = g.attributes.position.array, I = g.index ? g.index.array : null;
+	const out = new Float32Array(tris.length * 9);
+	const v = new THREE.Vector3();
+	let k = 0;
+	for (const t of tris) for (let j = 0; j < 3; j++) {
+		const i = (I ? I[t * 3 + j] : t * 3 + j) * 3;
+		v.set(P[i], P[i + 1], P[i + 2]).applyMatrix4(mesh.matrixWorld);
+		out[k++] = v.x; out[k++] = v.y; out[k++] = v.z;
+	}
+	const geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.BufferAttribute(out, 3));
+	return mAdd(new THREE.Mesh(geo, mat), 997);
+}
+// окружность и штрихпунктирная ось цилиндрической грани
+function mCircle(f) {
+	const pts = [];
+	const full = f.sweep > 5.2;
+	const a1 = full ? Math.PI * 2 : f.sweep;
+	const a0 = 0;
+	for (let i = 0; i <= 96; i++) {
+		const t = a0 + (a1 - a0) * i / 96 + (full ? 0 : f.startAngle || 0);
+		pts.push(f.center.clone().addScaledVector(f.u, Math.cos(t) * f.radius).addScaledVector(f.v, Math.sin(t) * f.radius));
+	}
+	mAdd(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mLineMat));
+	const ext = Math.max(f.axisStart.distanceTo(f.axisEnd) * 0.6, f.radius * 1.3);
+	const mat = new THREE.LineDashedMaterial({ color: 0xffb02e, depthTest: false, dashSize: f.radius * 0.25, gapSize: f.radius * 0.12 });
+	const line = mLine(f.center.clone().addScaledVector(f.axis, -ext), f.center.clone().addScaledVector(f.axis, ext), mat);
+	line.computeLineDistances();
+}
 
 function clearMeasure() {
-	measure.points = [];
-	measure.group.children.slice().forEach((c) => { c.geometry.dispose(); measure.group.remove(c); });
+	measure.pending = [];
+	measure.items = [];
+	measure.group.children.slice().forEach((c) => {
+		c.geometry.dispose();
+		if (c.material && c.material.isLineDashedMaterial) c.material.dispose();
+		measure.group.remove(c);
+	});
 	measure.labels.forEach((l) => l.el.remove());
 	measure.labels = [];
-	measure.last = null;
-	$('measResult').innerHTML = '<div class="muted">Выберите инструмент «Измерение» и кликните две точки на модели</div>';
+	renderMeasureResults();
 	requestRender();
 }
-function addMeasurePoint(p) {
-	if (measure.points.length >= 2) clearMeasure();
-	measure.points.push(p.clone());
-	const pt = new THREE.Points(new THREE.BufferGeometry().setFromPoints([p]), mPointMat);
-	pt.renderOrder = 999;
-	measure.group.add(pt);
-	if (measure.points.length === 2) {
-		const [a, b] = measure.points;
-		const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), mLineMat);
-		ln.renderOrder = 998;
-		measure.group.add(ln);
-		const inv = new THREE.Matrix4().copy(modelRoot.matrixWorld).invert();
-		const d = b.clone().applyMatrix4(inv).sub(a.clone().applyMatrix4(inv));
-		const el = document.createElement('div');
-		el.className = 'mlabel';
-		el.innerHTML = `<b>${fix2(d.length())} мм</b>`;
-		$('labels').append(el);
-		measure.labels.push({ el, pos: a.clone().add(b).multiplyScalar(0.5) });
-		$('measResult').innerHTML = kv([
-			['Расстояние:', fix2(d.length()) + ' мм'],
-			['ΔX:', fix2(Math.abs(d.x)) + ' мм'], ['ΔY:', fix2(Math.abs(d.y)) + ' мм'], ['ΔZ:', fix2(Math.abs(d.z)) + ' мм'],
-		]);
-	} else {
-		$('measResult').innerHTML = '<div class="muted">Укажите вторую точку</div>';
+
+function renderMeasureResults() {
+	const el = $('measResult');
+	if (!el) return;
+	let html = '';
+	if (measure.pending.length) html += `<div class="muted">${measure.mode === 'points' ? 'Укажите вторую точку' : 'Укажите вторую грань'}</div>`;
+	else if (!measure.items.length) html += `<div class="muted">${MODE_HINT[measure.mode]}</div>`;
+	for (const it of measure.items.slice().reverse()) {
+		html += `<div class="mres"><b>${esc(it.title)}</b><div class="kv">${kv(it.rows)}</div>${it.note ? `<div class="muted small">${esc(it.note)}</div>` : ''}</div>`;
 	}
+	el.innerHTML = html;
+}
+
+// привязка к ближайшей вершине треугольника (в пределах 14 px)
+function snapToVertex(h) {
+	if (!h.face) return h.point.clone();
+	const P = h.object.geometry.attributes.position.array;
+	const r = canvas.getBoundingClientRect();
+	const scr = (v) => { const q = v.clone().project(camera); return [(q.x + 1) / 2 * r.width, (1 - q.y) / 2 * r.height]; };
+	const hp = scr(h.point);
+	let best = null, bestD = 14;
+	for (const i of [h.face.a, h.face.b, h.face.c]) {
+		const v = new THREE.Vector3(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]).applyMatrix4(h.object.matrixWorld);
+		const sp = scr(v);
+		const d = Math.hypot(sp[0] - hp[0], sp[1] - hp[1]);
+		if (d < bestD) { bestD = d; best = v; }
+	}
+	return best || h.point.clone();
+}
+
+function describeFace(f) {
+	const rows = [];
+	let title;
+	if (f.type === 'cylinder') {
+		const full = f.sweep > THREE.MathUtils.degToRad(300);
+		title = full ? (f.hole ? 'Отверстие' : 'Вал / цилиндр') : (f.hole ? 'Скругление (вогнутое)' : 'Скругление (выпуклое)');
+		rows.push(['Диаметр:', 'Ø ' + fix3(f.radius * 2) + ' мм'], ['Радиус:', 'R ' + fix3(f.radius) + ' мм']);
+		if (!full) rows.push(['Дуга:', fmtNum(THREE.MathUtils.radToDeg(f.sweep), 1) + '°']);
+		rows.push(['Длина по оси:', fix2(f.axisStart.distanceTo(f.axisEnd)) + ' мм']);
+		const c = toModelPoint(f.center), ax = toModelDir(f.axis);
+		rows.push(['Центр:', `${fix2(c.x)}; ${fix2(c.y)}; ${fix2(c.z)}`], ['Ось:', `${fix3(ax.x)}; ${fix3(ax.y)}; ${fix3(ax.z)}`]);
+	} else if (f.type === 'plane') {
+		title = 'Плоская грань';
+		const n = toModelDir(f.normal);
+		rows.push(['Площадь:', fmtNum(f.area, 2) + ' мм²'], ['Нормаль:', `${fix3(n.x)}; ${fix3(n.y)}; ${fix3(n.z)}`]);
+	} else {
+		title = 'Криволинейная грань';
+		rows.push(['Площадь:', fmtNum(f.area, 2) + ' мм²']);
+	}
+	return { title, rows, note: f.exact ? '' : 'Модель без граней CAD (STL/OBJ) — значение по сетке, приблизительно.' };
+}
+
+function measurePick(h) {
+	if (!h || !h.object.isMesh || h.faceIndex == null) return;
+	const mode = measure.mode;
+	if (mode === 'points') {
+		const p = snapToVertex(h);
+		mPoint(p);
+		measure.pending.push(p);
+		if (measure.pending.length === 2) {
+			const [a, b] = measure.pending;
+			measure.pending = [];
+			mLine(a, b);
+			const d = toModelPoint(b).sub(toModelPoint(a));
+			mLabel(a.clone().add(b).multiplyScalar(0.5), `<b>${fix2(d.length())} мм</b>`);
+			measure.items.push({ title: 'Расстояние', rows: [
+				['Расстояние:', fix3(d.length()) + ' мм'],
+				['ΔX:', fix3(Math.abs(d.x)) + ' мм'], ['ΔY:', fix3(Math.abs(d.y)) + ' мм'], ['ΔZ:', fix3(Math.abs(d.z)) + ' мм'],
+			] });
+		}
+		renderMeasureResults();
+		requestRender();
+		return;
+	}
+
+	let { tris, exact } = faceTriangles(h.object.geometry, h.faceIndex);
+	let f = analyzeFace(h.object, tris);
+	if (f.type === 'cylinder' && exact) {
+		// половинки цилиндра, разрезанного швом, — в одну грань
+		const merged = mergeCoaxialFaces(h.object, tris, f);
+		if (merged !== tris) {
+			const g = analyzeFace(h.object, merged);
+			if (g.type === 'cylinder') { tris = merged; f = g; }
+		}
+	}
+	f.exact = exact;
+
+	if (mode === 'diameter') {
+		mFace(h.object, tris, mFaceMats[0]);
+		if (f.type === 'cylinder') {
+			mCircle(f);
+			const full = f.sweep > THREE.MathUtils.degToRad(300);
+			const mid = (f.startAngle || 0) + (full ? Math.PI / 4 : f.sweep / 2);
+			const onCircle = f.center.clone().addScaledVector(f.u, f.radius * Math.cos(mid)).addScaledVector(f.v, f.radius * Math.sin(mid));
+			mLabel(onCircle, full ? `<b>Ø ${fix2(f.radius * 2)} мм</b>` : `<b>R ${fix2(f.radius)} мм</b>`);
+		} else if (f.type === 'plane') {
+			mLabel(f.centroid, `<b>${fmtNum(f.area, 1)} мм²</b>`);
+		}
+		measure.items.push(describeFace(f));
+		renderMeasureResults();
+		requestRender();
+		return;
+	}
+
+	// две грани
+	mFace(h.object, tris, mFaceMats[measure.pending.length % 2]);
+	measure.pending.push(f);
+	if (measure.pending.length === 2) {
+		const [f1, f2] = measure.pending;
+		measure.pending = [];
+		const r = relate(f1, f2);
+		if (r) {
+			const isDist = r.unit === 'мм';
+			if (isDist) {
+				mLine(r.a, r.b); mPoint(r.a); mPoint(r.b);
+				mLabel(r.a.clone().add(r.b).multiplyScalar(0.5), `<b>${fix2(r.value)} мм</b>`);
+			} else {
+				mLabel(r.a.clone().add(r.b).multiplyScalar(0.5), `<b>${fmtNum(r.value, 2)}°</b>`);
+			}
+			const rows = [[isDist ? 'Значение:' : 'Угол:', isDist ? fix3(r.value) + ' мм' : fmtNum(r.value, 3) + '°']];
+			if (r.alt != null) rows.push(['Дополнительный:', fmtNum(r.alt, 3) + '°']);
+			const what = (x) => (x.type === 'cylinder' ? (x.hole ? 'отверстие' : 'цилиндр') + ' Ø' + fix2(x.radius * 2) : x.type === 'plane' ? 'плоскость' : 'поверхность');
+			rows.push(['Грани:', what(f1) + ' / ' + what(f2)]);
+			measure.items.push({ title: r.kind, rows, note: f1.exact && f2.exact ? '' : 'Модель без граней CAD — значение приблизительное.' });
+		}
+	}
+	renderMeasureResults();
 	requestRender();
 }
+
 function updateMeasureLabels() {
 	if (!measure.labels.length) return;
 	const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -1142,9 +1318,17 @@ function updateMeasureLabels() {
 		l.el.style.display = p.z > 1 ? 'none' : '';
 	}
 }
+function setMeasureMode(m) {
+	measure.mode = m;
+	measure.pending = [];
+	$$('#measMode button[data-m]').forEach((b) => { if (b.dataset.m !== 'dims') b.classList.toggle('on', b.dataset.m === m); });
+	renderMeasureResults();
+}
 $$('#measMode button').forEach((b) => b.onclick = () => {
-	if (b.dataset.m === 'clear') { clearMeasure(); return; }
-	if (b.dataset.m === 'dims') { setOpt('dims', !settings.dims); b.classList.toggle('on', settings.dims); return; }
+	const m = b.dataset.m;
+	if (m === 'clear') { clearMeasure(); return; }
+	if (m === 'dims') { setOpt('dims', !settings.dims); b.classList.toggle('on', settings.dims); return; }
+	setMeasureMode(m);
 	setTool('measure');
 });
 
@@ -1174,7 +1358,7 @@ function setTool(t) {
 		requestRender();
 		return;
 	}
-	if (tool === 'measure' && t !== 'measure') clearMeasure();
+	if (tool === 'measure' && t !== 'measure') { measure.pending = []; renderMeasureResults(); }
 	tool = t;
 	$$('.tool:not([data-toggle])').forEach((b) => b.classList.toggle('on', b.dataset.tool === t));
 	viewport.className = 'cur-' + t;
@@ -1208,7 +1392,7 @@ canvas.addEventListener('pointerup', (e) => {
 	downPos = null;
 	if (moved > 4) return;
 	const h = pick(e);
-	if (tool === 'measure') { if (h) addMeasurePoint(h.point); return; }
+	if (tool === 'measure') { measurePick(h); return; }
 	if (tool === 'hide') { if (h) { if (selected && selected.obj === h.object) select(null); setVisible(h.object, false); } return; }
 	select(h ? h.object : null);
 });
@@ -1359,6 +1543,7 @@ window.addEventListener('keydown', (e) => {
 function showLoading(t) { $('loadingText').textContent = t; $('loading').hidden = false; }
 function hideLoading() { $('loading').hidden = true; }
 function fix2(v) { return (Math.abs(v) < 0.005 ? 0 : v).toFixed(2); }
+function fix3(v) { return (Math.abs(v) < 0.0005 ? 0 : v).toFixed(3); }
 function fmtNum(v, d = 2) { return (+v).toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 }); }
 function fmtInt(v) { return v.toLocaleString('ru-RU'); }
 function fmtSize(b) { return b >= 1048576 ? (b / 1048576).toFixed(1) + ' МБ' : Math.max(1, Math.round(b / 1024)) + ' КБ'; }
@@ -1383,6 +1568,7 @@ if (location.protocol.startsWith('http')) {
 }
 
 toggleProps(settings.props);
+renderMeasureResults();
 syncControls();
 applyMode();
 resize();
