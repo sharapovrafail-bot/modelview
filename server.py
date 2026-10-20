@@ -17,7 +17,9 @@ import time
 import urllib.parse
 import webbrowser
 
-APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
+# в собранном ModelView.exe (PyInstaller) файлы интерфейса распакованы в sys._MEIPASS
+BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+APP_DIR = os.path.join(BASE_DIR, "app")
 PREFERRED_PORT = 47615
 IDLE_TIMEOUT = 180      # сек без пинга -> выход (страница пингует раз в 5 с, в фоне реже)
 BYE_GRACE = 4           # сек после закрытия окна, чтобы пережить перезагрузку страницы
@@ -167,6 +169,9 @@ def watchdog(server):
 def main():
     global initial_file
     args = [a for a in sys.argv[1:] if a.strip()]
+    if "--install" in args or "--uninstall" in args:
+        import installer
+        sys.exit(installer.install() if "--install" in args else installer.uninstall())
     serve_only = "--serve" in args          # только сервер, без окна и автозакрытия
     args = [a for a in args if a != "--serve"]
     if args:
