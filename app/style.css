@@ -281,3 +281,33 @@ button.primary-btn { background: linear-gradient(180deg, #3584ff, #2266e0); bord
 button.primary-btn:disabled { opacity: .45; cursor: default; }
 .legend { display: flex; flex-direction: column; gap: 5px; margin: 12px 0 10px; font-size: 12px; color: var(--text2); }
 .legend i { display: inline-block; width: 22px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: middle; }
+
+/* окна поверх программы */
+.modal { position: fixed; inset: 0; background: rgba(4, 7, 13, .62); display: grid; place-items: center; z-index: 20; backdrop-filter: blur(3px); }
+.modal[hidden] { display: none; }
+.modal-box { display: flex; flex-direction: column; max-height: calc(100vh - 40px); }
+.wide-box { width: min(1100px, calc(100vw - 40px)); height: calc(100vh - 60px); }
+.modal-body { flex: 1; padding: 4px 16px 16px; }
+.modal-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 16px 14px; border-top: 1px solid var(--line); }
+.modal-foot .wide { padding: 0 16px; }
+.tech-top { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tech-actions { display: flex; gap: 8px; margin: 10px 0 14px; }
+.tech-actions .wide { padding: 0 14px; }
+.op-card { background: rgba(0,0,0,.22); border: 1px solid var(--line); border-radius: 9px; padding: 8px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+.op-head { display: flex; gap: 6px; align-items: center; }
+.op-card input, .op-card textarea { background: rgba(0,0,0,.28); border: 1px solid var(--line2); border-radius: 6px; color: var(--text); padding: 5px 8px; font: inherit; }
+.op-card textarea { resize: vertical; line-height: 1.45; font-size: 12.5px; }
+.op-no { width: 52px; text-align: center; font-weight: 600; }
+.op-name { flex: 1; font-weight: 600; }
+.op-eq { color: var(--text2) !important; font-size: 12px; }
+.op-head .down svg { transform: rotate(180deg); }
+.sheets { display: flex; flex-direction: column; gap: 14px; align-items: center; }
+.sheets img { width: 100%; max-width: 1000px; background: #fff; border-radius: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+details.equip { margin-top: 6px; color: var(--text2); }
+details.equip summary { cursor: pointer; padding: 6px 0; }
+.about { width: 440px; }
+.about-body { padding: 4px 22px 22px; text-align: center; }
+.about-body img { width: 96px; height: 96px; filter: drop-shadow(0 0 16px rgba(40,200,230,.4)); }
+.about-body h2 { margin: 8px 0 6px; font-size: 20px; }
+.about-body p { color: var(--text2); margin: 6px 0; }
+.licenses { margin-top: 12px; line-height: 1.5; }

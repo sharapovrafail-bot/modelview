@@ -153,6 +153,23 @@ class Api:
         if self._window:
             self._window.toggle_fullscreen()
 
+    def save_file(self, name, b64):
+        """Окно Windows «Сохранить как» для экспорта (PDF, PNG, STL, OBJ). Возвращает путь или ''."""
+        import base64
+        import webview
+        ext = os.path.splitext(name)[1].lower().lstrip(".")
+        kinds = {"pdf": "PDF", "png": "Изображение PNG", "stl": "STL", "obj": "OBJ"}
+        types = (f"{kinds.get(ext, ext.upper())} (*.{ext})", "Все файлы (*.*)") if ext else ("Все файлы (*.*)",)
+        res = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=name, file_types=types)
+        if not res:
+            return ""
+        path = res if isinstance(res, str) else res[0]
+        if ext and not path.lower().endswith("." + ext):
+            path += "." + ext
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(b64))
+        return path
+
 
 def main():
     args = [a for a in sys.argv[1:] if a.strip()]

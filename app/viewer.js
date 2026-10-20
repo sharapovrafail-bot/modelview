@@ -10,6 +10,8 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { faceTriangles, analyzeFace, relate, mergeCoaxialFaces } from './measure-math.js';
 import { compareSoups } from './compare.js';
+import { analyzePart, chooseBlank, buildRoute, describePart, DEFAULT_EQUIPMENT } from './techproc.js';
+import { renderSheets } from './drawing.js';
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -52,6 +54,8 @@ const ICONS = {
 	com: `<path d="${CUBE}"/><path d="${CUBE_IN}" stroke-dasharray="1.6 1.6"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/>`,
 	dims: '<path d="M4 8h16M4 5v6M20 5v6"/><path d="M4 18h10M4 15v6M14 15v6"/>',
 	compare: '<path d="M4 5h7v14H4z"/><path d="M13 5h7v14h-7z" stroke-dasharray="2 1.6"/><path d="M12 3v18"/>',
+	route: '<path d="M6 4h9a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h9"/><circle cx="5" cy="4" r="1.6"/><circle cx="19" cy="16" r="1.6"/><path d="M14 20h6"/>',
+	info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.6v.4"/>',
 	diameter: '<circle cx="12" cy="12" r="8"/><path d="M6.3 17.7 17.7 6.3"/><path d="M15 6.3h2.7V9M9 17.7H6.3V15"/>',
 	faces: '<path d="M4 6h7v12H4z"/><path d="M13 6h7v12h-7z" opacity=".55"/><path d="M8 12h8M14 10l2 2-2 2M10 10l-2 2 2 2"/>',
 	trash: '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 13h10l1-13"/>',
@@ -451,6 +455,8 @@ function disposeObject(obj) {
 
 function setModel(object, yUp) {
 	exitCompare();
+	model.tech = null;
+	$('techDlg').hidden = true;
 	clearMeasure();
 	if (model.object) { modelRoot.remove(model.object); disposeObject(model.object); }
 	model.object = object;
@@ -912,7 +918,7 @@ function select(obj) {
 		highlight(selected.obj, false);
 		const r = rowOf.get(selected.obj); if (r) r.classList.remove('sel');
 	}
-	if (!obj || (selected && selected.obj === obj)) { selected = null; updateProps(); requestRender(); return; }
+	if (!obj || (selected && selected.obj === obj)) { selected = null; updateProps(); updateTechTarget(); requestRender(); return; }
 	selected = { obj, stats: statsFor(obj) };
 	highlight(obj, true);
 	const row = rowOf.get(obj);
@@ -930,6 +936,7 @@ function select(obj) {
 		row.scrollIntoView({ block: 'nearest' });
 	}
 	updateProps();
+	updateTechTarget();
 	requestRender();
 }
 
@@ -1043,7 +1050,7 @@ function updateCard() {
 const docs = [];
 let activeDoc = -1;
 const DOC_KEYS = ['name', 'buffer', 'ext', 'size', 'format', 'object', 'meshes', 'radius', 'triangles',
-	'edgesBuilt', 'yUp', 'stats', 'thumb', 'loadTime', 'cached'];
+	'edgesBuilt', 'yUp', 'stats', 'thumb', 'loadTime', 'cached', 'tech'];
 
 function snapshotDoc() {
 	const d = {};
@@ -1335,6 +1342,239 @@ $('cmpRun').onclick = runCompare;
 $('cmpExit').onclick = exitCompare;
 $('cmpOpen').onclick = () => $('fileInput').click();
 $('cmpTol').oninput = () => { $('cmpTol').dataset.user = '1'; };
+
+// =====================================================================
+// Техпроцесс: анализ детали, заготовка, маршрут, эскиз и маршрутная карта в PDF
+// =====================================================================
+function techTarget() {
+	// выделенная в дереве деталь или вся модель
+	const root = selected ? selected.obj : model.object;
+	const meshes = [];
+	if (root) root.traverse((o) => { if (o.isMesh && isShown(o) && !(o.name && o.name.startsWith('__'))) meshes.push(o); });
+	return { root, meshes, name: selected ? (selected.obj.name || 'Деталь') : baseName() };
+}
+
+function techOptions() {
+	return {
+		heat: $('techHeat').checked, heatText: $('techHeatText').value.trim(),
+		grinding: $('techGrind').checked,
+		edm: $('techEdm').checked, edmText: '',
+		coating: $('techCoat').checked, coatingText: $('techCoatText').value.trim(),
+		equipment: settings.techEquipment || {},
+	};
+}
+
+function saveTechSettings() {
+	settings.techMaterial = $('techMaterial').value;
+	settings.techAuthor = $('techAuthor').value;
+	settings.techHeatText = $('techHeatText').value;
+	settings.techCoatText = $('techCoatText').value;
+	const eq = {};
+	$$('#techEquip input[data-eq]').forEach((i) => { if (i.value.trim() && i.value.trim() !== DEFAULT_EQUIPMENT[i.dataset.eq]) eq[i.dataset.eq] = i.value.trim(); });
+	settings.techEquipment = eq;
+	saveSettings();
+}
+
+function initTechPage() {
+	$('techMaterial').value = settings.techMaterial || 'Сталь 45 ГОСТ 1050-2013';
+	$('techAuthor').value = settings.techAuthor ?? 'Шарапов Р.';
+	$('techHeatText').value = settings.techHeatText || 'Закалка и отпуск HRC 40…45';
+	$('techCoatText').value = settings.techCoatText || 'Хим. оксидирование';
+	const box = $('techEquip');
+	box.innerHTML = '';
+	const names = { saw: 'Заготовительная', lathe: 'Токарная', mill: 'Фрезерная', bench: 'Слесарная', heat: 'Термическая', grind: 'Шлифовальная', edm: 'Электроэрозионная', qc: 'Контроль' };
+	for (const k of Object.keys(DEFAULT_EQUIPMENT)) {
+		const l = document.createElement('label');
+		l.className = 'field';
+		l.innerHTML = `<span></span><input class="num" data-eq="${k}">`;
+		l.querySelector('span').textContent = names[k];
+		l.querySelector('input').value = (settings.techEquipment || {})[k] || DEFAULT_EQUIPMENT[k];
+		box.append(l);
+	}
+	$$('#techPage input, #techPage select').forEach((i) => i.addEventListener('change', saveTechSettings));
+	updateTechTarget();
+}
+function updateTechTarget() {
+	const t = techTarget();
+	$('techTargetName').textContent = model.object ? t.name + (selected ? ' (выделенная деталь)' : '') : '—';
+	$('techBuild').disabled = !model.object;
+}
+
+async function buildTech() {
+	const t = techTarget();
+	if (!t.meshes.length) return;
+	saveTechSettings();
+	showLoading('Анализирую деталь…');
+	await new Promise((r) => setTimeout(r, 30));
+	try {
+		modelRoot.updateMatrixWorld(true);
+		const part = analyzePart(t.meshes, (f) => { $('loadingText').textContent = `Анализирую деталь… ${Math.round(f * 100)}%`; });
+		const dens = parseFloat(settings.density) || 7.85;
+		const blank = chooseBlank(part, dens);
+		const route = buildRoute(part, blank, techOptions());
+		const st = statsFor(t.root);
+		model.tech = { part, blank, route, name: t.name, meshes: t.meshes, mass: st.closed ? st.vol / 1000 * dens / 1000 : null };
+		openTechDialog();
+	} catch (e) {
+		console.error(e);
+		alert('Не удалось проанализировать деталь:\n' + (e.message || e));
+	} finally {
+		hideLoading();
+	}
+}
+
+function techMeta() {
+	const T = model.tech;
+	const d = new Date();
+	return {
+		name: T.name,
+		designation: T.name.replace(/\.[^.]+$/, ''),
+		material: $('techMaterial').value,
+		author: $('techAuthor').value,
+		date: `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`,
+		mass: T.mass != null ? fmtMass(T.mass).replace(' ', ' ') : '—',
+		blank: T.blank.text,
+		blankMass: fmtMass(T.blank.mass),
+		org: APP_TITLE,
+	};
+}
+
+function openTechDialog() {
+	const T = model.tech;
+	$('techDlgTitle').textContent = 'Техпроцесс — ' + T.name;
+	$('techDlgPart').innerHTML = kv(describePart(T.part));
+	$('techDlgBlank').innerHTML = kv([
+		['Заготовка:', T.blank.text],
+		['Расчёт:', T.blank.note],
+		['Масса заготовки:', fmtMass(T.blank.mass)],
+		['Масса детали:', T.mass != null ? fmtMass(T.mass) : '—'],
+		['Материал:', $('techMaterial').value],
+	]);
+	renderRouteEditor();
+	$('techSheets').innerHTML = '';
+	$('techDlg').hidden = false;
+}
+
+function renderRouteEditor() {
+	const box = $('techRoute');
+	box.innerHTML = '';
+	model.tech.route.forEach((op, i) => {
+		const card = document.createElement('div');
+		card.className = 'op-card';
+		card.innerHTML = `
+			<div class="op-head">
+				<input class="op-no" value="">
+				<input class="op-name" value="">
+				<button class="mini" data-a="up" title="Выше">${icon('chevUp')}</button>
+				<button class="mini down" data-a="down" title="Ниже">${icon('chevUp')}</button>
+				<button class="mini" data-a="del" title="Удалить операцию">${icon('close')}</button>
+			</div>
+			<input class="op-eq" placeholder="Оборудование">
+			<textarea class="op-steps" rows="${Math.max(2, op.steps.length)}" placeholder="Переходы — каждый с новой строки"></textarea>`;
+		card.querySelector('.op-no').value = op.no;
+		card.querySelector('.op-name').value = op.name;
+		card.querySelector('.op-eq').value = op.equip;
+		card.querySelector('.op-steps').value = op.steps.join('\n');
+		card.querySelector('.op-no').oninput = (e) => { op.no = e.target.value; };
+		card.querySelector('.op-name').oninput = (e) => { op.name = e.target.value; };
+		card.querySelector('.op-eq').oninput = (e) => { op.equip = e.target.value; };
+		card.querySelector('.op-steps').oninput = (e) => { op.steps = e.target.value.split('\n').map((x) => x.trim()).filter(Boolean); };
+		card.querySelectorAll('button[data-a]').forEach((b) => b.onclick = () => {
+			const r = model.tech.route;
+			if (b.dataset.a === 'del') r.splice(i, 1);
+			if (b.dataset.a === 'up' && i > 0) [r[i - 1], r[i]] = [r[i], r[i - 1]];
+			if (b.dataset.a === 'down' && i < r.length - 1) [r[i + 1], r[i]] = [r[i], r[i + 1]];
+			renumberRoute();
+			renderRouteEditor();
+		});
+		box.append(card);
+	});
+}
+function renumberRoute() { model.tech.route.forEach((op, i) => { op.no = String((i + 1) * 5).padStart(3, '0'); }); }
+
+function techSheets() {
+	const T = model.tech;
+	return renderSheets({ meshes: T.meshes, part: T.part, route: T.route, meta: techMeta() });
+}
+async function previewTech() {
+	showLoading('Готовлю листы…');
+	await new Promise((r) => setTimeout(r, 30));
+	try {
+		const box = $('techSheets');
+		box.innerHTML = '';
+		for (const c of techSheets()) {
+			const img = document.createElement('img');
+			img.src = c.toDataURL('image/png');
+			box.append(img);
+		}
+		box.scrollIntoView({ behavior: 'smooth' });
+	} finally { hideLoading(); }
+}
+async function pdfTech() {
+	showLoading('Сохраняю PDF…');
+	await new Promise((r) => setTimeout(r, 30));
+	try {
+		const pdf = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true });
+		techSheets().forEach((c, i) => {
+			if (i) pdf.addPage('a4', 'landscape');
+			pdf.addImage(c.toDataURL('image/png'), 'PNG', 0, 0, 297, 210, undefined, 'FAST');
+		});
+		pdf.setProperties({ title: 'Техпроцесс — ' + model.tech.name, creator: APP_TITLE, author: $('techAuthor').value });
+		download(pdf.output('blob'), model.tech.name.replace(/\.[^.]+$/, '') + ' — техпроцесс.pdf');
+	} catch (e) {
+		console.error(e);
+		alert('Не удалось сохранить PDF:\n' + (e.message || e));
+	} finally { hideLoading(); }
+}
+async function printTech() {
+	showLoading('Готовлю печать…');
+	await new Promise((r) => setTimeout(r, 30));
+	let frame;
+	try {
+		const imgs = techSheets().map((c) => `<img src="${c.toDataURL('image/png')}">`).join('');
+		frame = document.createElement('iframe');
+		frame.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+		document.body.append(frame);
+		frame.contentDocument.write(`<!doctype html><html><head><style>@page{size:A4 landscape;margin:0}body{margin:0}img{width:297mm;height:210mm;display:block;page-break-after:always}</style></head><body>${imgs}</body></html>`);
+		frame.contentDocument.close();
+		await new Promise((r) => setTimeout(r, 300));
+		hideLoading();
+		frame.contentWindow.focus();
+		frame.contentWindow.print();
+	} finally {
+		hideLoading();
+		setTimeout(() => frame && frame.remove(), 60000);
+	}
+}
+
+$('techBuild').onclick = buildTech;
+$('techAddOp').onclick = () => {
+	const r = model.tech.route;
+	const at = Math.max(0, r.length - 1); // перед контролем
+	r.splice(at, 0, { no: '', name: 'Новая операция', equip: '', steps: ['Содержание операции'] });
+	renumberRoute();
+	renderRouteEditor();
+};
+$('techRebuild').onclick = () => {
+	const T = model.tech;
+	T.route = buildRoute(T.part, T.blank, techOptions());
+	renderRouteEditor();
+};
+$('techPreview').onclick = previewTech;
+$('techPdf').onclick = pdfTech;
+$('techPrint').onclick = printTech;
+$('techDlgClose').onclick = () => { $('techDlg').hidden = true; };
+initTechPage();
+
+// =====================================================================
+// О программе
+// =====================================================================
+function showAbout() {
+	$('aboutVer').textContent = APP_TITLE;
+	$('aboutDlg').hidden = false;
+}
+$('qAbout').onclick = showAbout;
+$('aboutClose').onclick = () => { $('aboutDlg').hidden = true; };
 
 // =====================================================================
 // Последние файлы и избранное (IndexedDB)
@@ -1839,6 +2079,7 @@ function showPage(p) {
 	$$('#side .page').forEach((x) => x.classList.toggle('on', x.dataset.page === p));
 	if (p === 'recent' || p === 'favorites') refreshLists();
 	if (p === 'compare') fillCompareTargets();
+	if (p === 'tech') updateTechTarget();
 }
 $$('.nav-item[data-page]').forEach((b) => b.onclick = () => showPage(b.dataset.page));
 $('navOpen').onclick = () => $('fileInput').click();
@@ -1921,7 +2162,14 @@ $('expObj').onclick = () => {
 	disposeObject(g);
 };
 function baseName() { return (model.name || 'модель').replace(/\.[^.]+$/, ''); }
-function download(blob, name) {
+async function download(blob, name) {
+	// в программе — обычное окно «Сохранить как», в браузере — скачивание
+	const api = window.pywebview && window.pywebview.api;
+	if (api && api.save_file) {
+		const b64 = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(blob); });
+		try { await api.save_file(name, b64); } catch (e) { alert('Не удалось сохранить файл:\n' + e); }
+		return;
+	}
 	const a = document.createElement('a');
 	a.href = URL.createObjectURL(blob);
 	a.download = name;
@@ -1970,7 +2218,12 @@ window.addEventListener('keydown', (e) => {
 		Digit1: view('front'), Digit2: view('back'), Digit3: view('left'),
 		Digit4: view('right'), Digit5: view('top'), Digit6: view('bottom'), Digit0: view('iso'),
 		F11: () => $('qFull').click(),
-		Escape: () => { clearMeasure(); select(null); if (tool !== 'rotate') setTool('rotate'); },
+		Escape: () => {
+			if (!$('techDlg').hidden) { $('techDlg').hidden = true; return; }
+			if (!$('aboutDlg').hidden) { $('aboutDlg').hidden = true; return; }
+			clearMeasure(); select(null); if (tool !== 'rotate') setTool('rotate');
+		},
+		F1: () => showAbout(),
 	};
 	if (map[e.code]) { e.preventDefault(); map[e.code](); }
 });

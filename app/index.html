@@ -42,6 +42,7 @@
     <button class="qbtn" id="qShowAll" title="Показать все скрытые детали"><i data-icon="eye"></i></button>
     <button class="qbtn" id="qShot" title="Снимок экрана PNG (P)"><i data-icon="camera"></i></button>
     <button class="qbtn" id="qProps" title="Панель свойств"><i data-icon="panel"></i></button>
+    <button class="qbtn" id="qAbout" title="О программе (F1)"><i data-icon="info"></i></button>
     <button class="qbtn" id="qFull" title="Полный экран (F11)"><i data-icon="fullscreen"></i></button>
   </div>
 
@@ -55,6 +56,7 @@
     <button class="nav-item" data-page="sections"><i data-icon="sectionBox"></i><span>Секции</span></button>
     <button class="nav-item" data-page="measures"><i data-icon="measure"></i><span>Измерения</span></button>
     <button class="nav-item" data-page="compare"><i data-icon="compare"></i><span>Сравнение</span></button>
+    <button class="nav-item" data-page="tech"><i data-icon="route"></i><span>Техпроцесс</span></button>
     <button class="nav-item" data-page="analysis"><i data-icon="analysis"></i><span>Анализ</span></button>
     <button class="nav-item" data-page="props"><i data-icon="props"></i><span>Свойства</span></button>
     <button class="nav-item" data-page="export"><i data-icon="export"></i><span>Экспорт</span></button>
@@ -158,6 +160,36 @@
           </div>
           <div id="cmpResult" class="mlist"></div>
           <div class="muted small">Модели сравниваются в общей системе координат — как они расположены в файлах.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Техпроцесс -->
+    <div class="page" data-page="tech" id="techPage">
+      <div class="glass panel fill">
+        <div class="panel-head"><i data-icon="route" class="accent"></i><span>Техпроцесс</span></div>
+        <div class="pad scroll">
+          <div class="field">Деталь<b id="techTargetName" class="cmp-name">—</b></div>
+          <div class="muted small" style="margin:-4px 0 10px">Для сборки выделите деталь в дереве — иначе берётся вся модель.</div>
+          <label class="field">Материал (марка)
+            <input id="techMaterial" class="num">
+          </label>
+          <div class="muted small" style="margin:-6px 0 8px">Плотность для массы — в «Свойствах».</div>
+          <label class="switch-row">Термообработка <input type="checkbox" id="techHeat"><span class="sw"></span></label>
+          <input id="techHeatText" class="num" style="margin-bottom:6px">
+          <label class="switch-row">Шлифование <input type="checkbox" id="techGrind"><span class="sw"></span></label>
+          <label class="switch-row">Электроэрозия <input type="checkbox" id="techEdm"><span class="sw"></span></label>
+          <label class="switch-row">Покрытие <input type="checkbox" id="techCoat"><span class="sw"></span></label>
+          <input id="techCoatText" class="num" style="margin-bottom:10px">
+          <label class="field">Разработал
+            <input id="techAuthor" class="num">
+          </label>
+          <details class="equip">
+            <summary>Оборудование по умолчанию</summary>
+            <div id="techEquip"></div>
+          </details>
+          <button class="wide primary-btn" id="techBuild" style="margin-top:12px"><i data-icon="route"></i>Сформировать техпроцесс</button>
+          <div class="muted small" style="margin-top:8px">Черновик для технолога: резьбы, допуски и шероховатость по 3D-модели не определяются.</div>
         </div>
       </div>
     </div>
@@ -300,6 +332,51 @@
   </aside>
 </div>
 
+
+<!-- ===== Окно техпроцесса ===== -->
+<div id="techDlg" class="modal" hidden>
+  <div class="glass modal-box wide-box">
+    <div class="panel-head"><i data-icon="route" class="accent"></i><span id="techDlgTitle">Техпроцесс</span><button class="mini" id="techDlgClose" title="Закрыть (Esc)"><i data-icon="close"></i></button></div>
+    <div class="modal-body scroll">
+      <div class="tech-top">
+        <div class="mres"><b>Деталь</b><div class="kv" id="techDlgPart"></div></div>
+        <div class="mres"><b>Заготовка</b><div class="kv" id="techDlgBlank"></div></div>
+      </div>
+      <div class="sub">Маршрут обработки <span class="muted small">— всё можно править: номер, название, оборудование, переходы</span></div>
+      <div id="techRoute"></div>
+      <div class="tech-actions">
+        <button class="wide" id="techAddOp">+ Операция</button>
+        <button class="wide" id="techRebuild" title="Собрать маршрут заново по модели и параметрам">Пересобрать маршрут</button>
+      </div>
+      <div id="techSheets" class="sheets"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="wide" id="techPreview"><i data-icon="fileCad"></i>Предпросмотр листов</button>
+      <button class="wide" id="techPrint"><i data-icon="export"></i>Печать</button>
+      <button class="wide primary-btn" id="techPdf"><i data-icon="export"></i>Сохранить PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== О программе ===== -->
+<div id="aboutDlg" class="modal" hidden>
+  <div class="glass modal-box about">
+    <div class="panel-head"><span>О программе</span><button class="mini" id="aboutClose" title="Закрыть"><i data-icon="close"></i></button></div>
+    <div class="about-body">
+      <img src="img/logo.png" alt="">
+      <h2 id="aboutVer">RafCAD View</h2>
+      <p>Просмотрщик STEP, IGES, BREP, STL, OBJ, PLY, 3MF, GLB:<br>измерения, сечения, сравнение ревизий, техпроцесс.</p>
+      <p>Автор: <b>Рафаиль Шарапов</b></p>
+      <div class="muted small licenses">
+        Используются открытые компоненты: three.js (MIT), Open CASCADE Technology (LGPL 2.1),
+        occt-import-js (LGPL 2.1), jsPDF (MIT), pywebview (BSD), Python (PSF),
+        Microsoft Edge WebView2 Runtime.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="lib/jspdf/jspdf.umd.min.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>
 </html>
