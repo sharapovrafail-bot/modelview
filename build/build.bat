@@ -25,8 +25,16 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --specpath "%WORK%" ^
   "%ROOT%\modelview.py" || goto :err
 
-rem 2) обработчик эскизов Проводника (C++), кладётся рядом с RafCADView.exe
-call "%ROOT%\thumbnailer\build_dll.bat" "%DIST%\RafCADView" || goto :err
+rem 2) обработчик эскизов Проводника (C++), кладётся рядом с RafCADView.exe.
+rem    Нет Visual Studio Build Tools — берём готовую DLL из установленной программы
+rem    (исходник обработчика меняется редко)
+call "%ROOT%\thumbnailer\build_dll.bat" "%DIST%\RafCADView"
+if errorlevel 1 (
+  if exist "%ProgramFiles%\RafCAD View\RafCADThumbs.dll" (
+    echo Компилятор C++ не найден — беру RafCADThumbs.dll из "%ProgramFiles%\RafCAD View"
+    copy /y "%ProgramFiles%\RafCAD View\RafCADThumbs.dll" "%DIST%\RafCADView\" >nul || goto :err
+  ) else goto :err
+)
 
 rem 3) установщик
 set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
