@@ -12,6 +12,7 @@ import { faceTriangles, analyzeFace, relate, mergeCoaxialFaces } from './measure
 import { compareSoups } from './compare.js';
 import { analyzePart, chooseBlank, buildRoute, describePart, DEFAULT_EQUIPMENT } from './techproc.js';
 import { renderSheets } from './drawing.js';
+import { pumaPrograms, kvlPrograms } from './gcode.js';
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -1356,6 +1357,8 @@ function techTarget() {
 
 function techOptions() {
 	return {
+		material: $('techMaterial').value,
+		blankMode: $('techBlankMode').value,
 		heat: $('techHeat').checked, heatText: $('techHeatText').value.trim(),
 		grinding: $('techGrind').checked,
 		edm: $('techEdm').checked, edmText: '',
@@ -1369,6 +1372,7 @@ function saveTechSettings() {
 	settings.techAuthor = $('techAuthor').value;
 	settings.techHeatText = $('techHeatText').value;
 	settings.techCoatText = $('techCoatText').value;
+	settings.techBlankMode = $('techBlankMode').value;
 	const eq = {};
 	$$('#techEquip input[data-eq]').forEach((i) => { if (i.value.trim() && i.value.trim() !== DEFAULT_EQUIPMENT[i.dataset.eq]) eq[i.dataset.eq] = i.value.trim(); });
 	settings.techEquipment = eq;
@@ -1380,6 +1384,7 @@ function initTechPage() {
 	$('techAuthor').value = settings.techAuthor ?? 'Шарапов Р.';
 	$('techHeatText').value = settings.techHeatText || 'Закалка и отпуск HRC 40…45';
 	$('techCoatText').value = settings.techCoatText || 'Хим. оксидирование';
+	$('techBlankMode').value = settings.techBlankMode || 'piece';
 	const box = $('techEquip');
 	box.innerHTML = '';
 	const names = { saw: 'Заготовительная', lathe: 'Токарная', mill: 'Фрезерная', bench: 'Слесарная', heat: 'Термическая', grind: 'Шлифовальная', edm: 'Электроэрозионная', qc: 'Контроль' };
@@ -1410,7 +1415,7 @@ async function buildTech() {
 		modelRoot.updateMatrixWorld(true);
 		const part = analyzePart(t.meshes, (f) => { $('loadingText').textContent = `Анализирую деталь… ${Math.round(f * 100)}%`; });
 		const dens = parseFloat(settings.density) || 7.85;
-		const blank = chooseBlank(part, dens);
+		const blank = chooseBlank(part, dens, techOptions());
 		const route = buildRoute(part, blank, techOptions());
 		const st = statsFor(t.root);
 		model.tech = { part, blank, route, name: t.name, meshes: t.meshes, mass: st.closed ? st.vol / 1000 * dens / 1000 : null };
@@ -1470,15 +1475,18 @@ function renderRouteEditor() {
 				<button class="mini" data-a="del" title="Удалить операцию">${icon('close')}</button>
 			</div>
 			<input class="op-eq" placeholder="Оборудование">
-			<textarea class="op-steps" rows="${Math.max(2, op.steps.length)}" placeholder="Переходы — каждый с новой строки"></textarea>`;
+			<textarea class="op-steps" rows="${Math.max(2, op.steps.length)}" placeholder="Переходы — каждый с новой строки"></textarea>
+			<textarea class="op-tools" rows="${Math.max(1, (op.tools || []).length)}" placeholder="Инструмент и режимы — каждый с новой строки"></textarea>`;
 		card.querySelector('.op-no').value = op.no;
 		card.querySelector('.op-name').value = op.name;
 		card.querySelector('.op-eq').value = op.equip;
 		card.querySelector('.op-steps').value = op.steps.join('\n');
+		card.querySelector('.op-tools').value = (op.tools || []).join('\n');
 		card.querySelector('.op-no').oninput = (e) => { op.no = e.target.value; };
 		card.querySelector('.op-name').oninput = (e) => { op.name = e.target.value; };
 		card.querySelector('.op-eq').oninput = (e) => { op.equip = e.target.value; };
 		card.querySelector('.op-steps').oninput = (e) => { op.steps = e.target.value.split('\n').map((x) => x.trim()).filter(Boolean); };
+		card.querySelector('.op-tools').oninput = (e) => { op.tools = e.target.value.split('\n').map((x) => x.trim()).filter(Boolean); };
 		card.querySelectorAll('button[data-a]').forEach((b) => b.onclick = () => {
 			const r = model.tech.route;
 			if (b.dataset.a === 'del') r.splice(i, 1);
@@ -1551,15 +1559,24 @@ $('techBuild').onclick = buildTech;
 $('techAddOp').onclick = () => {
 	const r = model.tech.route;
 	const at = Math.max(0, r.length - 1); // перед контролем
-	r.splice(at, 0, { no: '', name: 'Новая операция', equip: '', steps: ['Содержание операции'] });
+	r.splice(at, 0, { no: '', name: 'Новая операция', equip: '', steps: ['Содержание операции'], tools: [] });
 	renumberRoute();
 	renderRouteEditor();
 };
 $('techRebuild').onclick = () => {
 	const T = model.tech;
+	T.blank = chooseBlank(T.part, parseFloat(settings.density) || 7.85, techOptions());
 	T.route = buildRoute(T.part, T.blank, techOptions());
 	renderRouteEditor();
 };
+function ncTech() {
+	const T = model.tech;
+	const o = { material: $('techMaterial').value, name: T.name.replace(/\.[^.]+$/, '') };
+	const rot = T.part.type === 'rotational';
+	const txt = rot ? pumaPrograms(T.part, T.blank, o) : kvlPrograms(T.part, T.blank, o);
+	download(new Blob([txt.split('\n').join('\r\n')], { type: 'text/plain' }), `${o.name} — ${rot ? 'PUMA' : 'KVL'}.nc`);
+}
+$('techNc').onclick = ncTech;
 $('techPreview').onclick = previewTech;
 $('techPdf').onclick = pdfTech;
 $('techPrint').onclick = printTech;

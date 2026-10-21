@@ -300,6 +300,7 @@ button.primary-btn:disabled { opacity: .45; cursor: default; }
 .op-no { width: 52px; text-align: center; font-weight: 600; }
 .op-name { flex: 1; font-weight: 600; }
 .op-eq { color: var(--text2) !important; font-size: 12px; }
+.op-card .op-tools { color: var(--text2); font-size: 12px; border-style: dashed; }
 .op-head .down svg { transform: rotate(180deg); }
 .sheets { display: flex; flex-direction: column; gap: 14px; align-items: center; }
 .sheets img { width: 100%; max-width: 1000px; background: #fff; border-radius: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.4); }

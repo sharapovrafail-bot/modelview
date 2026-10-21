@@ -175,6 +175,12 @@
             <input id="techMaterial" class="num">
           </label>
           <div class="muted small" style="margin:-6px 0 8px">Плотность для массы — в «Свойствах».</div>
+          <label class="field">Заготовка (для тел вращения)
+            <select id="techBlankMode" class="num">
+              <option value="piece">Штучная — отрезать на пиле</option>
+              <option value="bar">Пруток через шпиндель (до Ø76)</option>
+            </select>
+          </label>
           <label class="switch-row">Термообработка <input type="checkbox" id="techHeat"><span class="sw"></span></label>
           <input id="techHeatText" class="num" style="margin-bottom:6px">
           <label class="switch-row">Шлифование <input type="checkbox" id="techGrind"><span class="sw"></span></label>
@@ -352,6 +358,7 @@
     </div>
     <div class="modal-foot">
       <button class="wide" id="techPreview"><i data-icon="fileCad"></i>Предпросмотр листов</button>
+      <button class="wide" id="techNc" title="Черновая УП Fanuc: PUMA 3050LM — контур по установам; KVL 1000 — торцевание и отверстия"><i data-icon="fileCad"></i>УП (черновик)</button>
       <button class="wide" id="techPrint"><i data-icon="export"></i>Печать</button>
       <button class="wide primary-btn" id="techPdf"><i data-icon="export"></i>Сохранить PDF</button>
     </div>
