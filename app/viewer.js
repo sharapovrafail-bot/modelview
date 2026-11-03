@@ -13,6 +13,7 @@ import { compareSoups } from './compare.js';
 import { analyzePart, chooseBlank, buildRoute, describePart, DEFAULT_EQUIPMENT } from './techproc.js';
 import { renderSheets } from './drawing.js';
 import { pumaPrograms, kvlPrograms } from './gcode.js';
+import { readDrawing, buildDrawing, drawingFormatName } from './cad2d.js';
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -86,7 +87,10 @@ fetch('version.json').then((r) => r.json()).then((v) => {
 // Константы и настройки
 // =====================================================================
 const OCCT_FORMATS = { step: 'step', stp: 'step', iges: 'iges', igs: 'iges', brep: 'brep', brp: 'brep' };
-const SUPPORTED = ['step', 'stp', 'iges', 'igs', 'brep', 'brp', 'stl', 'obj', 'ply', '3mf', 'glb', 'gltf'];
+// чертежи 2D (DXF, DWG): открываются видом сверху, без объёма и массы
+const DRAW_FORMATS = { dxf: 'dxf', dwg: 'dwg' };
+const SUPPORTED = ['step', 'stp', 'iges', 'igs', 'brep', 'brp', 'stl', 'obj', 'ply', '3mf', 'glb', 'gltf', 'dxf', 'dwg'];
+const DRAW_FG = 0xe6ebf2; // цвет «белых» линий (ACI 7) на тёмном фоне
 const QUALITY = {
 	fast: { linearDeflection: 0.003, angularDeflection: 0.8 },
 	normal: { linearDeflection: 0.001, angularDeflection: 0.5 },
@@ -103,6 +107,7 @@ const settings = Object.assign(
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function safeJson(s) { try { return JSON.parse(s) || {}; } catch { return {}; } }
 function saveSettings() { try { localStorage.setItem('mvSettings', JSON.stringify(settings)); } catch { } }
+let view2d = false; // открыт чертёж DXF/DWG: вид сверху, без вращения
 
 // =====================================================================
 // Сцена
@@ -155,6 +160,7 @@ let animating = false;
 let controls = makeControls(camera);
 function makeControls(cam) {
 	const c = new OrbitControls(cam, canvas);
+	c.enableRotate = !view2d;
 	c.enableDamping = false;
 	c.screenSpacePanning = true;
 	c.zoomToCursor = true;
@@ -215,6 +221,7 @@ const model = {
 	name: '', buffer: null, ext: '', size: 0, format: '',
 	object: null, meshes: [], box: new THREE.Box3(), radius: 1,
 	triangles: 0, edgesBuilt: false, yUp: false, stats: null, thumb: '',
+	is2d: false, info2d: null,
 };
 
 // ---- воркер OpenCascade ----
@@ -360,6 +367,14 @@ function detectFormat(ext, buffer) {
 
 async function parseModel(name, buffer) {
 	const ext = name.split('.').pop().toLowerCase();
+	if (DRAW_FORMATS[ext]) {
+		const doc = await readDrawing(ext, buffer);
+		const object = buildDrawing(doc, { fg: DRAW_FG });
+		object.userData.formatName = drawingFormatName(doc);
+		object.userData.info2d = { ...object.userData.stats2d, unitsName: doc.unitsName, scale: doc.scale, fileLayers: Object.keys(doc.layers).length };
+		if (!object.children.length) throw new Error('В чертеже не найдено ни одного видимого объекта в пространстве модели.');
+		return { object, yUp: false };
+	}
 	if (OCCT_FORMATS[ext]) {
 		// повторное открытие того же файла — сетка из кэша, без OpenCascade
 		const key = meshCacheKey(name, buffer);
@@ -428,7 +443,7 @@ async function openBufferNow(name, buffer, opts) {
 			docs.push({});
 			activeDoc = docs.length - 1;
 		}
-		Object.assign(model, { name, buffer, ext, size: buffer.byteLength, format: detectFormat(ext, buffer) });
+		Object.assign(model, { name, buffer, ext, size: buffer.byteLength, format: object.userData.formatName || detectFormat(ext, buffer) });
 		model.loadTime = (performance.now() - t0) / 1000;
 		model.cached = !!cached;
 		object.name = object.name || name;
@@ -450,7 +465,7 @@ async function openBufferNow(name, buffer, opts) {
 function disposeObject(obj) {
 	obj.traverse((o) => {
 		if (o.geometry) o.geometry.dispose();
-		if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+		if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
 	});
 }
 
@@ -463,12 +478,16 @@ function setModel(object, yUp) {
 	model.object = object;
 	model.edgesBuilt = false;
 	model.yUp = yUp;
+	model.is2d = !!object.userData.drawing;
+	model.info2d = object.userData.info2d || null;
 	modelRoot.add(object);
 	applyUpAxis();
+	apply2d();
 
 	model.meshes = [];
 	model.triangles = 0;
 	object.traverse((o) => {
+		if (model.is2d) { if (o.geometry) model.meshes.push(o); return; }
 		if (o.isMesh) {
 			model.meshes.push(o);
 			o.castShadow = true;
@@ -484,7 +503,7 @@ function setModel(object, yUp) {
 	updateBounds();
 	computeStats();
 	$('welcome').classList.add('hidden');
-	setView('iso');
+	setView(model.is2d ? 'top' : 'iso');
 	if (sectionOn) { refreshCaps(); setupSection(); }
 	makeThumb();
 	updateProps();
@@ -596,12 +615,12 @@ function applyMode() {
 	hemi.intensity = real ? 0.5 : 1.4;
 	headLight.intensity = real ? 1.1 : 1.8;
 	sun.visible = real;
-	sun.castShadow = real && settings.shadows;
-	ground.visible = real && settings.shadows;
+	sun.castShadow = real && settings.shadows && !model.is2d;
+	ground.visible = real && settings.shadows && !model.is2d;
 	grid.visible = settings.grid;
 
 	for (const m of model.meshes) {
-		if (!m.isMesh) continue;
+		if (!m.isMesh || model.is2d) continue;
 		if (m.material) m.material.dispose();
 		m.material = makeMaterial(m, mode);
 		m.castShadow = real;
@@ -611,7 +630,7 @@ function applyMode() {
 	edgeMaterial.color.setHex(ec);
 	edgeMaterial.opacity = eo;
 	edgeMaterial.depthTest = mode !== 'xray';
-	const wantEdges = mode === 'hidden' || mode === 'xray' || (settings.edges && mode !== 'wire');
+	const wantEdges = !model.is2d && (mode === 'hidden' || mode === 'xray' || (settings.edges && mode !== 'wire'));
 	if (wantEdges && model.object) ensureEdges(); else setEdgesVisible(false);
 	if (selected) highlight(selected.obj, true);
 	if (sectionOn) { refreshCaps(); setupSection(); }
@@ -641,7 +660,10 @@ const VIEWS = {
 	front: [0, -1, 0], back: [0, 1, 0], left: [-1, 0, 0], right: [1, 0, 0],
 	top: [0, -1e-4, 1], bottom: [0, -1e-4, -1], iso: [1, -1.15, 0.75],
 };
-function setView(name) { fitTo(model.box, new THREE.Vector3(...VIEWS[name]).normalize()); }
+function setView(name) {
+	if (model.is2d) name = 'top'; // чертёж смотрим только сверху
+	fitTo(model.box, new THREE.Vector3(...VIEWS[name]).normalize());
+}
 function fitTo(box, dir) {
 	const sphere = box.getBoundingSphere(new THREE.Sphere());
 	const r = Math.max(sphere.radius, 1e-6);
@@ -660,6 +682,11 @@ function fitTo(box, dir) {
 	}
 	ortho.near = -R * 50;
 	orthoHalf = r * k / Math.min(1, aspect);
+	if (view2d) {
+		// чертёж: вписываем прямоугольник габарита, а не описанную сферу
+		const sz = box.getSize(new THREE.Vector3());
+		orthoHalf = Math.max(sz.y / 2, sz.x / 2 / aspect, 1e-6) * 1.08;
+	}
 	updateOrthoFrustum();
 	persp.updateProjectionMatrix();
 	controls.target.copy(sphere.center);
@@ -670,6 +697,9 @@ function fitTo(box, dir) {
 
 function setOrtho(on) {
 	settings.ortho = on; saveSettings(); syncControls();
+	useCamera(on || model.is2d);
+}
+function useCamera(on) {
 	const from = camera, to = on ? ortho : persp;
 	if (from === to) return;
 	const target = controls.target.clone();
@@ -724,7 +754,7 @@ const dimLabels = [0, 1, 2].map(() => {
 });
 
 function updateDims() {
-	const show = settings.dims && !!model.object;
+	const show = settings.dims && !!model.object && !model.is2d;
 	dimLines.visible = show;
 	dimLabels.forEach((l) => l.el.style.display = show ? '' : 'none');
 	if (!show) return;
@@ -800,6 +830,19 @@ function meshStats(mesh, toModel) {
 function statsFor(obj) {
 	modelRoot.updateMatrixWorld(true);
 	const toModel = new THREE.Matrix4().copy(modelRoot.matrixWorld).invert();
+	if (model.is2d) {
+		// чертёж: только габарит и число линий
+		const box = new THREE.Box3();
+		let segs = 0;
+		obj.traverse((o) => {
+			if (!o.geometry || !isShown(o)) return;
+			if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+			box.union(o.geometry.boundingBox.clone().applyMatrix4(new THREE.Matrix4().multiplyMatrices(toModel, o.matrixWorld)));
+			if (o.isLineSegments) segs += o.geometry.attributes.position.count / 2;
+		});
+		if (box.isEmpty()) box.set(new THREE.Vector3(), new THREE.Vector3());
+		return { vol: 0, area: 0, com: box.getCenter(new THREE.Vector3()), tris: 0, bodies: 0, box, size: box.getSize(new THREE.Vector3()), closed: false, segs };
+	}
 	let vol = 0, area = 0, cx = 0, cy = 0, cz = 0, tris = 0, bodies = 0;
 	const box = new THREE.Box3();
 	obj.traverse((o) => {
@@ -835,18 +878,19 @@ function buildTree() {
 	rowOf.clear();
 	$('treeTitle').textContent = model.name || 'Нет модели';
 	if (!model.object) return;
-	const hasMesh = (o) => { let f = false; o.traverse((c) => { if (c.isMesh || c.isPoints) f = true; }); return f; };
+	const hasMesh = (o) => { let f = false; o.traverse((c) => { if (c.isMesh || c.isPoints || c.isLineSegments) f = true; }); return f; };
 	let count = 0;
 	const add = (obj, parentEl, depth) => {
 		if (count++ > 6000) return;
-		const kids = obj.children.filter((c) => c.name !== '__edges' && hasMesh(c));
+		// у чертежа в дереве только слои (линии и надписи внутри слоя не показываем)
+		const kids = obj.userData.dxfLayer ? [] : obj.children.filter((c) => c.name !== '__edges' && hasMesh(c));
 		const row = document.createElement('div');
 		row.className = 'node';
 		row.style.paddingLeft = 4 + depth * 14 + 'px';
 		const open = depth < 1;
 		row.innerHTML =
 			`<span class="tw ${kids.length && open ? 'open' : ''}">${kids.length ? icon('chevRight') : ''}</span>` +
-			`<i class="ic">${icon(kids.length || !(obj.isMesh || obj.isPoints) ? 'assembly' : 'part')}</i>` +
+			`<i class="ic">${icon(obj.userData.dxfLayer ? 'dims' : kids.length || !(obj.isMesh || obj.isPoints) ? 'assembly' : 'part')}</i>` +
 			`<span class="nm"></span>` +
 			`<button class="eye" title="Показать/скрыть">${icon('eye')}</button>`;
 		row.querySelector('.ic').style.display = 'inline-flex';
@@ -908,7 +952,8 @@ $('qShowAll').onclick = () => {
 const HILITE = new THREE.Color(0xff9a1f);
 function highlight(obj, on) {
 	obj.traverse((o) => {
-		if (!o.isMesh) return;
+		if (o.userData.dxfLine) { o.material.color.copy(on ? HILITE : o.material.userData.baseColor); return; }
+		if (!o.isMesh || o.userData.dxfText || o.userData.dxfFill) return;
 		const m = o.material;
 		if (m.emissive) m.emissive.copy(on ? HILITE : new THREE.Color(0)).multiplyScalar(on ? 0.4 : 0);
 		else if (m.userData.baseColor) m.color.copy(on ? HILITE : m.userData.baseColor);
@@ -957,6 +1002,8 @@ function updateProps() {
 		return;
 	}
 	const st = selected ? selected.stats : model.stats;
+	$('pComTitle').textContent = model.is2d ? 'Центр габарита' : 'Центр масс';
+	if (model.is2d) { updateProps2d(st); return; }
 	const dens = parseFloat(settings.density) || 7.85;
 	const parts = countParts();
 	const S = st.size;
@@ -999,7 +1046,33 @@ function updateProps() {
 	propsText = [...modelRows, ['Центр масс:', `${fix2(st.com.x)}; ${fix2(st.com.y)}; ${fix2(st.com.z)} мм`], ...matRows.slice(-2), ['Площадь:', fmtNum(st.area / 100, 2) + ' см²']]
 		.map(([k, v]) => `${k} ${v}`).join('\n');
 }
-function countLeaves(obj) { let n = 0; obj.traverse((o) => { if (o.isMesh || o.isPoints) n++; }); return n; }
+function updateProps2d(st) {
+	const S = st.size, I = model.info2d || {};
+	const modelRows = [
+		['Имя:', selected ? (selected.obj.name || 'Слой') : model.name],
+		['Формат:', model.format],
+		['Единицы файла:', I.unitsName || '—'],
+		['Размер:', fmtSize(model.size)],
+		[selected ? 'Слой:' : 'Слоёв:', selected ? (selected.obj.name || '0') : String(I.layers || 0)],
+		['Габариты:', `${fix2(S.x)} x ${fix2(S.y)} мм`],
+	];
+	$('pModel').innerHTML = kv(modelRows);
+	$('pCom').innerHTML = kv([['Центр X:', fix2(st.com.x) + ' мм'], ['Центр Y:', fix2(st.com.y) + ' мм']]);
+	$('pRange').innerHTML = kv([['X:', fix2(S.x) + ' мм'], ['Y:', fix2(S.y) + ' мм']]);
+	$('pMaterial').innerHTML = '<div class="muted small" style="grid-column:1/-1">Чертёж 2D — объём и масса не считаются.</div>';
+	const anRows = [
+		['Объектов:', fmtInt(I.entities || 0)],
+		['Надписей:', fmtInt(I.texts || 0) + (I.skippedTexts ? ` (+${fmtInt(I.skippedTexts)} не показано)` : '')],
+		['Отрезков:', fmtInt(Math.round(st.segs || 0))],
+		['Min:', `${fix2(st.box.min.x)}; ${fix2(st.box.min.y)}`],
+		['Max:', `${fix2(st.box.max.x)}; ${fix2(st.box.max.y)}`],
+		['Открыт за:', model.loadTime ? model.loadTime.toFixed(2) + ' с' : '—'],
+	];
+	$('pAnalysis').innerHTML = kv(anRows);
+	$('analysisBody').innerHTML = kv(anRows);
+	propsText = [...modelRows, ...anRows.slice(0, 2)].map(([k, v]) => `${k} ${v}`).join('\n');
+}
+function countLeaves(obj) { let n = 0; obj.traverse((o) => { if (o.isMesh || o.isPoints || o.userData.dxfLayer) n++; }); return n; }
 function countParts() { return { parts: countLeaves(model.object) }; }
 
 $$('#propTabs button').forEach((b) => b.onclick = () => {
@@ -1041,7 +1114,9 @@ function updateCard() {
 	$('cardImg').src = model.thumb;
 	$('cardName').textContent = model.name;
 	const S = model.stats.size;
-	$('cardInfo').innerHTML = `Тип: ${esc(model.format.split(' ')[0])}<br>Размер: ${fmtSize(model.size)}<br>Деталей: ${countParts().parts}<br>Габариты: ${fmtNum(S.x, 1)} x ${fmtNum(S.y, 1)} x ${fmtNum(S.z, 1)} мм`;
+	$('cardInfo').innerHTML = model.is2d
+		? `Тип: ${esc(model.format.split(' ')[0])} (чертёж)<br>Размер: ${fmtSize(model.size)}<br>Слоёв: ${(model.info2d || {}).layers || 0}<br>Габариты: ${fmtNum(S.x, 1)} x ${fmtNum(S.y, 1)} мм`
+		: `Тип: ${esc(model.format.split(' ')[0])}<br>Размер: ${fmtSize(model.size)}<br>Деталей: ${countParts().parts}<br>Габариты: ${fmtNum(S.x, 1)} x ${fmtNum(S.y, 1)} x ${fmtNum(S.z, 1)} мм`;
 	refreshFavButton();
 }
 
@@ -1051,7 +1126,7 @@ function updateCard() {
 const docs = [];
 let activeDoc = -1;
 const DOC_KEYS = ['name', 'buffer', 'ext', 'size', 'format', 'object', 'meshes', 'radius', 'triangles',
-	'edgesBuilt', 'yUp', 'stats', 'thumb', 'loadTime', 'cached', 'tech'];
+	'edgesBuilt', 'yUp', 'stats', 'thumb', 'loadTime', 'cached', 'tech', 'is2d', 'info2d'];
 
 function snapshotDoc() {
 	const d = {};
@@ -1074,6 +1149,7 @@ function loadDoc(i) {
 	model.box.copy(d.box);
 	modelRoot.add(model.object);
 	applyUpAxis();
+	apply2d();
 	applyMode();
 	buildTree();
 	updateBounds();
@@ -1128,8 +1204,9 @@ function closeDoc(i) {
 }
 
 function showEmpty() {
-	Object.assign(model, { name: '', buffer: null, ext: '', size: 0, format: '', object: null, meshes: [], triangles: 0, stats: null, thumb: '' });
+	Object.assign(model, { name: '', buffer: null, ext: '', size: 0, format: '', object: null, meshes: [], triangles: 0, stats: null, thumb: '', is2d: false, info2d: null });
 	model.box.makeEmpty();
+	apply2d();
 	buildTree();
 	updateProps();
 	updateCard();
@@ -1272,6 +1349,7 @@ async function runCompare() {
 	const bi = +$('cmpB').value;
 	const B = docs[bi];
 	if (!model.object || !B) return;
+	if (model.is2d || B.is2d) { alert('Сравнение работает только для 3D-моделей, не для чертежей DXF/DWG.'); return; }
 	const tol = Math.max(1e-4, parseFloat(String($('cmpTol').value).replace(',', '.')) || 0.05);
 	exitCompare();
 	clearMeasure();
@@ -1406,6 +1484,7 @@ function updateTechTarget() {
 }
 
 async function buildTech() {
+	if (model.is2d) { alert('Техпроцесс строится по 3D-модели (STEP, IGES…), а не по чертежу DXF/DWG.'); return; }
 	const t = techTarget();
 	if (!t.meshes.length) return;
 	saveTechSettings();
@@ -1801,6 +1880,11 @@ const MODE_HINT = {
 	diameter: 'Кликните по отверстию, валу или скруглению — покажу Ø и R. По плоскости — площадь.',
 	faces: 'Кликните две грани: толщина между плоскостями, межосевое расстояние отверстий, от оси до плоскости или угол.',
 };
+const MODE_HINT_2D = {
+	points: 'Кликните две точки на чертеже. Точка привязывается к концам отрезков и центрам дуг.',
+	diameter: 'Кликните по окружности или дуге — покажу Ø и R. По отрезку — длину и угол.',
+	faces: 'Кликните два элемента: отрезки — расстояние между параллельными или угол; окружности — межосевое расстояние.',
+};
 
 const toModelPoint = (v) => v.clone().applyMatrix4(new THREE.Matrix4().copy(modelRoot.matrixWorld).invert());
 const toModelDir = (v) => v.clone().transformDirection(new THREE.Matrix4().copy(modelRoot.matrixWorld).invert());
@@ -1865,8 +1949,8 @@ function renderMeasureResults() {
 	const el = $('measResult');
 	if (!el) return;
 	let html = '';
-	if (measure.pending.length) html += `<div class="muted">${measure.mode === 'points' ? 'Укажите вторую точку' : 'Укажите вторую грань'}</div>`;
-	else if (!measure.items.length) html += `<div class="muted">${MODE_HINT[measure.mode]}</div>`;
+	if (measure.pending.length) html += `<div class="muted">${measure.mode === 'points' ? 'Укажите вторую точку' : view2d ? 'Укажите второй элемент' : 'Укажите вторую грань'}</div>`;
+	else if (!measure.items.length) html += `<div class="muted">${(view2d ? MODE_HINT_2D : MODE_HINT)[measure.mode]}</div>`;
 	for (const it of measure.items.slice().reverse()) {
 		html += `<div class="mres"><b>${esc(it.title)}</b><div class="kv">${kv(it.rows)}</div>${it.note ? `<div class="muted small">${esc(it.note)}</div>` : ''}</div>`;
 	}
@@ -1913,6 +1997,7 @@ function describeFace(f) {
 }
 
 function measurePick(h) {
+	if (model.is2d) { measurePick2d(h); return; }
 	if (!h || !h.object.isMesh || h.faceIndex == null) return;
 	const mode = measure.mode;
 	if (mode === 'points') {
@@ -1990,6 +2075,142 @@ function measurePick(h) {
 	requestRender();
 }
 
+// =====================================================================
+// Чертёж 2D: режим просмотра и измерения
+// =====================================================================
+function apply2d() {
+	view2d = !!model.is2d;
+	document.body.classList.toggle('mode-2d', view2d);
+	if (view2d) {
+		if (animating) { animating = false; controls.autoRotate = false; $$('.tool[data-tool=animate]').forEach((b) => b.classList.remove('on')); }
+		if (sectionOn) setSection(false);
+	}
+	useCamera(view2d || settings.ortho);
+	controls.enableRotate = !view2d;
+	applyToolButtons(controls);
+	renderMeasureResults();
+}
+// сколько миллиметров модели в одном пикселе экрана
+function pixelWorld() {
+	const h = Math.max(1, canvas.clientHeight);
+	if (camera.isOrthographicCamera) return (camera.top - camera.bottom) / camera.zoom / h;
+	const d = camera.position.distanceTo(controls.target);
+	return 2 * d * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / h;
+}
+const V2 = (p) => new THREE.Vector3(p.x, p.y, 0);
+function segInfo(h) {
+	if (!h || !h.object.userData.dxfLine) return null;
+	const i = h.index - (h.index % 2);
+	const P = h.object.geometry.attributes.position;
+	const a = new THREE.Vector3().fromBufferAttribute(P, i).applyMatrix4(h.object.matrixWorld);
+	const b = new THREE.Vector3().fromBufferAttribute(P, i + 1).applyMatrix4(h.object.matrixWorld);
+	return { a, b, meta: h.object.userData.segMeta[i / 2] || { k: 'curve' }, point: h.point.clone().setZ(0) };
+}
+// привязка к концам отрезков и центрам дуг
+function snap2d(si) {
+	const cand = [si.a, si.b];
+	if (si.meta.k === 'line') cand.push(V2(si.meta.a), V2(si.meta.b));
+	if (si.meta.k === 'arc') cand.push(V2(si.meta.c));
+	let best = si.point, bd = pixelWorld() * 12;
+	for (const c of cand) { const d = c.distanceTo(si.point); if (d < bd) { bd = d; best = c; } }
+	return best.clone();
+}
+function describe2d(m) {
+	if (m.k === 'arc') {
+		const rows = m.full ? [['Диаметр:', 'Ø ' + fix3(m.r * 2) + ' мм'], ['Радиус:', 'R ' + fix3(m.r) + ' мм']]
+			: [['Радиус:', 'R ' + fix3(m.r) + ' мм'], ['Диаметр:', 'Ø ' + fix3(m.r * 2) + ' мм'], ['Угол дуги:', fmtNum(THREE.MathUtils.radToDeg(m.sweep), 2) + '°'],
+				['Длина дуги:', fix3(m.r * m.sweep) + ' мм']];
+		rows.push(['Центр:', `${fix3(m.c.x)}; ${fix3(m.c.y)}`]);
+		return { title: m.full ? 'Окружность' : 'Дуга', rows };
+	}
+	if (m.k === 'line') {
+		const dx = m.b.x - m.a.x, dy = m.b.y - m.a.y;
+		let ang = THREE.MathUtils.radToDeg(Math.atan2(dy, dx)); if (ang < 0) ang += 180; if (ang >= 180) ang -= 180;
+		return { title: 'Отрезок', rows: [['Длина:', fix3(Math.hypot(dx, dy)) + ' мм'], ['ΔX:', fix3(Math.abs(dx)) + ' мм'], ['ΔY:', fix3(Math.abs(dy)) + ' мм'], ['Угол к X:', fmtNum(ang, 3) + '°']] };
+	}
+	return null;
+}
+function measurePick2d(h) {
+	const si = segInfo(h);
+	if (!si) return;
+	const mode = measure.mode;
+	const m = si.meta;
+	if (mode === 'diameter') {
+		const d = describe2d(m);
+		if (!d) { measure.items.push({ title: 'Кривая', rows: [], note: 'Это сплайн или эллипс — для расстояний используйте режим «Точки».' }); renderMeasureResults(); return; }
+		if (m.k === 'arc') {
+			const c = V2(m.c);
+			if (m.full) {
+				const pts = [];
+				for (let i = 0; i <= 96; i++) { const t = Math.PI * 2 * i / 96; pts.push(c.clone().add(new THREE.Vector3(Math.cos(t) * m.r, Math.sin(t) * m.r, 0))); }
+				mAdd(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mLineMat));
+			}
+			mPoint(c);
+			mLabel(si.point, m.full ? `<b>Ø ${fix2(m.r * 2)} мм</b>` : `<b>R ${fix2(m.r)} мм</b>`);
+		} else {
+			mLine(V2(m.a), V2(m.b)); mPoint(V2(m.a)); mPoint(V2(m.b));
+			mLabel(V2(m.a).add(V2(m.b)).multiplyScalar(0.5), `<b>${fix2(V2(m.a).distanceTo(V2(m.b)))} мм</b>`);
+		}
+		measure.items.push(d);
+	} else if (mode === 'points') {
+		const p = snap2d(si);
+		mPoint(p);
+		measure.pending.push(p);
+		if (measure.pending.length === 2) {
+			const [a, b] = measure.pending;
+			measure.pending = [];
+			mLine(a, b);
+			const d = b.clone().sub(a);
+			mLabel(a.clone().add(b).multiplyScalar(0.5), `<b>${fix2(d.length())} мм</b>`);
+			measure.items.push({ title: 'Расстояние', rows: [['Расстояние:', fix3(d.length()) + ' мм'], ['ΔX:', fix3(Math.abs(d.x)) + ' мм'], ['ΔY:', fix3(Math.abs(d.y)) + ' мм']] });
+		}
+	} else {
+		// два элемента: отрезки — расстояние между параллельными или угол; окружности — межосевое
+		if (m.k !== 'line' && m.k !== 'arc') { measure.items.push({ title: 'Кривая', rows: [], note: 'Выберите отрезок, окружность или дугу.' }); renderMeasureResults(); return; }
+		if (m.k === 'line') mLine(V2(m.a), V2(m.b)); else mPoint(V2(m.c));
+		measure.pending.push(m);
+		if (measure.pending.length === 2) {
+			const [f1, f2] = measure.pending;
+			measure.pending = [];
+			const r = relate2d(f1, f2);
+			if (r.a) { mLine(r.a, r.b); mPoint(r.a); mPoint(r.b); }
+			mLabel(r.at, `<b>${r.label}</b>`);
+			measure.items.push({ title: r.title, rows: r.rows });
+		}
+	}
+	renderMeasureResults();
+	requestRender();
+}
+function relate2d(f1, f2) {
+	const lineDir = (f) => V2(f.b).sub(V2(f.a)).normalize();
+	const footOnLine = (p, f) => { const a = V2(f.a), u = lineDir(f); return a.clone().addScaledVector(u, p.clone().sub(a).dot(u)); };
+	if (f1.k === 'arc' && f2.k === 'arc') {
+		const a = V2(f1.c), b = V2(f2.c), d = b.clone().sub(a);
+		return {
+			title: 'Межосевое расстояние', a, b, at: a.clone().add(b).multiplyScalar(0.5), label: fix2(d.length()) + ' мм',
+			rows: [['Между центрами:', fix3(d.length()) + ' мм'], ['ΔX:', fix3(Math.abs(d.x)) + ' мм'], ['ΔY:', fix3(Math.abs(d.y)) + ' мм'], ['Окружности:', `Ø${fix2(f1.r * 2)} / Ø${fix2(f2.r * 2)}`]],
+		};
+	}
+	if (f1.k === 'line' && f2.k === 'line') {
+		const u = lineDir(f1), v = lineDir(f2);
+		const ang = THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.abs(u.dot(v)))));
+		if (ang < 0.05) {
+			const mid = V2(f2.a).add(V2(f2.b)).multiplyScalar(0.5);
+			const foot = footOnLine(mid, f1);
+			const dist = mid.distanceTo(foot);
+			return { title: 'Расстояние между параллельными', a: foot, b: mid, at: foot.clone().add(mid).multiplyScalar(0.5), label: fix2(dist) + ' мм', rows: [['Расстояние:', fix3(dist) + ' мм']] };
+		}
+		const at = V2(f1.a).add(V2(f1.b)).add(V2(f2.a)).add(V2(f2.b)).multiplyScalar(0.25);
+		return { title: 'Угол', at, label: fmtNum(ang, 2) + '°', rows: [['Угол:', fmtNum(ang, 3) + '°'], ['Дополнительный:', fmtNum(180 - ang, 3) + '°']] };
+	}
+	const L = f1.k === 'line' ? f1 : f2, C = f1.k === 'arc' ? f1 : f2;
+	const c = V2(C.c), foot = footOnLine(c, L), dist = c.distanceTo(foot);
+	return {
+		title: 'От центра до прямой', a: c, b: foot, at: c.clone().add(foot).multiplyScalar(0.5), label: fix2(dist) + ' мм',
+		rows: [['От центра до прямой:', fix3(dist) + ' мм'], ['До края окружности:', fix3(Math.abs(dist - C.r)) + ' мм']],
+	};
+}
+
 function updateMeasureLabels() {
 	if (!measure.labels.length) return;
 	const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -2018,10 +2239,11 @@ $$('#measMode button').forEach((b) => b.onclick = () => {
 // Инструменты
 // =====================================================================
 function applyToolButtons(c) {
-	const L = tool === 'pan' ? THREE.MOUSE.PAN : tool === 'zoom' ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE;
+	const L = tool === 'pan' || (view2d && tool === 'rotate') ? THREE.MOUSE.PAN : tool === 'zoom' ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE;
 	c.mouseButtons = { LEFT: L, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
 }
 function setTool(t) {
+	if (view2d && (t === 'section' || t === 'animate')) return; // у плоского чертежа нет сечений и вращения
 	if (t === 'section') {
 		setSection(!sectionOn);
 		if (sectionOn) showPage('sections');
@@ -2059,6 +2281,7 @@ function pick(ev) {
 	const ndc = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
 	raycaster.setFromCamera(ndc, camera);
 	raycaster.params.Points.threshold = model.radius * 0.005;
+	raycaster.params.Line.threshold = model.is2d ? pixelWorld() * 6 : 1;
 	for (const h of raycaster.intersectObject(model.object, true)) {
 		if (!isShown(h.object)) continue;
 		if (sectionOn && clipPlane.distanceToPoint(h.point) < 0) continue;
@@ -2075,8 +2298,10 @@ canvas.addEventListener('pointerup', (e) => {
 	if (moved > 4) return;
 	const h = pick(e);
 	if (tool === 'measure') { measurePick(h); return; }
-	if (tool === 'hide') { if (h) { if (selected && selected.obj === h.object) select(null); setVisible(h.object, false); } return; }
-	select(h ? h.object : null);
+	// в чертеже выделяется и скрывается весь слой
+	const target = h ? (model.is2d ? h.object.parent : h.object) : null;
+	if (tool === 'hide') { if (target) { if (selected && selected.obj === target) select(null); setVisible(target, false); } return; }
+	select(target);
 });
 canvas.addEventListener('dblclick', (e) => {
 	const h = pick(e);
@@ -2129,7 +2354,7 @@ $('density').onchange = (e) => { settings.density = e.target.value; saveSettings
 $('meshUnit').value = settings.meshUnit;
 $('meshUnit').onchange = (e) => {
 	settings.meshUnit = e.target.value; saveSettings();
-	if (model.buffer && !OCCT_FORMATS[model.ext]) openBuffer(model.name, model.buffer, { noRecent: true, replace: true });
+	if (model.buffer && !OCCT_FORMATS[model.ext] && !DRAW_FORMATS[model.ext]) openBuffer(model.name, model.buffer, { noRecent: true, replace: true });
 };
 $('quality').value = settings.quality;
 $('quality').onchange = (e) => {
@@ -2167,6 +2392,7 @@ function visibleGroup() {
 }
 $('expStl').onclick = () => {
 	if (!model.object) return;
+	if (model.is2d) { alert('Чертёж 2D нельзя сохранить в STL — сохраните снимок PNG.'); return; }
 	const g = visibleGroup();
 	const data = new STLExporter().parse(g, { binary: true });
 	download(new Blob([data], { type: 'model/stl' }), baseName() + '.stl');
@@ -2174,6 +2400,7 @@ $('expStl').onclick = () => {
 };
 $('expObj').onclick = () => {
 	if (!model.object) return;
+	if (model.is2d) { alert('Чертёж 2D нельзя сохранить в OBJ — сохраните снимок PNG.'); return; }
 	const g = visibleGroup();
 	download(new Blob([new OBJExporter().parse(g)], { type: 'text/plain' }), baseName() + '.obj');
 	disposeObject(g);

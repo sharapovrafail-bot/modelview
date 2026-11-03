@@ -312,3 +312,9 @@ details.equip summary { cursor: pointer; padding: 6px 0; }
 .about-body h2 { margin: 8px 0 6px; font-size: 20px; }
 .about-body p { color: var(--text2); margin: 6px 0; }
 .licenses { margin-top: 12px; line-height: 1.5; }
+
+/* ===== Чертёж 2D (DXF, DWG): вид сверху, без режимов отображения, куба видов, сечения и анимации ===== */
+body.mode-2d #modes,
+body.mode-2d #viewcube,
+body.mode-2d .tool[data-tool=section],
+body.mode-2d .tool[data-tool=animate] { display: none !important; }

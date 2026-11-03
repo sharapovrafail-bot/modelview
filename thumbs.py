@@ -21,7 +21,7 @@ import server
 THUMB_PORT = 47621
 IDLE_EXIT = 90                    # сек без запросов -> выход
 MAX_BYTES = 300 * 1024 * 1024     # файлы крупнее не рендерим (эскиз был бы слишком долгим)
-EXTS = {"step", "stp", "iges", "igs", "brep", "brp", "stl", "obj", "ply", "3mf", "glb", "gltf"}
+EXTS = {"step", "stp", "iges", "igs", "brep", "brp", "stl", "obj", "ply", "3mf", "glb", "gltf", "dxf", "dwg"}
 
 tasks = queue.Queue()
 last_activity = time.time()

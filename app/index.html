@@ -60,7 +60,7 @@
     <button class="nav-item" data-page="analysis"><i data-icon="analysis"></i><span>Анализ</span></button>
     <button class="nav-item" data-page="props"><i data-icon="props"></i><span>Свойства</span></button>
     <button class="nav-item" data-page="export"><i data-icon="export"></i><span>Экспорт</span></button>
-    <input type="file" id="fileInput" hidden multiple accept=".step,.stp,.iges,.igs,.brep,.brp,.stl,.obj,.ply,.3mf,.glb,.gltf">
+    <input type="file" id="fileInput" hidden multiple accept=".step,.stp,.iges,.igs,.brep,.brp,.stl,.obj,.ply,.3mf,.glb,.gltf,.dxf,.dwg">
   </aside>
 
   <!-- ===== Левая панель (страницы) ===== -->
@@ -73,7 +73,7 @@
           <span id="treeTitle">Нет модели</span>
           <button class="mini" id="treeCollapse" title="Свернуть всё"><i data-icon="chevUp"></i></button>
         </div>
-        <div id="treeBody" class="scroll"><div class="empty">Откройте файл STEP, IGES, STL…</div></div>
+        <div id="treeBody" class="scroll"><div class="empty">Откройте файл STEP, IGES, STL, DXF, DWG…</div></div>
       </div>
       <div class="glass panel card" id="card" hidden>
         <div class="thumb"><img id="cardImg" alt=""><button class="mini fav" id="cardFav" title="В избранное"><i data-icon="star"></i></button></div>
@@ -296,7 +296,7 @@
         <svg viewBox="0 0 24 24"><path d="M12 3 21 8v8l-9 5-9-5V8z"/><path d="M12 13 21 8M12 13v8M12 13 3 8"/></svg>
         <h1>Перетащите файл сюда</h1>
         <p>или нажмите <b>Открыть</b> (Ctrl+O)</p>
-        <p class="muted">STEP · STP · IGES · BREP · STL · OBJ · PLY · 3MF · GLB</p>
+        <p class="muted">STEP · STP · IGES · BREP · STL · OBJ · PLY · 3MF · GLB · чертежи DXF · DWG</p>
       </div>
     </div>
     <div id="dropOverlay" hidden><div>Отпустите файл для открытия</div></div>
@@ -322,7 +322,7 @@
     <div class="scroll prop-body">
       <div class="tab on" data-tab="model">
         <div class="kv" id="pModel"></div>
-        <div class="sub">Центр масс</div>
+        <div class="sub" id="pComTitle">Центр масс</div>
         <div class="kv-icon"><div class="kv" id="pCom"></div><i data-icon="com" class="big"></i></div>
         <div class="sub">Диапазон размеров</div>
         <div class="kv" id="pRange"></div>
@@ -372,11 +372,11 @@
     <div class="about-body">
       <img src="img/logo.png" alt="">
       <h2 id="aboutVer">RafCAD View</h2>
-      <p>Просмотрщик STEP, IGES, BREP, STL, OBJ, PLY, 3MF, GLB:<br>измерения, сечения, сравнение ревизий, техпроцесс.</p>
+      <p>Просмотрщик STEP, IGES, BREP, STL, OBJ, PLY, 3MF, GLB и чертежей DXF, DWG:<br>измерения, сечения, сравнение ревизий, техпроцесс.</p>
       <p>Автор: <b>Рафаиль Шарапов</b></p>
       <div class="muted small licenses">
         Используются открытые компоненты: three.js (MIT), Open CASCADE Technology (LGPL 2.1),
-        occt-import-js (LGPL 2.1), jsPDF (MIT), pywebview (BSD), Python (PSF),
+        occt-import-js (LGPL 2.1), jsPDF (MIT), dxf-parser (MIT), LibreDWG (GPL 3), pywebview (BSD), Python (PSF),
         Microsoft Edge WebView2 Runtime.
       </div>
     </div>

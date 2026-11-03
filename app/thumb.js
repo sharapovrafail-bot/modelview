@@ -8,6 +8,7 @@ import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { readDrawing, buildDrawing } from './cad2d.js';
 
 const OCCT = { step: 'step', stp: 'step', iges: 'iges', igs: 'iges', brep: 'brep', brp: 'brep' };
 const DEFAULT_COLOR = new THREE.Color().setRGB(0.74, 0.76, 0.8, THREE.SRGBColorSpace);
@@ -127,12 +128,37 @@ async function parse(ext, buffer) {
 function dispose(obj) {
 	obj.traverse((o) => {
 		if (o.geometry) o.geometry.dispose();
-		if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+		if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
 	});
+}
+
+// чертёж DXF/DWG: тёмные линии на прозрачном фоне, вид сверху
+async function renderDrawingThumb(ext, buffer, size) {
+	const doc = await readDrawing(ext, buffer);
+	const obj = buildDrawing(doc, { fg: 0x1b2230, texts: true });
+	const scene = new THREE.Scene();
+	scene.add(obj);
+	const box = new THREE.Box3().setFromObject(obj);
+	if (box.isEmpty()) throw new Error('пустой чертёж');
+	const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+	const half = Math.max(s.x, s.y) / 2 * 1.06 || 1;
+	const cam = new THREE.OrthographicCamera(c.x - half, c.x + half, c.y + half, c.y - half, -10, 10);
+	cam.position.set(0, 0, 5);
+	size = Math.max(32, Math.min(1024, size | 0));
+	renderer.setPixelRatio(1);
+	renderer.setSize(size, size, false);
+	const tm = renderer.toneMapping;
+	renderer.toneMapping = THREE.NoToneMapping;
+	renderer.render(scene, cam);
+	renderer.toneMapping = tm;
+	const url = canvas.toDataURL('image/png');
+	dispose(obj);
+	return url.slice(url.indexOf(',') + 1);
 }
 
 async function renderThumb(id, ext, size) {
 	const buffer = await (await fetch('api/job/' + id)).arrayBuffer();
+	if (ext === 'dxf' || ext === 'dwg') return renderDrawingThumb(ext, buffer, size);
 	const { obj, yUp } = await parse(ext, buffer);
 	const scene = new THREE.Scene();
 	scene.environment = envMap;

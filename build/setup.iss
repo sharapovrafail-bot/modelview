@@ -17,7 +17,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher=Rafail Sharapov
-AppComments=Быстрый просмотрщик STEP, IGES, STL и других 3D-файлов
+AppComments=Быстрый просмотрщик STEP, IGES, STL и других 3D-файлов, чертежей DXF и DWG
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -153,6 +153,19 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\shell\RafCADVi
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\shell\RafCADView"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\shell\RafCADView\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""
 
+; .dxf — чертёж: «Открыть с помощью» и меню, программу по умолчанию (КОМПАС, AutoCAD) не трогаем
+Root: HKA; Subkey: "Software\Classes\.dxf\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".dxf"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dxf\shell\RafCADView"; ValueType: string; ValueData: "Открыть в RafCAD View"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dxf\shell\RafCADView"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dxf\shell\RafCADView\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""
+; .dwg — чертёж: «Открыть с помощью» и меню, программу по умолчанию (КОМПАС, AutoCAD) не трогаем
+Root: HKA; Subkey: "Software\Classes\.dwg\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".dwg"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dwg\shell\RafCADView"; ValueType: string; ValueData: "Открыть в RafCAD View"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dwg\shell\RafCADView"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dwg\shell\RafCADView\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""
+
 ; обработчик эскизов (миниатюры моделей в Проводнике)
 Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbClsid}"; ValueType: string; ValueData: "RafCAD View Thumbnail Provider"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbClsid}\InprocServer32"; ValueType: string; ValueData: "{app}\RafCADThumbs.dll"
@@ -182,6 +195,9 @@ Root: HKA; Subkey: "Software\Classes\.glb\ShellEx\{#ThumbIface}"; ValueType: str
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.glb\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\.gltf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gltf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+; чертежи DXF, DWG
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dxf\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.dwg\ShellEx\{#ThumbIface}"; ValueType: string; ValueData: "{#ThumbClsid}"; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Запустить RafCAD View"; Flags: nowait postinstall skipifsilent runasoriginaluser
