@@ -9,6 +9,7 @@ import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { readDrawing, buildDrawing } from './cad2d.js';
+import { parse3mf } from './threemf.js';
 
 const OCCT = { step: 'step', stp: 'step', iges: 'iges', igs: 'iges', brep: 'brep', brp: 'brep' };
 const DEFAULT_COLOR = new THREE.Color().setRGB(0.74, 0.76, 0.8, THREE.SRGBColorSpace);
@@ -116,7 +117,11 @@ async function parse(ext, buffer) {
 		case 'stl': return { obj: restyle(new THREE.Mesh(new STLLoader().parse(buffer))), yUp: false };
 		case 'ply': return { obj: restyle(new THREE.Mesh(new PLYLoader().parse(buffer))), yUp: false };
 		case 'obj': return { obj: restyle(new OBJLoader().parse(new TextDecoder().decode(buffer))), yUp: true };
-		case '3mf': return { obj: restyle(new ThreeMFLoader().parse(buffer)), yUp: false };
+		case '3mf': {
+			let o;
+			try { o = parse3mf(buffer); } catch (e) { o = new ThreeMFLoader().parse(buffer); }
+			return { obj: restyle(o), yUp: false };
+		}
 		case 'glb': case 'gltf': {
 			const gltf = await new Promise((res, rej) => new GLTFLoader().parse(buffer, '', res, rej));
 			return { obj: restyle(gltf.scene), yUp: true };

@@ -14,6 +14,7 @@ import { analyzePart, chooseBlank, buildRoute, describePart, DEFAULT_EQUIPMENT }
 import { renderSheets } from './drawing.js';
 import { pumaPrograms, kvlPrograms } from './gcode.js';
 import { readDrawing, buildDrawing, drawingFormatName } from './cad2d.js';
+import { parse3mf } from './threemf.js';
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -391,8 +392,16 @@ async function parseModel(name, buffer) {
 	}
 	const r = await parseMeshFormat(ext, name, buffer);
 	const k = MESH_UNITS[settings.meshUnit] || 1;
-	if (k !== 1 && ext !== 'glb' && ext !== 'gltf') r.object.scale.multiplyScalar(k);
+	if (k !== 1 && ext !== 'glb' && ext !== 'gltf' && ext !== '3mf') r.object.scale.multiplyScalar(k); // в 3MF единицы записаны в файле
 	return r;
+}
+// 3MF: свой загрузчик (Bambu Studio, Orca, PrusaSlicer — детали в отдельных файлах архива);
+// если он не справился — пробуем встроенный из three.js
+function load3mf(buffer) {
+	try { return parse3mf(buffer); }
+	catch (e) {
+		try { return new ThreeMFLoader().parse(buffer); } catch { throw e; }
+	}
 }
 // единицы в файлах-сетках не записаны: по умолчанию миллиметры, можно сменить в «Свойствах»
 const MESH_UNITS = { mm: 1, cm: 10, m: 1000, in: 25.4 };
@@ -402,7 +411,7 @@ async function parseMeshFormat(ext, name, buffer) {
 		case 'stl': return { object: geometryToObject(new STLLoader().parse(buffer), name), yUp: false };
 		case 'ply': return { object: geometryToObject(new PLYLoader().parse(buffer), name), yUp: false };
 		case 'obj': return { object: prepThreeObject(new OBJLoader().parse(new TextDecoder().decode(buffer))), yUp: true };
-		case '3mf': return { object: prepThreeObject(new ThreeMFLoader().parse(buffer)), yUp: false };
+		case '3mf': return { object: prepThreeObject(load3mf(buffer)), yUp: false };
 		case 'glb': case 'gltf': {
 			const gltf = await new Promise((res, rej) => new GLTFLoader().parse(buffer, '', res, rej));
 			return { object: prepThreeObject(gltf.scene), yUp: true };
