@@ -79,3 +79,9 @@
 `Ctrl+O` открыть · `Ctrl+Tab` следующая вкладка · `Ctrl+W` закрыть вкладку · `F` вписать · `0` изометрия · `1–6` виды · `E` рёбра · `D` размеры · `O` орто ·
 `G` сетка · `S` сечение · `M` линейка · `H` скрыть деталь · `A` анимация · `P` снимок · `Esc` сброс
 Мышь: ЛКМ — вращение, ПКМ/СКМ — сдвиг, колесо — масштаб, двойной клик — центр вращения.
+
+## macOS
+Собирается автоматически на GitHub Actions (`.github/workflows/mac.yml`) для Mac на Apple M и Intel:
+готовые `RafCAD-View-<версия>-mac-arm64.dmg` / `-x64.dmg` — во вкладке **Releases → mac-latest**.
+На Mac — своё окно (WKWebView), двойной щелчок по STEP/STL/3MF/DXF/DWG в Finder открывает файл.
+Код для Mac: `mac/rafcad_mac.py`, рецепт сборки: `mac/RafCADView.spec`.

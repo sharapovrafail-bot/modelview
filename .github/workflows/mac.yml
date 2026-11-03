@@ -1,0 +1,87 @@
+# Сборка RafCAD View для macOS на компьютерах Mac у GitHub (Apple M и Intel).
+# Результат: RafCAD-View-<версия>-mac-<arm64|x64>.dmg — во вкладке Releases («mac-latest») и в артефактах.
+name: macOS build
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'server.py', 'mac/**', '.github/workflows/mac.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest       # Apple M1…M4
+            arch: arm64
+          - runner: macos-15-intel     # Intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Зависимости
+        run: python -m pip install --upgrade pip pyinstaller pywebview
+
+      - name: Сборка RafCAD View.app
+        run: |
+          python -m PyInstaller --noconfirm --clean --distpath dist --workpath build mac/RafCADView.spec
+          codesign --force --deep --sign - "dist/RafCAD View.app"
+          codesign --verify --deep --strict "dist/RafCAD View.app" && echo "подпись OK"
+
+      - name: Проверка запуском (окно + сервер) и снимок экрана
+        run: |
+          "dist/RafCAD View.app/Contents/MacOS/RafCADView" samples/rounded-cube.step > run.log 2>&1 &
+          APP=$!
+          ok=0
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:47615/version.json > /dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          sleep 12
+          screencapture -x screenshot-${{ matrix.arch }}.png || true
+          kill $APP || true
+          cat run.log
+          [ "$ok" = 1 ] && echo "сервер программы отвечает" || (echo "программа не запустилась"; exit 1)
+
+      - name: DMG
+        run: |
+          VER=$(python -c "import json;print(json.load(open('app/version.json'))['version'])")
+          echo "VER=$VER" >> $GITHUB_ENV
+          mkdir dmg && cp -R "dist/RafCAD View.app" dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "RafCAD View $VER" -srcfolder dmg -ov -format UDZO "RafCAD-View-$VER-mac-${{ matrix.arch }}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafcad-mac-${{ matrix.arch }}
+          path: |
+            RafCAD-View-*.dmg
+            screenshot-*.png
+            run.log
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Релиз mac-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete mac-latest --yes --cleanup-tag || true
+          gh release create mac-latest out/*/RafCAD-View-*.dmg \
+            --title "RafCAD View для macOS (последняя сборка)" \
+            --notes "Автосборка на GitHub Actions. arm64 — Mac на Apple M1–M4, x64 — Mac на Intel. Первый запуск: правой кнопкой → «Открыть» (без подписи Apple)." \
+            --latest
