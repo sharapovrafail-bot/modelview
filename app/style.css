@@ -318,3 +318,31 @@ body.mode-2d #modes,
 body.mode-2d #viewcube,
 body.mode-2d .tool[data-tool=section],
 body.mode-2d .tool[data-tool=animate] { display: none !important; }
+
+/* ===== Чертёж: выбор моделей ===== */
+.pick-actions { display: flex; gap: 12px; margin: -2px 0 6px; }
+.mini-link { color: var(--accent, #4d93ff); font-size: 12px; }
+.pick-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.pick-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; background: rgba(0,0,0,.22); border: 1px solid var(--line); font-size: 12.5px; color: var(--text); cursor: pointer; }
+.pick-row input { flex: none; }
+.pick-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-row.dis { opacity: .45; cursor: default; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+
+/* ===== Заготовка ===== */
+.blk-summary { display: flex; flex-direction: column; gap: 6px; }
+.blk-item { background: rgba(0,0,0,.22); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; color: var(--text2); }
+.blk-item b { display: block; color: var(--text); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blk-item .own { color: #ffb02e; }
+.blk-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.blk-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 4px; border-bottom: 1px solid var(--line2); white-space: nowrap; }
+.blk-table td { padding: 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.blk-table input, .blk-table select { background: rgba(0,0,0,.3); border: 1px solid var(--line2); border-radius: 6px; height: 28px; padding: 0 6px; color: var(--text); font: inherit; width: 100%; }
+.blk-table input.n { width: 72px; text-align: right; }
+.blk-table input.nm { min-width: 150px; }
+.blk-table input[data-f=material] { min-width: 130px; }
+.blk-table select[data-f=kind] { min-width: 128px; }
+.blk-table td.calc { color: var(--text2); white-space: nowrap; text-align: right; }
+.blk-table tr.own td:first-child { box-shadow: inset 3px 0 0 #ffb02e; }
+.blk-table .row-btns { display: flex; gap: 4px; }
+.blk-table .row-btns button { height: 28px; padding: 0 8px; border-radius: 6px; background: rgba(255,255,255,.06); border: 1px solid var(--line2); color: var(--text); white-space: nowrap; }

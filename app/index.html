@@ -57,6 +57,8 @@
     <button class="nav-item" data-page="measures"><i data-icon="measure"></i><span>Измерения</span></button>
     <button class="nav-item" data-page="compare"><i data-icon="compare"></i><span>Сравнение</span></button>
     <button class="nav-item" data-page="tech"><i data-icon="route"></i><span>Техпроцесс</span></button>
+    <button class="nav-item" data-page="drawing"><i data-icon="sheet"></i><span>Чертёж</span></button>
+    <button class="nav-item" data-page="blank"><i data-icon="blank"></i><span>Заготовка</span></button>
     <button class="nav-item" data-page="analysis"><i data-icon="analysis"></i><span>Анализ</span></button>
     <button class="nav-item" data-page="props"><i data-icon="props"></i><span>Свойства</span></button>
     <button class="nav-item" data-page="export"><i data-icon="export"></i><span>Экспорт</span></button>
@@ -196,6 +198,46 @@
           </details>
           <button class="wide primary-btn" id="techBuild" style="margin-top:12px"><i data-icon="route"></i>Сформировать техпроцесс</button>
           <div class="muted small" style="margin-top:8px">Черновик для технолога: резьбы, допуски и шероховатость по 3D-модели не определяются.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Чертёж: эскизы выбранных открытых моделей -->
+    <div class="page" data-page="drawing">
+      <div class="glass panel fill">
+        <div class="panel-head"><i data-icon="sheet" class="accent"></i><span>Чертёж</span></div>
+        <div class="pad scroll">
+          <div class="sub" style="margin-top:0">Модели в проекте</div>
+          <div class="pick-actions"><button class="mini-link" id="drwAll">Все</button><button class="mini-link" id="drwNone">Ни одной</button></div>
+          <div id="drwList" class="pick-list"></div>
+          <div class="sub">Листы</div>
+          <label class="switch-row">Профиль (токарные) <input type="checkbox" id="drwProfile" checked><span class="sw"></span></label>
+          <label class="switch-row">Таблица отверстий <input type="checkbox" id="drwHoles" checked><span class="sw"></span></label>
+          <div class="muted small" style="margin:6px 0 10px">Материал и заготовка — из вкладки «Заготовка», разработчик — из «Техпроцесса».</div>
+          <div class="stack">
+            <button class="wide" id="drwPreview"><i data-icon="fileCad"></i>Предпросмотр</button>
+            <button class="wide" id="drwPrint"><i data-icon="export"></i>Печать</button>
+            <button class="wide primary-btn" id="drwPdf"><i data-icon="export"></i>Сохранить PDF</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Заготовка: свои размеры заготовок для нарезки -->
+    <div class="page" data-page="blank">
+      <div class="glass panel fill">
+        <div class="panel-head"><i data-icon="blank" class="accent"></i><span>Заготовка</span></div>
+        <div class="pad scroll">
+          <label class="field">Пропил пилы, мм
+            <input id="blkCut" class="num" inputmode="decimal">
+          </label>
+          <label class="field">Длина хлыста (прутка), мм
+            <input id="blkBar" class="num" inputmode="decimal">
+          </label>
+          <div class="sub">Заготовки</div>
+          <div id="blkSummary" class="blk-summary"></div>
+          <button class="wide primary-btn" id="blkOpen" style="margin-top:10px"><i data-icon="blank"></i>Ведомость заготовок</button>
+          <div class="muted small" style="margin-top:8px">Свои размеры заготовки сохраняются для файла и попадают в техпроцесс и чертёж.</div>
         </div>
       </div>
     </div>
@@ -361,6 +403,47 @@
       <button class="wide" id="techNc" title="Черновая УП Fanuc: PUMA 3050LM — контур по установам; KVL 1000 — торцевание и отверстия"><i data-icon="fileCad"></i>УП (черновик)</button>
       <button class="wide" id="techPrint"><i data-icon="export"></i>Печать</button>
       <button class="wide primary-btn" id="techPdf"><i data-icon="export"></i>Сохранить PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Ведомость заготовок ===== -->
+<div id="blankDlg" class="modal" hidden>
+  <div class="glass modal-box wide-box">
+    <div class="panel-head"><i data-icon="blank" class="accent"></i><span>Ведомость заготовок — нарезка по своим размерам</span><button class="mini" id="blankDlgClose" title="Закрыть (Esc)"><i data-icon="close"></i></button></div>
+    <div class="modal-body scroll">
+      <div class="muted small" style="margin:2px 0 8px">Размеры — в миллиметрах. «Авто» подставляет заготовку по модели (припуски по сортаменту), дальше правьте под себя.
+        Круг — Ø; квадрат — сторона; шестигранник — размер под ключ S; труба — Ø × стенка; лист / полоса — толщина × ширина.</div>
+      <table class="blk-table">
+        <thead><tr>
+          <th>Деталь</th><th>Материал</th><th>Сортамент</th><th>Размер 1</th><th>Размер 2</th><th>Длина L</th><th>Кол-во</th>
+          <th>L с пропилом</th><th>Шт из хлыста</th><th>Масса шт</th><th>Масса всего</th><th></th>
+        </tr></thead>
+        <tbody id="blkRows"></tbody>
+      </table>
+      <div class="tech-actions">
+        <button class="wide" id="blkAddRow">+ Строка вручную</button>
+        <button class="wide" id="blkAutoAll" title="Пересчитать по моделям строки, где размеры ещё не введены">Авто для пустых</button>
+      </div>
+      <div id="blkTotals" class="mres"></div>
+      <div id="blkSheets" class="sheets" style="margin-top:14px"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="wide" id="blkPreview"><i data-icon="fileCad"></i>Предпросмотр</button>
+      <button class="wide" id="blkPrint"><i data-icon="export"></i>Печать</button>
+      <button class="wide primary-btn" id="blkPdf"><i data-icon="export"></i>Сохранить PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Листы чертежа (предпросмотр) ===== -->
+<div id="drwDlg" class="modal" hidden>
+  <div class="glass modal-box wide-box">
+    <div class="panel-head"><i data-icon="sheet" class="accent"></i><span id="drwDlgTitle">Чертёж</span><button class="mini" id="drwDlgClose" title="Закрыть (Esc)"><i data-icon="close"></i></button></div>
+    <div class="modal-body scroll"><div id="drwSheets" class="sheets"></div></div>
+    <div class="modal-foot">
+      <button class="wide" id="drwDlgPrint"><i data-icon="export"></i>Печать</button>
+      <button class="wide primary-btn" id="drwDlgPdf"><i data-icon="export"></i>Сохранить PDF</button>
     </div>
   </div>
 </div>

@@ -908,3 +908,108 @@ export function renderSheets({ meshes, part, route, meta }) {
 	});
 	return [sketch.c, ...prof.map((p) => p.c), ...holes.map((p) => p.c), ...routes.map((p) => p.c)];
 }
+
+// ---------------------------------------------------------------------------
+// Чертёж детали (кнопка «Чертёж»): эскиз + по желанию профиль и таблица отверстий.
+// Нумерация листов — внутри одной детали.
+// ---------------------------------------------------------------------------
+export function renderDrawing({ meshes, part, meta, profile = true, holes = true }) {
+	const sketch = sketchSheet(meshes, part, meta);
+	const prof = profile && part.type === 'rotational' && part.profile && part.profile.outer.points.length >= 2 ? profileSheets(meshes, part, meta) : [];
+	const hs = holes ? sketch.extra : [];
+	const total = 1 + prof.length + hs.length;
+	titleBlock(sketch.c.getContext('2d'), { ...meta, scale: sketch.scale }, 1, total, 'Эскиз детали');
+	let no = 2;
+	const small = (ctx, label) => {
+		const x = W - FRAME.r - 110, y = H - FRAME.b - 12;
+		pen(ctx, 0.35); rect(ctx, x, y, 110, 12);
+		text(ctx, `${meta.designation} — ${label}`, x + 3, y + 6, 3, 'left', true);
+		text(ctx, `Лист ${no} / ${total}`, x + 107, y + 6, 3, 'right');
+		no++;
+	};
+	prof.forEach((p) => small(p.ctx, 'профиль'));
+	hs.forEach((p) => small(p.ctx, 'таблица отверстий'));
+	return [sketch.c, ...prof.map((p) => p.c), ...hs.map((p) => p.c)];
+}
+
+// ---------------------------------------------------------------------------
+// Ведомость заготовок / карта нарезки (вкладка «Заготовка»)
+// rows: [{ name, material, kind, size, L, n, cut, perBar, bars, totalLen, mass1, massN }]
+// ---------------------------------------------------------------------------
+export function renderCuttingList(rows, meta) {
+	const cols = [
+		['№', 7], ['Деталь', 46], ['Материал', 36], ['Сортамент', 28], ['Размер', 22], ['L, мм', 15],
+		['Кол., шт', 12], ['Пропил', 12], ['L с пропилом, мм', 20], ['Шт из хлыста', 14], ['Хлыстов', 13], ['Масса 1 шт', 17], ['Масса всего', 18],
+	];
+	const x0 = FRAME.l + 3, rowH = 7, headH = 11, top = FRAME.t + 22;
+	const perPage = Math.floor((H - FRAME.b - 30 - top - headH) / rowH);
+	const pages = Math.max(1, Math.ceil(rows.length / perPage));
+	const out = [];
+	let sumMass = 0;
+	for (const r of rows) sumMass += r.massN || 0;
+	for (let p = 0; p < pages; p++) {
+		const { c, ctx } = newSheet();
+		text(ctx, 'Ведомость заготовок — карта нарезки', FRAME.l + 3, FRAME.t + 8, 5, 'left', true);
+		text(ctx, `${meta.org || 'RafCAD View'}   ${meta.date || ''}${meta.author ? '   Составил: ' + meta.author : ''}`, W - FRAME.r - 3, FRAME.t + 8, 3, 'right');
+		text(ctx, `Пропил пилы ${meta.cut} мм · длина хлыста ${meta.barLen} мм · плотность ${meta.density} г/см³`, FRAME.l + 3, FRAME.t + 15, 3);
+		// шапка
+		let x = x0;
+		pen(ctx, 0.35);
+		const tw = cols.reduce((s, [, w]) => s + w, 0);
+		rect(ctx, x0, top, tw, headH);
+		for (const [t, w] of cols) {
+			wrapText(ctx, t, x + w / 2, top + headH / 2, w - 1.5, 2.6, true, 'center');
+			line(ctx, x + w, top, x + w, top + headH);
+			x += w;
+		}
+		const slice = rows.slice(p * perPage, (p + 1) * perPage);
+		slice.forEach((r, i) => {
+			const y = top + headH + i * rowH;
+			pen(ctx, 0.25);
+			rect(ctx, x0, y, tw, rowH);
+			const vals = [String(p * perPage + i + 1), r.name, r.material, r.kind, r.size, fmt(r.L), String(r.n), fmt(r.cut),
+				fmt(r.totalLen), r.perBar ? String(r.perBar) : '—', r.bars ? String(r.bars) : '—', kg(r.mass1), kg(r.massN)];
+			let xx = x0;
+			vals.forEach((v, k) => {
+				const w = cols[k][1];
+				fitText(ctx, v, xx + (k <= 4 ? 1.2 : w / 2), y + rowH / 2, w - 2.4, k <= 4 ? 'left' : 'center');
+				line(ctx, xx + w, y, xx + w, y + rowH);
+				xx += w;
+			});
+		});
+		if (p === pages - 1) {
+			const y = top + headH + slice.length * rowH + 6;
+			text(ctx, `Итого деталей: ${rows.reduce((s, r) => s + (r.n || 0), 0)} шт.   Общая масса заготовок: ${kg(sumMass)}`, x0, y, 3.5, 'left', true);
+			// по сортаменту — сколько хлыстов / металла заказать
+			const byStock = new Map();
+			for (const r of rows) {
+				const k = `${r.material} · ${r.kind} ${r.size}`;
+				const s = byStock.get(k) || { len: 0, mass: 0, sheet: r.isSheet };
+				s.len += r.totalLen || 0; s.mass += r.massN || 0;
+				byStock.set(k, s);
+			}
+			let yy = y + 7;
+			text(ctx, 'Металл по сортаменту:', x0, yy, 3.2, 'left', true);
+			for (const [k, s] of byStock) {
+				yy += 5;
+				if (yy > H - FRAME.b - 8) break;
+				const bars = !s.sheet && meta.barLen > 0 ? `, ≈ ${(Math.ceil(s.len / meta.barLen * 10) / 10).toLocaleString('ru-RU')} хлыст.` : '';
+				text(ctx, `• ${k}: ${s.sheet ? '' : 'длина ' + fmt(s.len) + ' мм' + bars + ', '}масса ${kg(s.mass)}`, x0 + 3, yy, 3);
+			}
+		}
+		text(ctx, `Лист ${p + 1} / ${pages}`, W - FRAME.r - 3, H - FRAME.b - 4, 3, 'right');
+		out.push(c);
+	}
+	return out;
+}
+function fmt(v) { return v == null || !Number.isFinite(+v) ? '—' : (Math.round(v * 10) / 10).toLocaleString('ru-RU'); }
+function kg(v) { return v == null || !Number.isFinite(v) ? '—' : v >= 1 ? (Math.round(v * 100) / 100).toLocaleString('ru-RU') + ' кг' : Math.round(v * 1000).toLocaleString('ru-RU') + ' г'; }
+// одна строка в ширину: уменьшаем кегль, затем обрезаем с многоточием
+function fitText(ctx, s, x, y, maxW, align) {
+	s = String(s ?? '');
+	let h = 2.9;
+	font(ctx, h);
+	while (ctx.measureText(s).width > maxW * MM && h > 2.1) { h -= 0.2; font(ctx, h); }
+	while (s.length > 1 && ctx.measureText(s).width > maxW * MM) s = s.slice(0, -2) + '…';
+	text(ctx, s, x, y, h, align);
+}

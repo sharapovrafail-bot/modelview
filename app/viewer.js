@@ -11,7 +11,7 @@ import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { faceTriangles, analyzeFace, relate, mergeCoaxialFaces } from './measure-math.js';
 import { compareSoups } from './compare.js';
 import { analyzePart, chooseBlank, buildRoute, describePart, DEFAULT_EQUIPMENT } from './techproc.js';
-import { renderSheets } from './drawing.js';
+import { renderSheets, renderDrawing, renderCuttingList } from './drawing.js';
 import { pumaPrograms, kvlPrograms } from './gcode.js';
 import { readDrawing, buildDrawing, drawingFormatName } from './cad2d.js';
 import { parse3mf } from './threemf.js';
@@ -68,6 +68,8 @@ const ICONS = {
 	cubeWire: `<path d="${CUBE}"/><path d="${CUBE_IN}"/><path d="M8 5.2v9.3M16 5.2v9.3M4 12l8 4.5 8-4.5" opacity=".6"/>`,
 	cubeLines: `<path d="${CUBE}"/><path d="${CUBE_IN}"/><path d="M12 12 4 16.5M12 12l8 4.5M12 3v9" stroke-dasharray="1.5 1.8" opacity=".7"/>`,
 	cubeShaded: `<path d="${CUBE}"/><path d="M12 12 20 7.5v9L12 21z" fill="currentColor" fill-opacity=".5"/><path d="${CUBE_IN}"/>`,
+	sheet: '<path d="M5 3.5h10l4 4V20.5H5z"/><path d="M15 3.5v4h4"/><path d="M8 16.5h8M8 13.5h3M14 13.5h2"/><rect x="8" y="8" width="5" height="3"/>',
+	blank: '<rect x="3" y="9" width="18" height="6" rx="1"/><path d="M9 9v6M15 9v6" stroke-dasharray="1.6 1.4"/><path d="M12 3v3M10.5 4.5 12 6l1.5-1.5"/>',
 	cubeXray: `<path d="${CUBE}" stroke-dasharray="2 1.5"/><path d="${CUBE_IN}" stroke-dasharray="2 1.5"/><circle cx="12" cy="12" r="3"/>`,
 };
 function icon(name) { return `<svg viewBox="0 0 24 24">${ICONS[name] || ''}</svg>`; }
@@ -1240,6 +1242,10 @@ function renderTabs() {
 		t.querySelector('.dt-close').onclick = (e) => { e.stopPropagation(); closeDoc(i); };
 		bar.append(t);
 	});
+	// открыт/закрыт файл — обновить списки на страницах «Чертёж» и «Заготовка»
+	const page = (document.querySelector('#side .page.on') || {}).dataset || {};
+	if (page.page === 'drawing') renderDrawingList();
+	if (page.page === 'blank') renderBlankSummary();
 }
 
 // =====================================================================
@@ -1503,7 +1509,7 @@ async function buildTech() {
 		modelRoot.updateMatrixWorld(true);
 		const part = analyzePart(t.meshes, (f) => { $('loadingText').textContent = `Анализирую деталь… ${Math.round(f * 100)}%`; });
 		const dens = parseFloat(settings.density) || 7.85;
-		const blank = chooseBlank(part, dens, techOptions());
+		const blank = userBlankFor(chooseBlank(part, dens, techOptions()));
 		const route = buildRoute(part, blank, techOptions());
 		const st = statsFor(t.root);
 		model.tech = { part, blank, route, name: t.name, meshes: t.meshes, mass: st.closed ? st.vol / 1000 * dens / 1000 : null };
@@ -1522,7 +1528,7 @@ function techMeta() {
 	return {
 		name: T.name,
 		designation: T.name.replace(/\.[^.]+$/, ''),
-		material: $('techMaterial').value,
+		material: T.blank.material || $('techMaterial').value,
 		author: $('techAuthor').value,
 		date: `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`,
 		mass: T.mass != null ? fmtMass(T.mass).replace(' ', ' ') : '—',
@@ -1541,7 +1547,7 @@ function openTechDialog() {
 		['Расчёт:', T.blank.note],
 		['Масса заготовки:', fmtMass(T.blank.mass)],
 		['Масса детали:', T.mass != null ? fmtMass(T.mass) : '—'],
-		['Материал:', $('techMaterial').value],
+		['Материал:', T.blank.material || $('techMaterial').value],
 	]);
 	renderRouteEditor();
 	$('techSheets').innerHTML = '';
@@ -1653,7 +1659,7 @@ $('techAddOp').onclick = () => {
 };
 $('techRebuild').onclick = () => {
 	const T = model.tech;
-	T.blank = chooseBlank(T.part, parseFloat(settings.density) || 7.85, techOptions());
+	T.blank = userBlankFor(chooseBlank(T.part, parseFloat(settings.density) || 7.85, techOptions()));
 	T.route = buildRoute(T.part, T.blank, techOptions());
 	renderRouteEditor();
 };
@@ -1670,6 +1676,344 @@ $('techPdf').onclick = pdfTech;
 $('techPrint').onclick = printTech;
 $('techDlgClose').onclick = () => { $('techDlg').hidden = true; };
 initTechPage();
+
+// =====================================================================
+// Анализ любой открытой модели (для чертежа и заготовок)
+// =====================================================================
+const partCache = new WeakMap(); // object3D модели -> результат analyzePart
+// выполнить fn для вкладок idx по очереди (вкладка временно становится активной), потом вернуть исходную
+async function withDocs(idx, fn) {
+	const back = activeDoc;
+	try {
+		for (const i of idx) {
+			if (!docs[i]) continue;
+			switchDoc(i);
+			modelRoot.updateMatrixWorld(true);
+			await fn(i);
+		}
+	} finally {
+		if (back >= 0 && docs[back] && activeDoc !== back) switchDoc(back);
+	}
+}
+function docMeshes() {
+	const meshes = [];
+	if (model.object) model.object.traverse((o) => { if (o.isMesh && isShown(o) && !(o.name && o.name.startsWith('__'))) meshes.push(o); });
+	return meshes;
+}
+function activePart(label) {
+	let part = partCache.get(model.object);
+	if (!part) {
+		const meshes = docMeshes();
+		if (!meshes.length) return null;
+		part = analyzePart(meshes, (f) => { $('loadingText').textContent = `${label}… ${Math.round(f * 100)}%`; });
+		partCache.set(model.object, part);
+	}
+	return part;
+}
+const docKey = (d) => (d.name || '') + '|' + (d.size || 0);
+const docIs3d = (d) => d && d.object && !d.is2d;
+function docInfo(i) { return i === activeDoc ? model : docs[i]; }
+
+// =====================================================================
+// Заготовка: свои размеры для нарезки
+// =====================================================================
+const BLK_KINDS = {
+	round: { name: 'Круг', a: 'Ø', b: null, area: (a) => Math.PI / 4 * a * a, size: (a) => `Ø${fmtN(a)}` },
+	square: { name: 'Квадрат', a: 'сторона', b: null, area: (a) => a * a, size: (a) => `□${fmtN(a)}` },
+	hex: { name: 'Шестигранник', a: 'S', b: null, area: (a) => Math.sqrt(3) / 2 * a * a, size: (a) => `S${fmtN(a)}` },
+	tube: { name: 'Труба', a: 'Ø', b: 'стенка', area: (a, b) => Math.PI * (a - b) * b, size: (a, b) => `Ø${fmtN(a)}×${fmtN(b)}` },
+	strip: { name: 'Полоса', a: 'толщина', b: 'ширина', area: (a, b) => a * b, size: (a, b) => `${fmtN(a)}×${fmtN(b)}` },
+	plate: { name: 'Лист / плита', a: 'толщина', b: 'ширина', area: (a, b) => a * b, size: (a, b) => `${fmtN(a)}×${fmtN(b)}`, sheet: true },
+};
+function fmtN(v) { return (Math.round((+v || 0) * 100) / 100).toLocaleString('ru-RU'); }
+function num(v) { const x = parseFloat(String(v ?? '').replace(',', '.')); return Number.isFinite(x) ? x : 0; }
+function blkStore() { return safeJson(lsGet('mvBlanks')); }
+function blkSave(st) { try { localStorage.setItem('mvBlanks', JSON.stringify(st)); } catch { } }
+function blkParams() {
+	return { cut: num(settings.blkCut ?? 3), barLen: num(settings.blkBar ?? 6000), density: parseFloat(settings.density) || 7.85 };
+}
+// расчёт строки: длина с пропилом, штук из хлыста, масса
+function blkCalc(r) {
+	const P = blkParams();
+	const K = BLK_KINDS[r.kind] || BLK_KINDS.round;
+	const a = num(r.a), b = num(r.b), L = num(r.L), n = Math.max(0, Math.round(num(r.n)));
+	const ok = a > 0 && L > 0 && (!K.b || b > 0);
+	const area = ok ? K.area(a, b) : 0;
+	const mass1 = ok ? area * L * P.density / 1e6 : null;
+	const piece = L + P.cut;
+	const perBar = !K.sheet && ok && P.barLen > 0 ? Math.floor((P.barLen + P.cut) / piece) : 0;
+	return {
+		ok, K, a, b, L, n, mass1, massN: mass1 != null ? mass1 * n : null,
+		totalLen: ok ? n * piece : null, perBar, bars: perBar > 0 ? Math.ceil(n / perBar) : 0,
+		size: ok ? K.size(a, b) : '—', cut: P.cut,
+	};
+}
+// заготовка по модели (автоматически, по сортаменту)
+function autoBlank(part) {
+	const b = chooseBlank(part, parseFloat(settings.density) || 7.85, techOptions());
+	return b.kind === 'bar' ? { kind: 'round', a: b.D, b: '', L: b.L } : { kind: 'plate', a: b.t, b: b.w, L: b.l };
+}
+function defaultMaterial() { return settings.techMaterial || 'Сталь 45 ГОСТ 1050-2013'; }
+
+// строки ведомости: открытые 3D-модели + строки, введённые вручную
+function blkRows() {
+	const st = blkStore();
+	const rows = [];
+	docs.forEach((d0, i) => {
+		const d = docInfo(i);
+		if (!docIs3d(d)) return;
+		const key = docKey(d);
+		rows.push({ key, doc: i, name: d.name.replace(/\.[^.]+$/, ''), ...(st[key] || { material: defaultMaterial(), kind: 'round', a: '', b: '', L: '', n: 1 }), own: !!st[key] });
+	});
+	for (const m of st.__manual || []) rows.push({ ...m, manual: true, own: true });
+	return rows;
+}
+function blkPut(row) {
+	const st = blkStore();
+	const v = { material: row.material, kind: row.kind, a: row.a, b: row.b, L: row.L, n: row.n };
+	if (row.manual) {
+		st.__manual = (st.__manual || []).map((m) => (m.id === row.id ? { ...m, ...v, name: row.name } : m));
+	} else st[row.key] = v;
+	blkSave(st);
+}
+// своя заготовка для активной модели -> в формате техпроцесса
+function userBlankFor(auto) {
+	const st = blkStore()[docKey(model)];
+	if (!st) return auto;
+	const c = blkCalc(st);
+	if (!c.ok) return auto;
+	const text = `${c.K.name} ${c.size}${c.K.sheet ? ` ГОСТ 19903, заготовка ${fmtN(c.L)}×${fmtN(c.b)}×${fmtN(c.a)} мм` : `, длина ${fmtN(c.L)} мм`} (свои размеры)`;
+	const out = { ...auto, text, mass: c.mass1, note: 'Размеры заготовки заданы вручную во вкладке «Заготовка»', user: true, material: st.material };
+	if (st.kind === 'round' && auto.kind === 'bar') Object.assign(out, { D: c.a, L: c.L });
+	if (st.kind === 'plate' && auto.kind === 'plate') Object.assign(out, { t: c.a, w: c.b, l: c.L });
+	return out;
+}
+
+function renderBlankSummary() {
+	const box = $('blkSummary');
+	const rows = blkRows();
+	if (!rows.length) { box.innerHTML = '<div class="muted small">Откройте модели (STEP, IGES…) или добавьте строку вручную в ведомости.</div>'; return; }
+	box.innerHTML = rows.map((r) => {
+		const c = blkCalc(r);
+		return `<div class="blk-item"><b>${esc(r.name || 'Без имени')}</b>${c.ok
+			? `${esc(c.K.name)} ${esc(c.size)}, L ${fmtN(c.L)} мм × ${c.n} шт${r.own ? ' <span class="own">— свои</span>' : ''}<br>${esc(r.material || '')}${c.massN != null ? ' · ' + fmtMass(c.massN) : ''}`
+			: '<span class="muted">размеры не заданы</span>'}</div>`;
+	}).join('');
+}
+
+function renderBlankTable() {
+	const tb = $('blkRows');
+	tb.innerHTML = '';
+	const rows = blkRows();
+	for (const r of rows) {
+		const tr = document.createElement('tr');
+		if (r.own) tr.className = 'own';
+		const kindOpts = Object.entries(BLK_KINDS).map(([k, K]) => `<option value="${k}"${k === r.kind ? ' selected' : ''}>${K.name}</option>`).join('');
+		tr.innerHTML =
+			`<td>${r.manual ? `<input class="nm" data-f="name" value="${esc(r.name || '')}" placeholder="Деталь">` : `<span title="${esc(r.name)}">${esc(r.name)}</span>`}</td>` +
+			`<td><input data-f="material" value="${esc(r.material || '')}"></td>` +
+			`<td><select data-f="kind">${kindOpts}</select></td>` +
+			`<td><input class="n" data-f="a" value="${esc(r.a ?? '')}" inputmode="decimal"></td>` +
+			`<td><input class="n" data-f="b" value="${esc(r.b ?? '')}" inputmode="decimal"></td>` +
+			`<td><input class="n" data-f="L" value="${esc(r.L ?? '')}" inputmode="decimal"></td>` +
+			`<td><input class="n" data-f="n" value="${esc(r.n ?? 1)}" inputmode="numeric"></td>` +
+			'<td class="calc" data-c="len"></td><td class="calc" data-c="bar"></td><td class="calc" data-c="m1"></td><td class="calc" data-c="mn"></td>' +
+			`<td><div class="row-btns">${r.manual ? '' : '<button data-act="auto" title="Заготовка по модели (сортамент + припуски)">Авто</button>'}<button data-act="del" title="${r.manual ? 'Удалить строку' : 'Сбросить свои размеры'}">×</button></div></td>`;
+		const upd = () => {
+			const c = blkCalc(r);
+			const K = c.K;
+			const bIn = tr.querySelector('[data-f=b]');
+			bIn.disabled = !K.b; bIn.placeholder = K.b || '—';
+			tr.querySelector('[data-f=a]').placeholder = K.a;
+			tr.querySelector('[data-c=len]').textContent = c.totalLen != null ? fmtN(c.totalLen) + ' мм' : '—';
+			tr.querySelector('[data-c=bar]').textContent = c.perBar ? `${c.perBar} (хлыст. ${c.bars})` : '—';
+			tr.querySelector('[data-c=m1]').textContent = c.mass1 != null ? fmtMass(c.mass1) : '—';
+			tr.querySelector('[data-c=mn]').textContent = c.massN != null ? fmtMass(c.massN) : '—';
+		};
+		tr.querySelectorAll('[data-f]').forEach((el) => el.addEventListener('input', () => {
+			r[el.dataset.f] = el.value;
+			r.own = true; tr.className = 'own';
+			blkPut(r); upd(); renderBlankTotals(); renderBlankSummary();
+		}));
+		tr.querySelector('[data-act=del]').onclick = () => {
+			const st = blkStore();
+			if (r.manual) st.__manual = (st.__manual || []).filter((m) => m.id !== r.id);
+			else delete st[r.key];
+			blkSave(st); renderBlankTable(); renderBlankSummary();
+		};
+		const autoBtn = tr.querySelector('[data-act=auto]');
+		if (autoBtn) autoBtn.onclick = () => blankAuto([r.doc], true);
+		upd();
+		tb.append(tr);
+	}
+	if (!rows.length) tb.innerHTML = '<tr><td colspan="12" class="muted">Нет открытых 3D-моделей — добавьте строку вручную.</td></tr>';
+	renderBlankTotals();
+}
+function renderBlankTotals() {
+	const rows = blkRows().map((r) => ({ r, c: blkCalc(r) })).filter((x) => x.c.ok);
+	const P = blkParams();
+	const n = rows.reduce((s, x) => s + x.c.n, 0);
+	const m = rows.reduce((s, x) => s + (x.c.massN || 0), 0);
+	$('blkTotals').innerHTML = `<b>Итого</b><div class="kv">${kv([
+		['Деталей:', `${n} шт`], ['Масса заготовок:', fmtMass(m)], ['Пропил:', `${fmtN(P.cut)} мм`], ['Хлыст:', `${fmtN(P.barLen)} мм`],
+	])}</div>`;
+}
+// «Авто»: заготовка по модели; force — перезаписать введённые размеры
+async function blankAuto(idx, force) {
+	showLoading('Подбираю заготовку…');
+	await new Promise((res) => setTimeout(res, 30));
+	try {
+		const st = blkStore();
+		await withDocs(idx, async () => {
+			const key = docKey(model);
+			if (st[key] && !force && blkCalc(st[key]).ok) return;
+			const part = activePart('Анализирую ' + model.name);
+			if (!part) return;
+			st[key] = { material: (st[key] && st[key].material) || defaultMaterial(), n: (st[key] && st[key].n) || 1, ...autoBlank(part) };
+		});
+		blkSave(st);
+	} catch (e) {
+		console.error(e);
+		alert('Не удалось подобрать заготовку:\n' + (e.message || e));
+	} finally {
+		hideLoading();
+		renderBlankTable(); renderBlankSummary();
+	}
+}
+function cuttingRows() {
+	return blkRows().map((r) => ({ r, c: blkCalc(r) })).filter((x) => x.c.ok).map(({ r, c }) => ({
+		name: r.name || '—', material: r.material || '', kind: c.K.name, size: c.size, L: c.L, n: c.n, cut: c.cut,
+		perBar: c.perBar, bars: c.bars, totalLen: c.totalLen, mass1: c.mass1, massN: c.massN, isSheet: !!c.K.sheet,
+	}));
+}
+function todayStr() { const d = new Date(); return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`; }
+function cuttingSheets() {
+	const rows = cuttingRows();
+	if (!rows.length) { alert('Нет строк с заполненными размерами.'); return null; }
+	const P = blkParams();
+	return renderCuttingList(rows, { org: APP_TITLE, date: todayStr(), author: settings.techAuthor ?? 'Шарапов Р.', cut: fmtN(P.cut), barLen: P.barLen, density: fmtN(P.density) });
+}
+
+// =====================================================================
+// Печать / PDF листов (общие для чертежа и ведомости)
+// =====================================================================
+function sheetsPdf(canvases, title, file) {
+	const pdf = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true });
+	canvases.forEach((c, i) => {
+		if (i) pdf.addPage('a4', 'landscape');
+		pdf.addImage(c.toDataURL('image/png'), 'PNG', 0, 0, 297, 210, undefined, 'FAST');
+	});
+	pdf.setProperties({ title, creator: APP_TITLE, author: settings.techAuthor || '' });
+	download(pdf.output('blob'), file);
+}
+async function sheetsPrint(canvases) {
+	const imgs = canvases.map((c) => `<img src="${c.toDataURL('image/png')}">`).join('');
+	const frame = document.createElement('iframe');
+	frame.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+	document.body.append(frame);
+	frame.contentDocument.write(`<!doctype html><html><head><style>@page{size:A4 landscape;margin:0}body{margin:0}img{width:297mm;height:210mm;display:block;page-break-after:always}</style></head><body>${imgs}</body></html>`);
+	frame.contentDocument.close();
+	await new Promise((r) => setTimeout(r, 300));
+	frame.contentWindow.focus();
+	frame.contentWindow.print();
+	setTimeout(() => frame.remove(), 60000);
+}
+function sheetsShow(box, canvases) {
+	box.innerHTML = '';
+	for (const c of canvases) { const img = document.createElement('img'); img.src = c.toDataURL('image/png'); box.append(img); }
+}
+async function busy(text, fn) {
+	showLoading(text);
+	await new Promise((r) => setTimeout(r, 30));
+	try { return await fn(); }
+	catch (e) { console.error(e); alert('Ошибка:\n' + (e.message || e)); return null; }
+	finally { hideLoading(); }
+}
+
+$('blkCut').value = settings.blkCut ?? 3;
+$('blkBar').value = settings.blkBar ?? 6000;
+$('blkCut').oninput = (e) => { settings.blkCut = num(e.target.value); saveSettings(); renderBlankSummary(); if (!$('blankDlg').hidden) renderBlankTable(); };
+$('blkBar').oninput = (e) => { settings.blkBar = num(e.target.value); saveSettings(); renderBlankSummary(); if (!$('blankDlg').hidden) renderBlankTable(); };
+$('blkOpen').onclick = () => { $('blkSheets').innerHTML = ''; renderBlankTable(); $('blankDlg').hidden = false; };
+$('blankDlgClose').onclick = () => { $('blankDlg').hidden = true; renderBlankSummary(); };
+$('blkAddRow').onclick = () => {
+	const st = blkStore();
+	(st.__manual = st.__manual || []).push({ id: Date.now().toString(36), name: '', material: defaultMaterial(), kind: 'round', a: '', b: '', L: '', n: 1 });
+	blkSave(st); renderBlankTable(); renderBlankSummary();
+};
+$('blkAutoAll').onclick = () => blankAuto(docs.map((d, i) => i).filter((i) => docIs3d(docInfo(i))), false);
+$('blkPreview').onclick = () => busy('Готовлю ведомость…', () => { const s = cuttingSheets(); if (s) sheetsShow($('blkSheets'), s); });
+$('blkPdf').onclick = () => busy('Сохраняю PDF…', () => { const s = cuttingSheets(); if (s) sheetsPdf(s, 'Ведомость заготовок', `Ведомость заготовок ${todayStr()}.pdf`); });
+$('blkPrint').onclick = () => busy('Готовлю печать…', () => { const s = cuttingSheets(); if (s) return sheetsPrint(s); });
+
+// =====================================================================
+// Чертёж: эскизы выбранных открытых моделей
+// =====================================================================
+const drwPicked = new Set(); // ключи файлов, отмеченных для чертежа
+function renderDrawingList() {
+	const box = $('drwList');
+	box.innerHTML = '';
+	let any = false;
+	docs.forEach((d0, i) => {
+		const d = docInfo(i);
+		const ok = docIs3d(d);
+		const key = docKey(d);
+		const row = document.createElement('label');
+		row.className = 'pick-row' + (ok ? '' : ' dis');
+		row.title = ok ? d.name : 'Чертёж DXF/DWG — эскиз строится только по 3D-модели';
+		row.innerHTML = `<input type="checkbox"${ok ? '' : ' disabled'}${ok && drwPicked.has(key) ? ' checked' : ''}><span></span>`;
+		row.querySelector('span').textContent = d.name;
+		row.querySelector('input').onchange = (e) => { if (e.target.checked) drwPicked.add(key); else drwPicked.delete(key); };
+		box.append(row);
+		any = true;
+	});
+	if (!any) box.innerHTML = '<div class="muted small">Откройте одну или несколько моделей — каждая открывается своей вкладкой.</div>';
+}
+function drwSelected() {
+	return docs.map((d, i) => i).filter((i) => docIs3d(docInfo(i)) && drwPicked.has(docKey(docInfo(i))));
+}
+$('drwAll').onclick = () => { docs.forEach((d, i) => { if (docIs3d(docInfo(i))) drwPicked.add(docKey(docInfo(i))); }); renderDrawingList(); };
+$('drwNone').onclick = () => { drwPicked.clear(); renderDrawingList(); };
+let drwLast = null;
+async function drawingSheets() {
+	const idx = drwSelected();
+	if (!idx.length) { alert('Отметьте модели для чертежа.'); return null; }
+	const out = [];
+	const names = [];
+	await withDocs(idx, async () => {
+		$('loadingText').textContent = 'Строю чертёж: ' + model.name;
+		await new Promise((r) => setTimeout(r, 20));
+		const part = activePart('Анализирую ' + model.name);
+		if (!part) return;
+		const dens = parseFloat(settings.density) || 7.85;
+		const blank = userBlankFor(chooseBlank(part, dens, techOptions()));
+		const st = statsFor(model.object);
+		const mass = st.closed ? st.vol / 1000 * dens / 1000 : null;
+		const name = model.name;
+		const meta = {
+			name, designation: name.replace(/\.[^.]+$/, ''),
+			material: blank.material || $('techMaterial').value, author: $('techAuthor').value, date: todayStr(),
+			mass: mass != null ? fmtMass(mass) : '—', blank: blank.text, blankMass: fmtMass(blank.mass), org: APP_TITLE,
+		};
+		out.push(...renderDrawing({ meshes: docMeshes(), part, meta, profile: $('drwProfile').checked, holes: $('drwHoles').checked }));
+		names.push(meta.designation);
+	});
+	drwLast = { sheets: out, names };
+	return drwLast;
+}
+const drwFile = (r) => (r.names.length === 1 ? r.names[0] : `Чертежи (${r.names.length} дет.)`) + ' — чертёж.pdf';
+$('drwPreview').onclick = () => busy('Строю чертёж…', async () => {
+	const r = await drawingSheets();
+	if (!r) return;
+	sheetsShow($('drwSheets'), r.sheets);
+	$('drwDlgTitle').textContent = `Чертёж — ${r.names.join(', ')} (листов: ${r.sheets.length})`;
+	$('drwDlg').hidden = false;
+});
+$('drwPdf').onclick = () => busy('Сохраняю PDF…', async () => { const r = await drawingSheets(); if (r && r.sheets.length) sheetsPdf(r.sheets, 'Чертёж', drwFile(r)); });
+$('drwPrint').onclick = () => busy('Готовлю печать…', async () => { const r = await drawingSheets(); if (r && r.sheets.length) return sheetsPrint(r.sheets); });
+$('drwDlgPdf').onclick = () => busy('Сохраняю PDF…', () => { if (drwLast) sheetsPdf(drwLast.sheets, 'Чертёж', drwFile(drwLast)); });
+$('drwDlgPrint').onclick = () => busy('Готовлю печать…', () => { if (drwLast) return sheetsPrint(drwLast.sheets); });
+$('drwDlgClose').onclick = () => { $('drwDlg').hidden = true; };
 
 // =====================================================================
 // О программе
@@ -2331,6 +2675,11 @@ function showPage(p) {
 	if (p === 'recent' || p === 'favorites') refreshLists();
 	if (p === 'compare') fillCompareTargets();
 	if (p === 'tech') updateTechTarget();
+	if (p === 'drawing') {
+		if (!drwPicked.size && docIs3d(model)) drwPicked.add(docKey(model));
+		renderDrawingList();
+	}
+	if (p === 'blank') renderBlankSummary();
 }
 $$('.nav-item[data-page]').forEach((b) => b.onclick = () => showPage(b.dataset.page));
 $('navOpen').onclick = () => $('fileInput').click();
@@ -2473,6 +2822,8 @@ window.addEventListener('keydown', (e) => {
 		F11: () => $('qFull').click(),
 		Escape: () => {
 			if (!$('techDlg').hidden) { $('techDlg').hidden = true; return; }
+			if (!$('blankDlg').hidden) { $('blankDlg').hidden = true; renderBlankSummary(); return; }
+			if (!$('drwDlg').hidden) { $('drwDlg').hidden = true; return; }
 			if (!$('aboutDlg').hidden) { $('aboutDlg').hidden = true; return; }
 			clearMeasure(); select(null); if (tool !== 'rotate') setTool('rotate');
 		},
