@@ -25,7 +25,8 @@ def main():
                     fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([StringTable('041904B0', [
-      StringStruct('CompanyName', 'Rafail Sharapov'),
+      StringStruct('CompanyName', 'Рафаил Шарапов'),
+      StringStruct('LegalCopyright', '© 2026 Рафаил Шарапов · rafail@sharapov-cnc.ru'),
       StringStruct('FileDescription', '{NAME} — просмотрщик STEP, IGES, STL'),
       StringStruct('FileVersion', '{version}'),
       StringStruct('InternalName', 'RafCADView'),

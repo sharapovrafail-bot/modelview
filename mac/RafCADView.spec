@@ -13,6 +13,7 @@ coll = COLLECT(exe, a.binaries, a.datas, name='RafCADView')
 app = BUNDLE(coll, name='RafCAD View.app', icon=os.path.join(SPECPATH, 'rafcad.icns'),
              bundle_identifier='ru.sharapov.rafcadview',
              info_plist={
+                 'NSHumanReadableCopyright': '© 2026 Рафаил Шарапов · rafail@sharapov-cnc.ru',
                  'CFBundleName': 'RafCAD View', 'CFBundleDisplayName': 'RafCAD View',
                  'CFBundleShortVersionString': VER, 'CFBundleVersion': VER,
                  'LSMinimumSystemVersion': '11.0', 'NSHighResolutionCapable': True,
