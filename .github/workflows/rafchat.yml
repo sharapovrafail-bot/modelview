@@ -181,9 +181,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release delete rafchat-latest --yes --cleanup-tag || true
-          gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe out/rafchat-ios/*.ipa \
+          for i in 1 2 3; do gh release delete rafchat-latest --yes --cleanup-tag && break || sleep 10; done
+          gh release view rafchat-latest >/dev/null 2>&1 && { echo "старый релиз не удалился"; exit 1; } || true
+          for i in 1 2 3; do gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe out/rafchat-ios/*.ipa \
             --target "${{ github.sha }}" \
             --title "RafChat — чат и файлы по локальной сети (последняя сборка)" \
             --notes "RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — приложение для Android. RafChat-*-iOS-unsigned.ipa — для iPhone (ставится через Sideloadly). Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md." \
-            --prerelease
+            --prerelease && break || sleep 15; done
+          gh release view rafchat-latest >/dev/null

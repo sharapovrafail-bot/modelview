@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.1.0"
+APP_VER = "0.1.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -179,7 +179,7 @@ class Node(QObject):
                 u = urlparse(self.path)
                 q = {k: v[0] for k, v in parse_qs(u.query).items()}
                 if u.path == "/ping":
-                    return self._reply(200, {"id": node.id, "name": node.cfg["name"]})
+                    return self._reply(200, node.profile())
                 if u.path == "/file":
                     row = node.store.q("SELECT path FROM files WHERE fid=?", (q.get("fid", ""),), one=True)
                     f = Path(row[0]) if row else None
@@ -245,6 +245,7 @@ class Node(QObject):
         threading.Thread(target=self._udp_loop, daemon=True).start()
         threading.Thread(target=self._beacon_loop, daemon=True).start()
         threading.Thread(target=self._outbox_loop, daemon=True).start()
+        threading.Thread(target=self._ping_loop, daemon=True).start()
 
     def stop(self):
         self.running = False
@@ -314,22 +315,76 @@ class Node(QObject):
             except Exception:
                 continue
 
-    def _seen(self, d, addr):
-        prev = self.store.q("SELECT last_seen, ip FROM peers WHERE id=?", (d["id"],), one=True)
+    def profile(self):
+        return {"app": "RafChat", "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
+                "port": TCP_PORT, "plat": "pc"}
+
+    def _upsert(self, d, ip):
+        """Запомнить участника (из маяка, сообщения или ответа на /ping). Возвращает (был ли известен, был ли в сети)."""
+        prev = self.store.q("SELECT last_seen, name, dept FROM peers WHERE id=?", (d["id"],), one=True)
         was_online = bool(prev and time.time() - (prev[0] or 0) < ONLINE_SEC)
+        self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen) VALUES(?,?,?,?,?,?,?) "
+                     "ON CONFLICT(id) DO UPDATE SET name=excluded.name, dept=excluded.dept, ip=excluded.ip, "
+                     "port=excluded.port, plat=CASE WHEN excluded.plat='' THEN peers.plat ELSE excluded.plat END, "
+                     "last_seen=excluded.last_seen",
+                     (d["id"], d.get("name") or (prev[1] if prev else "?"),
+                      d.get("dept", prev[2] if prev else "") or "", ip, int(d.get("port") or 47801),
+                      d.get("plat", ""), time.time()))
+        if not prev:
+            self._catch_up(d["id"])
+        if not was_online:
+            self._wake.set()                        # у нас может быть очередь для него
+            self.peers_changed.emit()
+        return bool(prev), was_online
+
+    def _catch_up(self, pid):
+        """Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки."""
+        since = now_ms() - 86400 * 1000
+        for mid, ts, text, file, status in self.store.q(
+                "SELECT id,ts,text,file,status FROM messages WHERE chat=? AND mine=1 AND ts>?", (ALL, since)):
+            m = {"id": mid, "from": self.id, "name": self.cfg["name"], "to": ALL, "ts": ts, "text": text or "",
+                 "file": json.loads(file) if file else None, "port": TCP_PORT}
+            self.store.q("INSERT OR IGNORE INTO outbox(peer,msg_id,payload) VALUES(?,?,?)",
+                         (pid, mid, json.dumps(m, ensure_ascii=False)))
+            if status and "/" in status:
+                a, b = status.split("/")
+                self.store.q("UPDATE messages SET status=? WHERE id=?", (f"{a}/{int(b) + 1}", mid))
+
+    def _seen(self, d, addr):
         if d.get("bye"):
             self.store.q("UPDATE peers SET last_seen=0 WHERE id=?", (d["id"],))
             self.peers_changed.emit()
             return
-        self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen) VALUES(?,?,?,?,?,?,?) "
-                     "ON CONFLICT(id) DO UPDATE SET name=excluded.name, dept=excluded.dept, ip=excluded.ip, "
-                     "port=excluded.port, plat=excluded.plat, last_seen=excluded.last_seen",
-                     (d["id"], d.get("name", "?"), d.get("dept", ""), addr[0], int(d.get("port", 47801)),
-                      d.get("plat", ""), time.time()))
+        _, was_online = self._upsert(d, addr[0])
         if not was_online or d.get("ask"):
             self.beacon(to=addr)                    # ответить сразу, чтобы нас увидели без ожидания
-            self._wake.set()                        # у нас может быть очередь для него
-            self.peers_changed.emit()
+
+    def _ping_loop(self):
+        """Запасной путь, если маяки (UDP) где-то режутся: спрашиваем известные адреса по TCP «ты тут?»."""
+        while self.running:
+            time.sleep(6)
+            targets = {}
+            for p in self.peers():
+                if p["ip"] and time.time() - p["last_seen"] > 8:
+                    targets[(p["ip"], p["port"])] = True
+            for a in (self.cfg.get("extra") or "").replace(";", ",").replace(" ", ",").split(","):
+                host, _, port = a.strip().partition(":")
+                if host:
+                    targets[(host, int(port) + 1 if port else 47801)] = True
+            for ip, port in targets:
+                threading.Thread(target=self._ping, args=(ip, port), daemon=True).start()
+
+    def _ping(self, ip, port):
+        try:
+            c, r = self._request({"ip": ip, "port": port}, "GET", "/ping", timeout=3)
+            body = r.read()
+            c.close()
+            if r.status == 200:
+                d = json.loads(body)
+                if d.get("id") and d["id"] != self.id:
+                    self._upsert(d, ip)
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
 
     def peers(self):
         rows = self.store.q("SELECT id,name,dept,ip,port,plat,last_seen FROM peers")
@@ -358,7 +413,7 @@ class Node(QObject):
             self.store.q("INSERT INTO files(fid,path) VALUES(?,?)", (fid, str(file)))
             fmeta = {"fid": fid, "name": file.name, "size": file.stat().st_size}
         m = {"id": mid, "from": self.id, "name": self.cfg["name"], "to": chat, "ts": now_ms(), "text": text,
-             "file": fmeta}
+             "file": fmeta, "port": TCP_PORT}
         targets = [p["id"] for p in self.peers()] if chat == ALL else [chat]
         status = f"0/{len(targets)}" if chat == ALL else "queued"
         self.store.q("INSERT INTO messages(id,chat,sender,sender_name,ts,text,file,mine,status,local) "
@@ -407,6 +462,9 @@ class Node(QObject):
 
     # ---------- приём
     def receive(self, m, ip):
+        if m.get("from") and m["from"] != self.id:
+            self._upsert({"id": m["from"], "name": m.get("name"), "port": m.get("port") or 47801,
+                          "plat": m.get("plat", "")}, ip)   # пришло сообщение — значит, отправитель в сети
         if self.store.q("SELECT 1 FROM messages WHERE id=?", (m["id"],), one=True):
             return                                  # повтор после обрыва — уже есть
         chat = ALL if m.get("to") == ALL else m["from"]

@@ -82,6 +82,7 @@ object Node {
         thread(name = "rc-udp", isDaemon = true) { udpLoop(us) }
         thread(name = "rc-beacon", isDaemon = true) { beaconLoop() }
         thread(name = "rc-outbox", isDaemon = true) { outboxLoop() }
+        thread(name = "rc-ping", isDaemon = true) { pingLoop() }
     }
 
     @Synchronized
@@ -195,22 +196,85 @@ object Node {
         }
     }
 
-    private fun seen(d: JSONObject, addr: InetAddress, port: Int) {
+    fun profile(): JSONObject = JSONObject().put("app", "RafChat").put("id", id).put("name", Prefs.name(ctx))
+        .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android")
+
+    /** Запомнить участника (маяк, сообщение или ответ на /ping). Возвращает true, если он только что появился в сети. */
+    @Synchronized
+    private fun upsert(d: JSONObject, ip: String): Boolean {
         val pid = d.getString("id")
         val prev = db.peer(pid)
         val wasOnline = prev?.online == true
+        db.upsertPeer(
+            pid,
+            d.optString("name", "").ifEmpty { prev?.name ?: "?" },
+            if (d.has("dept")) d.optString("dept", "") else prev?.dept ?: "",
+            ip,
+            d.optInt("port", TCP),
+            d.optString("plat", "").ifEmpty { prev?.plat ?: "" },
+            System.currentTimeMillis()
+        )
+        if (prev == null) catchUp(pid)
+        if (!wasOnline) { kick(); changed() }
+        return !wasOnline
+    }
+
+    /** Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки. */
+    private fun catchUp(pid: String) {
+        val since = System.currentTimeMillis() - 86_400_000L
+        for (m in db.history(ALL, 500)) {
+            if (!m.mine || m.ts < since) continue
+            val payload = JSONObject().put("id", m.id).put("from", id).put("name", Prefs.name(ctx)).put("to", ALL)
+                .put("ts", m.ts).put("text", m.text).put("file", m.file?.json() ?: JSONObject.NULL).put("port", TCP)
+            db.addOutbox(pid, m.id, payload.toString())
+            if (m.status.contains('/')) {
+                val b = m.status.substringAfter('/').toIntOrNull() ?: 0
+                db.setStatus(m.id, m.status.substringBefore('/') + "/" + (b + 1))
+            }
+        }
+    }
+
+    private fun seen(d: JSONObject, addr: InetAddress, port: Int) {
+        val pid = d.getString("id")
         if (d.optBoolean("bye")) {
             db.markOffline(pid)
             changed()
             return
         }
-        db.upsertPeer(pid, d.optString("name", "?"), d.optString("dept", ""), addr.hostAddress ?: "",
-            d.optInt("port", TCP), d.optString("plat", ""), System.currentTimeMillis())
-        if (!wasOnline || d.optBoolean("ask")) {
-            beacon(to = InetSocketAddress(addr, port))
-            kick()
-            changed()
+        val cameOnline = upsert(d, addr.hostAddress ?: "")
+        if (cameOnline || d.optBoolean("ask")) beacon(to = InetSocketAddress(addr, port))
+    }
+
+    /** Запасной путь, если маяки (UDP) где-то режутся: спрашиваем известные адреса по TCP «ты тут?». */
+    private fun pingLoop() {
+        while (running) {
+            Thread.sleep(6000)
+            if (!running) break
+            val targets = HashSet<Pair<String, Int>>()
+            for (p in db.peers()) if (p.ip.isNotEmpty() && System.currentTimeMillis() - p.lastSeen > 8000) targets.add(p.ip to p.port)
+            for (part in Prefs.extra(ctx).split(',', ';', ' ')) {
+                val a = part.trim()
+                if (a.isEmpty()) continue
+                val host = a.substringBefore(':')
+                val port = a.substringAfter(':', "").toIntOrNull()?.plus(1) ?: TCP
+                targets.add(host to port)
+            }
+            for ((ip, port) in targets) thread(isDaemon = true) { ping(ip, port) }
         }
+    }
+
+    private fun ping(ip: String, port: Int) {
+        try {
+            val c = URL("http://$ip:$port/ping").openConnection() as HttpURLConnection
+            c.connectTimeout = 3000
+            c.readTimeout = 3000
+            c.setRequestProperty("X-Auth", authHeader("GET", "/ping"))
+            if (c.responseCode == 200) {
+                val d = JSONObject(c.inputStream.bufferedReader().readText())
+                if (d.optString("id").isNotEmpty() && d.getString("id") != id) upsert(d, ip)
+            }
+            c.disconnect()
+        } catch (_: Exception) {}
     }
 
     // ---------- сервер
@@ -269,9 +333,9 @@ object Node {
                 val q = target.substringAfter('?', "").split('&').filter { it.contains('=') }
                     .associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
                 when {
-                    method == "GET" && path == "/ping" -> json(out, 200, JSONObject().put("id", id).put("name", Prefs.name(ctx)))
+                    method == "GET" && path == "/ping" -> json(out, 200, profile())
                     method == "POST" && path == "/msg" -> {
-                        receive(JSONObject(String(body, Charsets.UTF_8)))
+                        receive(JSONObject(String(body, Charsets.UTF_8)), s.inetAddress.hostAddress ?: "")
                         json(out, 200, JSONObject().put("ok", true))
                     }
                     method == "GET" && path == "/file" -> sendFile(out, q["fid"] ?: "", h["range"])
@@ -325,7 +389,7 @@ object Node {
         val status = if (chat == ALL) "0/${targets.size}" else "queued"
         db.insertMsg(Msg(mid, chat, id, Prefs.name(ctx), ts, text, meta, true, status, file?.path), false)
         val payload = JSONObject().put("id", mid).put("from", id).put("name", Prefs.name(ctx)).put("to", chat)
-            .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).toString()
+            .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).put("port", TCP).toString()
         for (t in targets) db.addOutbox(t, mid, payload)
         changed()
         kick()
@@ -373,10 +437,14 @@ object Node {
     }
 
     // ---------- приём
-    private fun receive(m: JSONObject) {
+    private fun receive(m: JSONObject, ip: String) {
         val mid = m.getString("id")
-        if (db.hasMsg(mid)) return
         val from = m.getString("from")
+        if (from != id && ip.isNotEmpty()) {
+            // пришло сообщение — значит, отправитель в сети (даже если его маяки до нас не доходят)
+            upsert(JSONObject().put("id", from).put("name", m.optString("name", "")).put("port", m.optInt("port", TCP)), ip)
+        }
+        if (db.hasMsg(mid)) return
         val chat = if (m.optString("to") == ALL) ALL else from
         val meta = if (m.isNull("file")) null else FileMeta.of(m.optJSONObject("file")?.toString())
         val msg = Msg(mid, chat, from, m.optString("name", "?"), m.optLong("ts", System.currentTimeMillis()),

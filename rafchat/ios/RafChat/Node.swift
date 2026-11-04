@@ -55,6 +55,7 @@ final class Node: ObservableObject {
         Thread.detachNewThread { [weak self] in self?.acceptLoop(t, g) }
         Thread.detachNewThread { [weak self] in self?.beaconLoop(g) }
         Thread.detachNewThread { [weak self] in self?.outboxLoop(g) }
+        Thread.detachNewThread { [weak self] in self?.pingLoop(g) }
     }
 
     func stop() {
@@ -150,22 +151,88 @@ final class Node: ObservableObject {
         }
     }
 
+    var profile: [String: Any] {
+        ["app": "RafChat", "id": id, "name": Profile.name, "dept": Profile.dept, "port": Int(Node.tcpPort), "plat": "ios"]
+    }
+
+    /// Запомнить участника (маяк, сообщение или ответ на /ping). Вызывать на главном потоке.
+    /// Возвращает true, если он только что появился в сети.
+    @discardableResult
+    private func upsert(_ d: [String: Any], _ pid: String, _ ip: String) -> Bool {
+        let prev = peers.first { $0.id == pid }
+        let wasOnline = prev?.online ?? false
+        let name = (d["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? prev?.name ?? "?"
+        let dept = (d["dept"] as? String) ?? prev?.dept ?? ""
+        let plat = (d["plat"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? prev?.plat ?? ""
+        let p = Peer(id: pid, name: name, dept: dept, ip: ip, port: (d["port"] as? Int) ?? Int(Node.tcpPort),
+                     plat: plat, lastSeen: Date().timeIntervalSince1970)
+        if let i = peers.firstIndex(where: { $0.id == pid }) { peers[i] = p } else { peers.append(p) }
+        if prev == nil { catchUp(pid) }
+        if !wasOnline {
+            store.save("peers.json", peers)
+            kick()
+        }
+        return !wasOnline
+    }
+
+    /// Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки.
+    private func catchUp(_ pid: String) {
+        let since = Int64(Date().timeIntervalSince1970 * 1000) - 86_400_000
+        for i in messages.indices where messages[i].mine && messages[i].chat == Node.all && messages[i].ts > since {
+            let m = messages[i]
+            let payload: [String: Any] = ["id": m.id, "from": id, "name": Profile.name, "to": Node.all, "ts": m.ts,
+                                          "text": m.text, "file": m.file?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
+            if let pd = try? JSONSerialization.data(withJSONObject: payload), let ps = String(data: pd, encoding: .utf8),
+               !outbox.contains(where: { $0.peer == pid && $0.msgId == m.id }) {
+                outbox.append(OutItem(peer: pid, msgId: m.id, payload: ps))
+                let parts = m.status.split(separator: "/")
+                if parts.count == 2, let b = Int(parts[1]) { messages[i].status = "\(parts[0])/\(b + 1)" }
+            }
+        }
+        persist()
+    }
+
     private func seen(_ d: [String: Any], _ pid: String, _ ip: String, _ port: UInt16) {
         DispatchQueue.main.async {
-            let wasOnline = self.peers.first { $0.id == pid }?.online ?? false
             if d["bye"] as? Bool == true {
                 if let i = self.peers.firstIndex(where: { $0.id == pid }) { self.peers[i].lastSeen = 0 }
                 return
             }
-            let p = Peer(id: pid, name: d["name"] as? String ?? "?", dept: d["dept"] as? String ?? "", ip: ip,
-                         port: (d["port"] as? Int) ?? Int(Node.tcpPort), plat: d["plat"] as? String ?? "",
-                         lastSeen: Date().timeIntervalSince1970)
-            if let i = self.peers.firstIndex(where: { $0.id == pid }) { self.peers[i] = p } else { self.peers.append(p) }
-            if !wasOnline || d["ask"] as? Bool == true {
-                self.store.save("peers.json", self.peers)
-                DispatchQueue.global().async { self.beacon(to: (ip, port)); self.kick() }
+            let came = self.upsert(d, pid, ip)
+            if came || d["ask"] as? Bool == true {
+                DispatchQueue.global().async { self.beacon(to: (ip, port)) }
             }
         }
+    }
+
+    /// Запасной путь, если маяки (UDP) где-то режутся: спрашиваем известные адреса по TCP «ты тут?».
+    private func pingLoop(_ g: Int) {
+        while gen == g {
+            Thread.sleep(forTimeInterval: 6)
+            if gen != g { break }
+            var targets: [(String, Int)] = DispatchQueue.main.sync {
+                peers.filter { !$0.ip.isEmpty && Date().timeIntervalSince1970 - $0.lastSeen > 8 }.map { ($0.ip, $0.port) }
+            }
+            for part in Profile.extra.split(whereSeparator: { ",; ".contains($0) }) {
+                let a = part.split(separator: ":")
+                if let host = a.first {
+                    targets.append((String(host), a.count > 1 ? (Int(a[1]) ?? 47800) + 1 : Int(Node.tcpPort)))
+                }
+            }
+            for (ip, port) in targets { ping(ip, port) }
+        }
+    }
+
+    private func ping(_ ip: String, _ port: Int) {
+        guard let url = URL(string: "http://\(ip):\(port)/ping") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 3)
+        req.setValue(authHeader("GET", "/ping"), forHTTPHeaderField: "X-Auth")
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            guard (resp as? HTTPURLResponse)?.statusCode == 200, let data = data,
+                  let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let pid = d["id"] as? String, pid != self.id else { return }
+            DispatchQueue.main.async { self.upsert(d, pid, ip) }
+        }.resume()
     }
 
     // MARK: HTTP-сервер
@@ -184,7 +251,17 @@ final class Node: ObservableObject {
         _ = r.write(Data("HTTP/1.1 \(code) \(text)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body)
     }
 
+    private static func remoteIP(_ fd: Int32) -> String {
+        var a = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let r = withUnsafeMutablePointer(to: &a) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getpeername(fd, $0, &len) }
+        }
+        return r == 0 ? Sock.ipString(a.sin_addr) : ""
+    }
+
     private func handle(_ fd: Int32) {
+        let remote = Node.remoteIP(fd)
         var tv = timeval(tv_sec: 60, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         let r = SockReader(fd)
@@ -205,9 +282,9 @@ final class Node: ObservableObject {
         let query = URLComponents(string: target)?.queryItems ?? []
         switch (method, path) {
         case ("GET", "/ping"):
-            reply(r, 200, ["id": id, "name": Profile.name])
+            reply(r, 200, profile)
         case ("POST", "/msg"):
-            if let m = try? JSONSerialization.jsonObject(with: body) as? [String: Any] { receive(m) }
+            if let m = try? JSONSerialization.jsonObject(with: body) as? [String: Any] { receive(m, remote) }
             reply(r, 200, ["ok": true])
         case ("GET", "/file"):
             let fid = query.first { $0.name == "fid" }?.value ?? ""
@@ -256,7 +333,7 @@ final class Node: ObservableObject {
         messages.append(Msg(id: mid, chat: chat, sender: id, senderName: Profile.name, ts: ts, text: text, file: meta,
                             mine: true, status: status, local: file?.path, unread: false))
         let payload: [String: Any] = ["id": mid, "from": id, "name": Profile.name, "to": chat, "ts": ts, "text": text,
-                                      "file": meta?.dict ?? NSNull()]
+                                      "file": meta?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
         if let pd = try? JSONSerialization.data(withJSONObject: payload), let ps = String(data: pd, encoding: .utf8) {
             for t in targets { outbox.append(OutItem(peer: t, msgId: mid, payload: ps)) }
         }
@@ -322,11 +399,15 @@ final class Node: ObservableObject {
 
     // MARK: приём
 
-    private func receive(_ m: [String: Any]) {
+    private func receive(_ m: [String: Any], _ ip: String) {
         guard let mid = m["id"] as? String, let from = m["from"] as? String else { return }
         let to = m["to"] as? String ?? ""
         let meta = FileMeta.from(m["file"])
         DispatchQueue.main.async {
+            if from != self.id && !ip.isEmpty {
+                // пришло сообщение — значит, отправитель в сети (даже если его маяки до нас не доходят)
+                self.upsert(["name": m["name"] as? String ?? "", "port": m["port"] as? Int ?? Int(Node.tcpPort)], from, ip)
+            }
             if self.messages.contains(where: { $0.id == mid }) { return }
             let chat = to == Node.all ? Node.all : from
             let msg = Msg(id: mid, chat: chat, sender: from, senderName: m["name"] as? String ?? "?",
