@@ -124,7 +124,7 @@ class ChatActivity : AppCompatActivity() {
         root.addView(View(this).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(-1, 1))
         scroll = ScrollView(this).apply {
             descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            background = Ui.chatBackground(this@ChatActivity)
+            background = Ui.chatBackground(this@ChatActivity, chat == Node.ALL)
         }
         msgs = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(12f), d(8f), d(12f), d(8f)) }
         scroll.addView(msgs)

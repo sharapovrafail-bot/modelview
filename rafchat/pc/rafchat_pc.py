@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.5.3"
+APP_VER = "0.5.4"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -73,6 +73,13 @@ def avatar_color(key: str) -> str:
     return AVATAR_COLORS[int(hashlib.md5(key.encode()).hexdigest(), 16) % len(AVATAR_COLORS)]
 
 
+def asset_file(packed: str, dev: str):
+    """Файл из сборки (рядом с программой) или из папки assets при запуске из исходников."""
+    f = (Path(getattr(sys, "_MEIPASS", "")) / packed) if getattr(sys, "frozen", False) \
+        else Path(__file__).resolve().parent.parent / "assets" / dev
+    return f if f.is_file() else None
+
+
 def avatar(name: str, key: str, size=40, group=False, photo: str | None = None) -> QPixmap:
     pm = QPixmap(size * 2, size * 2)
     pm.setDevicePixelRatio(2)
@@ -93,8 +100,17 @@ def avatar(name: str, key: str, size=40, group=False, photo: str | None = None) 
     p.setBrush(QColor(ORANGE if group else avatar_color(key)))
     p.drawEllipse(QRectF(0, 0, size, size))
     if group:
-        g = int(size * 0.56)
-        p.drawPixmap(int((size - g) / 2), int((size - g) / 2), glyph("users", "#FFFFFF", g, 2))
+        logo = asset_file("corp_logo.png", "corp_logo.png")
+        lp = QPixmap(str(logo)) if logo else QPixmap()
+        if not lp.isNull():                     # логотип организации на белом круге с оранжевой каймой
+            p.setBrush(QColor("#FFFFFF"))
+            p.drawEllipse(QRectF(1.5, 1.5, size - 3, size - 3))
+            g = size * 0.74
+            p.drawPixmap(QRectF((size - g) / 2, (size - g) / 2, g, g).toRect(),
+                         lp.scaled(int(g * 2), int(g * 2), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            g = int(size * 0.56)
+            p.drawPixmap(int((size - g) / 2), int((size - g) / 2), glyph("users", "#FFFFFF", g, 2))
     else:
         f = QFont()
         f.setPixelSize(int(size * 0.38))
@@ -1185,7 +1201,21 @@ class MsgsArea(QWidget):
         self.setObjectName("msgs")
         self.tile = None
 
+    def set_corp(self, on: bool):
+        """«Общий чат» — фон из контуров логотипа организации, остальные — чертёжный узор."""
+        if on != getattr(self, "corp", False):
+            self.corp = on
+            self.tile = None
+            self.update()
+
     def _tile(self):
+        if self.tile is None and getattr(self, "corp", False):
+            f = asset_file("corp_pattern.png", "corp_pattern.png")
+            if f:
+                pm = QPixmap(str(f))
+                pm.setDevicePixelRatio(pm.width() / 480)
+                self.tile = pm
+                return pm
         if self.tile is None:
             from PySide6.QtCore import QByteArray
             from PySide6.QtSvg import QSvgRenderer
@@ -1990,6 +2020,7 @@ class ChatWindow(QMainWindow):
     # ---------- переписка
     def open_chat(self, key):
         self.chat = key
+        self.msgs.set_corp(key == ALL)
         self.node.mark_read(key)
         self.bubbles.clear()
         while self.ml.count() > 1:

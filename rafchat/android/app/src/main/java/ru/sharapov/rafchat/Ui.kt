@@ -63,6 +63,17 @@ object Ui {
                 scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
             }
             f.addView(img, FrameLayout.LayoutParams(size, size))
+        } else if (group) {                    // «Общий чат»: логотип организации на белом круге с оранжевой каймой
+            val img = android.widget.ImageView(ctx).apply {
+                setImageResource(R.drawable.corp_logo)
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                val pad = (size * 0.13f).toInt()
+                setPadding(pad, pad, pad, pad)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL; setColor(SURFACE); setStroke(dpi(ctx, 1.5f), ORANGE)
+                }
+            }
+            f.addView(img, FrameLayout.LayoutParams(size, size))
         } else {
         val t = TextView(ctx).apply {
             text = if (group) "👥" else initials(name)
@@ -89,8 +100,9 @@ object Ui {
     }
 
     /** Узор фона переписки (шестерни, гайки, штангенциркуль…), как обои в WhatsApp. */
-    fun chatBackground(ctx: Context): android.graphics.drawable.Drawable {
-        val src = android.graphics.BitmapFactory.decodeResource(ctx.resources, R.drawable.chat_pattern)
+    fun chatBackground(ctx: Context, corp: Boolean = false): android.graphics.drawable.Drawable {
+        // «Общий чат» — контуры логотипа организации, личные чаты — чертёжный узор
+        val src = android.graphics.BitmapFactory.decodeResource(ctx.resources, if (corp) R.drawable.corp_pattern else R.drawable.chat_pattern)
         val side = dpi(ctx, 300f)
         val tile = android.graphics.drawable.BitmapDrawable(ctx.resources, android.graphics.Bitmap.createScaledBitmap(src, side, side, true))
         tile.setTileModeXY(android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT)
