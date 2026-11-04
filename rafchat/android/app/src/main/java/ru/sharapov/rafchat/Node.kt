@@ -95,6 +95,7 @@ object Node {
         thread(name = "rc-outbox", isDaemon = true) { outboxLoop() }
         thread(name = "rc-ping", isDaemon = true) { pingLoop() }
         try { dropSelfGhosts() } catch (_: Exception) {}
+        Prefs.relayAlt(ctx).let { (p, t) -> if (p > 0) { altPort = p; altTls = t } }
         thread(name = "rc-relay", isDaemon = true) { relayLoop() }
     }
 
@@ -588,7 +589,11 @@ object Node {
                 c.disconnect()
                 body.contains("RafChat Relay")
             } catch (e: Exception) { false }
-            if (ok) { altPort = if (p == main) null else p; altTls = tls && p != main; return }
+            if (ok) {
+                altPort = if (p == main) null else p; altTls = tls && p != main
+                Prefs.setRelayAlt(ctx, altPort ?: 0, altTls)        // после перезапуска — сразу через рабочий порт
+                return
+            }
         }
     }
 

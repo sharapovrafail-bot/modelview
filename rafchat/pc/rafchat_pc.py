@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.4.3"
+APP_VER = "0.4.4"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -182,6 +182,8 @@ class Node(QObject):
         self.org_id = hashlib.sha256(("RafChat-org:" + org).encode()).hexdigest()[:32]
         self.relay_ok = None                 # None — сервер не задан, True/False — есть ли связь
         self._av_loading: set = set()
+        alt = cfg.get("relay_alt") or [None, False]       # запомненный рабочий порт сервера (мобильный интернет)
+        self._alt_port, self._alt_tls = alt[0], bool(alt[1])
         self._av_fail: dict = {}
         self._relay_uploaded: set = set()
         self.store = Store(DATA_DIR / "rafchat.db")
@@ -664,6 +666,8 @@ class Node(QObject):
             if ok:
                 self._alt_port = None if p == main else p
                 self._alt_tls = tls
+                self.cfg["relay_alt"] = [self._alt_port, tls] if self._alt_port else None
+                save_cfg(self.cfg)                         # после перезапуска сразу пойдём через рабочий порт
                 return
 
     @staticmethod

@@ -34,6 +34,10 @@ object Prefs {
         val s = HashSet(hidden(ctx))
         if (if (on) s.add(id) else s.remove(id)) sp(ctx).edit().putStringSet("hidden", s).apply()
     }
+    /** Запомненный рабочий порт сервера (0 — основной) и шифрованный ли он. */
+    fun relayAlt(ctx: Context): Pair<Int, Boolean> = sp(ctx).getInt("relay_alt_port", 0) to sp(ctx).getBoolean("relay_alt_tls", false)
+    fun setRelayAlt(ctx: Context, port: Int, tls: Boolean) =
+        sp(ctx).edit().putInt("relay_alt_port", port).putBoolean("relay_alt_tls", tls).apply()
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {
