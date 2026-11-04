@@ -14,12 +14,18 @@ final class Node: ObservableObject {
     static let all = "all"
     static let onlineSec = 15.0
     static let autoDownload: Int64 = 50 * 1024 * 1024
+    static let relayOnlineSec = 75.0
+    static let relayFileMax: Int64 = 50 * 1024 * 1024
+    /// шифрованные порты сервера (мобильный интернет режет незашифрованный HTTP к зарубежным серверам)
+    static let tlsPorts = [2053, 993, 465, 2083, 2087, 9443]
 
     @Published var peers: [Peer] = []
     @Published var messages: [Msg] = []
     @Published var progress: [String: (Int64, Int64)] = [:]
     @Published var running = false
     @Published var tick = 0
+    /// nil — сервер не задан, true/false — есть ли с ним связь
+    @Published var relayOk: Bool?
     var visibleChat: String?
 
     private let store = Store()
@@ -30,6 +36,12 @@ final class Node: ObservableObject {
     private var tcpFd: Int32 = -1
     private var gen = 0
     private var downloading = Set<String>()
+    private var ekey = SymmetricKey(size: .bits256)
+    private var orgId = ""
+    private var altPort: Int? = nil
+    private var altTLS = false
+    private var probeAt = Date.distantPast
+    private var relayUploaded = Set<String>()
     let id = Profile.id
 
     private init() {
@@ -43,7 +55,11 @@ final class Node: ObservableObject {
 
     func start() {
         guard Profile.isSetUp, !running else { return }
-        key = SymmetricKey(data: SHA256.hash(data: Data(("RafChat:" + Profile.org.trimmingCharacters(in: .whitespaces)).utf8)))
+        let org = Profile.org.trimmingCharacters(in: .whitespaces)
+        key = SymmetricKey(data: SHA256.hash(data: Data(("RafChat:" + org).utf8)))
+        ekey = SymmetricKey(data: SHA256.hash(data: Data(("RafChat-e2e:" + org).utf8)))
+        orgId = String(Node.hex(SHA256.hash(data: Data(("RafChat-org:" + org).utf8))).prefix(32))
+        if Profile.relayAltPort > 0 { altPort = Profile.relayAltPort; altTLS = Profile.relayAltTLS }
         udpFd = Sock.udp(port: Node.udpPort)
         tcpFd = Sock.tcpServer(port: Node.tcpPort)
         guard udpFd >= 0, tcpFd >= 0 else { stopSockets(); return }
@@ -56,6 +72,7 @@ final class Node: ObservableObject {
         Thread.detachNewThread { [weak self] in self?.beaconLoop(g) }
         Thread.detachNewThread { [weak self] in self?.outboxLoop(g) }
         Thread.detachNewThread { [weak self] in self?.pingLoop(g) }
+        Thread.detachNewThread { [weak self] in self?.relayLoop(g) }
     }
 
     func stop() {
@@ -99,7 +116,8 @@ final class Node: ObservableObject {
 
     private func beaconData(ask: Bool, bye: Bool) -> Data? {
         let d: [String: Any] = ["app": "RafChat", "v": 1, "id": id, "name": Profile.name, "dept": Profile.dept,
-                                "port": Int(Node.tcpPort), "plat": "ios", "ask": ask, "bye": bye]
+                                "port": Int(Node.tcpPort), "plat": "ios", "ask": ask, "bye": bye,
+                                "srv": Profile.server, "srvt": Profile.serverT]
         guard let rawData = try? JSONSerialization.data(withJSONObject: d),
               let raw = String(data: rawData, encoding: .utf8) else { return nil }
         let env: [String: Any] = ["d": raw, "s": sign(Data(raw.utf8))]
@@ -152,22 +170,24 @@ final class Node: ObservableObject {
     }
 
     var profile: [String: Any] {
-        ["app": "RafChat", "id": id, "name": Profile.name, "dept": Profile.dept, "port": Int(Node.tcpPort), "plat": "ios"]
+        ["app": "RafChat", "id": id, "name": Profile.name, "dept": Profile.dept, "port": Int(Node.tcpPort), "plat": "ios",
+         "srv": Profile.server, "srvt": Profile.serverT]
     }
 
     /// Запомнить участника (маяк, сообщение или ответ на /ping). Вызывать на главном потоке.
     /// Возвращает true, если он только что появился в сети.
     @discardableResult
     private func upsert(_ d: [String: Any], _ pid: String, _ ip: String) -> Bool {
+        adoptServer(d)
         let prev = peers.first { $0.id == pid }
-        let wasOnline = prev?.online ?? false
+        let wasOnline = prev?.lan ?? false
         let name = (d["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? prev?.name ?? "?"
         let dept = (d["dept"] as? String) ?? prev?.dept ?? ""
         let plat = (d["plat"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? prev?.plat ?? ""
         let p = Peer(id: pid, name: name, dept: dept, ip: ip, port: (d["port"] as? Int) ?? Int(Node.tcpPort),
-                     plat: plat, lastSeen: Date().timeIntervalSince1970)
+                     plat: plat, lastSeen: Date().timeIntervalSince1970, relaySeen: prev?.relaySeen ?? 0)
         if let i = peers.firstIndex(where: { $0.id == pid }) { peers[i] = p } else { peers.append(p) }
-        if prev == nil { catchUp(pid) }
+        if prev == nil { mergeDupes(pid); catchUp(pid) }
         if !wasOnline {
             store.save("peers.json", peers)
             kick()
@@ -180,8 +200,10 @@ final class Node: ObservableObject {
         let since = Int64(Date().timeIntervalSince1970 * 1000) - 86_400_000
         for i in messages.indices where messages[i].mine && messages[i].chat == Node.all && messages[i].ts > since {
             let m = messages[i]
-            let payload: [String: Any] = ["id": m.id, "from": id, "name": Profile.name, "to": Node.all, "ts": m.ts,
+            var payload: [String: Any] = ["id": m.id, "from": id, "name": Profile.name, "to": Node.all, "ts": m.ts,
                                           "text": m.text, "file": m.file?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
+            if let r = m.replyObj { payload["reply"] = r }
+            if let t = m.taskObj { payload["task"] = t }
             if let pd = try? JSONSerialization.data(withJSONObject: payload), let ps = String(data: pd, encoding: .utf8),
                !outbox.contains(where: { $0.peer == pid && $0.msgId == m.id }) {
                 outbox.append(OutItem(peer: pid, msgId: m.id, payload: ps))
@@ -317,7 +339,9 @@ final class Node: ObservableObject {
 
     // MARK: отправка
 
-    func send(chat: String, text: String, file: URL? = nil, fileName: String? = nil) {
+    @discardableResult
+    func send(chat: String, text: String, file: URL? = nil, fileName: String? = nil,
+              reply: [String: Any]? = nil, task task0: [String: Any]? = nil) -> String {
         let mid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         var meta: FileMeta?
         if let file = file {
@@ -330,15 +354,24 @@ final class Node: ObservableObject {
         let ts = Int64(Date().timeIntervalSince1970 * 1000)
         let targets = chat == Node.all ? peers.map { $0.id } : [chat]
         let status = chat == Node.all ? "0/\(targets.count)" : "queued"
+        var task = task0
+        if task != nil {
+            if (task?["status"] as? String ?? "").isEmpty { task?["status"] = TaskStatus.new }
+            task?["by"] = Profile.name; task?["at"] = ts
+        }
         messages.append(Msg(id: mid, chat: chat, sender: id, senderName: Profile.name, ts: ts, text: text, file: meta,
-                            mine: true, status: status, local: file?.path, unread: false))
-        let payload: [String: Any] = ["id": mid, "from": id, "name": Profile.name, "to": chat, "ts": ts, "text": text,
+                            mine: true, status: status, local: file?.path, unread: false,
+                            reply: Msg.json(reply), task: Msg.json(task)))
+        var payload: [String: Any] = ["id": mid, "from": id, "name": Profile.name, "to": chat, "ts": ts, "text": text,
                                       "file": meta?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
+        if let r = reply { payload["reply"] = r }
+        if let t = task { payload["task"] = t }
         if let pd = try? JSONSerialization.data(withJSONObject: payload), let ps = String(data: pd, encoding: .utf8) {
             for t in targets { outbox.append(OutItem(peer: t, msgId: mid, payload: ps)) }
         }
         persist()
         kick()
+        return mid
     }
 
     private let wake = NSCondition()
@@ -349,10 +382,19 @@ final class Node: ObservableObject {
             wake.lock(); _ = wake.wait(until: Date().addingTimeInterval(3)); wake.unlock()
             if gen != g { break }
             let (items, online) = DispatchQueue.main.sync {
-                (outbox, Dictionary(uniqueKeysWithValues: peers.filter { $0.online }.map { ($0.id, $0) }))
+                (outbox, Dictionary(peers.filter { $0.lan }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }))
             }
+            let relay = serverAddr() != nil
             for it in items {
-                guard let p = online[it.peer], let url = URL(string: "http://\(p.ip):\(p.port)/msg") else { continue }
+                guard let p = online[it.peer], let url = URL(string: "http://\(p.ip):\(p.port)/msg") else {
+                    if relay && relayDeliver(it.peer, it.payload) {          // иначе — через сервер
+                        DispatchQueue.main.async {
+                            self.outbox.removeAll { $0.peer == it.peer && $0.msgId == it.msgId }
+                            self.viaRelay(it.msgId)
+                        }
+                    }
+                    continue
+                }
                 let body = Data(it.payload.utf8)
                 var req = URLRequest(url: url, timeoutInterval: 10)
                 req.httpMethod = "POST"
@@ -407,13 +449,28 @@ final class Node: ObservableObject {
             if from != self.id && !ip.isEmpty {
                 // пришло сообщение — значит, отправитель в сети (даже если его маяки до нас не доходят)
                 self.upsert(["name": m["name"] as? String ?? "", "port": m["port"] as? Int ?? Int(Node.tcpPort)], from, ip)
+            } else if from != self.id {
+                self.upsertRelay(["id": from, "name": m["name"] as? String ?? ""], Date().timeIntervalSince1970)
+            }
+            if m["type"] as? String == "task" {                 // коллега сменил статус задания
+                let tid = m["task_id"] as? String ?? ""
+                if let i = self.messages.firstIndex(where: { $0.id == tid }), var t = self.messages[i].taskObj {
+                    let ts = (m["ts"] as? NSNumber)?.int64Value ?? 0
+                    if ts >= ((t["at"] as? NSNumber)?.int64Value ?? 0) {
+                        t["status"] = m["status"] as? String ?? t["status"]; t["by"] = m["name"] as? String ?? "?"; t["at"] = ts
+                        self.messages[i].task = Msg.json(t)
+                        self.persist()
+                    }
+                }
+                return
             }
             if self.messages.contains(where: { $0.id == mid }) { return }
             let chat = to == Node.all ? Node.all : from
             let msg = Msg(id: mid, chat: chat, sender: from, senderName: m["name"] as? String ?? "?",
                           ts: (m["ts"] as? NSNumber)?.int64Value ?? Int64(Date().timeIntervalSince1970 * 1000),
                           text: m["text"] as? String ?? "", file: meta, mine: false, status: "received", local: nil,
-                          unread: self.visibleChat != chat)
+                          unread: self.visibleChat != chat,
+                          reply: Msg.json(m["reply"] as? [String: Any]), task: Msg.json(m["task"] as? [String: Any]))
             self.messages.append(msg)
             self.persist()
             if let meta = meta, meta.size <= Node.autoDownload { self.download(mid) }
@@ -430,7 +487,18 @@ final class Node: ObservableObject {
             defer { DispatchQueue.main.async { self.downloading.remove(mid); self.progress[mid] = nil } }
             for _ in 0..<40 {
                 let p = await MainActor.run { self.peers.first { $0.id == m.sender } }
-                if let p = p, p.online {
+                if (p == nil || !p!.lan) && f.relay && self.serverAddr() != nil,
+                   let enc = try? self.relayCall("GET", "/r/file?fid=" + f.fid, nil, timeout: 300),
+                   let data = self.dec(enc) {
+                    let dest = self.uniqueDest(f.name)
+                    try? data.write(to: dest)
+                    await MainActor.run {
+                        if let i = self.messages.firstIndex(where: { $0.id == mid }) { self.messages[i].local = dest.path }
+                        self.persist()
+                    }
+                    return
+                }
+                if let p = p, p.lan {
                     let have = ((try? FileManager.default.attributesOfItem(atPath: part.path)[.size]) as? NSNumber)?.int64Value ?? 0
                     let path = "/file?fid=" + f.fid
                     if let url = URL(string: "http://\(p.ip):\(p.port)\(path)") {
@@ -523,4 +591,290 @@ final class Node: ObservableObject {
         if changed { persist() }
     }
     var queued: Int { outbox.count }
+}
+
+// MARK: - работа через интернет (сервер-ретранслятор), задания, поиск
+
+/// Сертификат сервера свой (самоподписанный) — принимаем его: переписка всё равно зашифрована ключом организации.
+final class TrustAllDelegate: NSObject, URLSessionDelegate {
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
+extension Node {
+    static let relaySession: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 60
+        c.timeoutIntervalForResource = 600
+        return URLSession(configuration: c, delegate: TrustAllDelegate(), delegateQueue: nil)
+    }()
+
+    // ---------- шифрование для сервера (AES-256-GCM: nonce 12 байт + шифротекст + тег — как у ПК и Android)
+    func enc(_ data: Data) -> Data? { try? AES.GCM.seal(data, using: ekey).combined }
+
+    func dec(_ blob: Data) -> Data? {
+        guard let box = try? AES.GCM.SealedBox(combined: blob) else { return nil }
+        return try? AES.GCM.open(box, using: ekey)
+    }
+
+    func serverAddr() -> (String, Int)? {
+        let s = Profile.server.replacingOccurrences(of: "http://", with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !s.isEmpty else { return nil }
+        let parts = s.split(separator: ":")
+        let host = String(parts[0])
+        let port = parts.count > 1 ? Int(parts[1]) ?? 47888 : 47888
+        return (host, altPort ?? port)
+    }
+
+    /// Синхронный запрос к серверу (вызывать не с главного потока).
+    func relayCall(_ method: String, _ path: String, _ body: Data?, json: Bool = true, timeout: Double = 15) throws -> Data {
+        guard let (host, port) = serverAddr() else { throw URLError(.badURL) }
+        let scheme = (altTLS && altPort != nil) ? "https" : "http"
+        guard let url = URL(string: "\(scheme)://\(host):\(port)\(path)") else { throw URLError(.badURL) }
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.httpMethod = method
+        req.setValue(orgId, forHTTPHeaderField: "X-Org")
+        req.setValue(id, forHTTPHeaderField: "X-Node")
+        if let b = body {
+            req.httpBody = b
+            req.setValue(json ? "application/json" : "application/octet-stream", forHTTPHeaderField: "Content-Type")
+        }
+        return try Node.syncData(req)
+    }
+
+    static func syncData(_ req: URLRequest) throws -> Data {
+        let sem = DispatchSemaphore(value: 0)
+        var out: Data?
+        var err: Error?
+        relaySession.dataTask(with: req) { d, resp, e in
+            if let e = e { err = e }
+            else if (resp as? HTTPURLResponse)?.statusCode != 200 { err = URLError(.badServerResponse) }
+            else { out = d ?? Data() }
+            sem.signal()
+        }.resume()
+        sem.wait()
+        if let e = err { throw e }
+        return out ?? Data()
+    }
+
+    func relayJSON(_ method: String, _ path: String, _ body: [String: Any]? = nil, timeout: Double = 15) throws -> [String: Any] {
+        let b = try body.map { try JSONSerialization.data(withJSONObject: $0) }
+        let d = try relayCall(method, path, b, timeout: timeout)
+        return (try? JSONSerialization.jsonObject(with: d) as? [String: Any]) ?? [:]
+    }
+
+    func relaySend(_ to: String, _ m: [String: Any]) -> Bool {
+        guard let raw = try? JSONSerialization.data(withJSONObject: m), let blob = enc(raw) else { return false }
+        return (try? relayJSON("POST", "/r/send", ["to": to, "blob": blob.base64EncodedString()])) != nil
+    }
+
+    /// Отправить через сервер (файл до 50 МБ — тоже, зашифрованным).
+    func relayDeliver(_ to: String, _ payload: String) -> Bool {
+        guard var m = (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) as? [String: Any] else { return true }
+        if var f = m["file"] as? [String: Any], f["relay"] as? Bool != true,
+           let fid = f["fid"] as? String, ((f["size"] as? NSNumber)?.int64Value ?? 0) <= Node.relayFileMax {
+            let path = DispatchQueue.main.sync { files[fid] }
+            if !relayUploaded.contains(fid), let path = path, let data = FileManager.default.contents(atPath: path),
+               let blob = enc(data) {
+                guard (try? relayCall("PUT", "/r/file?fid=" + fid, blob, json: false, timeout: 300)) != nil else { return false }
+                relayUploaded.insert(fid)
+            }
+            if relayUploaded.contains(fid) { f["relay"] = true; m["file"] = f }
+        }
+        return relaySend(to, m)
+    }
+
+    /// Основной порт сервера не отвечает (мобильный интернет режет нестандартные порты) — пробуем
+    /// шифрованные и «веб-порты», запоминаем первый рабочий.
+    func probePorts() {
+        guard Date().timeIntervalSince(probeAt) > 30 else { return }
+        probeAt = Date()
+        let s = Profile.server.replacingOccurrences(of: "http://", with: "")
+        let parts = s.split(separator: ":")
+        guard let hostPart = parts.first else { return }
+        let host = String(hostPart)
+        let main = parts.count > 1 ? Int(parts[1]) ?? 47888 : 47888
+        let cand = [(main, false)] + Node.tlsPorts.map { ($0, true) } + [(80, false), (8080, false)]
+        for (p, tls) in cand {
+            guard let url = URL(string: "\(tls ? "https" : "http")://\(host):\(p)/") else { continue }
+            let req = URLRequest(url: url, timeoutInterval: 6)
+            if let d = try? Node.syncData(req), String(decoding: d, as: UTF8.self).contains("RafChat Relay") {
+                altPort = p == main ? nil : p
+                altTLS = tls && p != main
+                Profile.setRelayAlt(altPort ?? 0, altTLS)       // после перезапуска — сразу через рабочий порт
+                return
+            }
+        }
+    }
+
+    func relayLoop(_ g: Int) {
+        var lastHello = Date.distantPast
+        while gen == g {
+            if serverAddr() == nil {
+                DispatchQueue.main.async { self.relayOk = nil }
+                Thread.sleep(forTimeInterval: 3); continue
+            }
+            do {
+                if Date().timeIntervalSince(lastHello) > 20 {
+                    try relayHello()
+                    lastHello = Date()
+                    DispatchQueue.main.async { if self.relayOk != true { self.relayOk = true } }
+                    kick()
+                }
+                let r = try relayJSON("GET", "/r/poll?wait=25", nil, timeout: 40)
+                DispatchQueue.main.async { if self.relayOk != true { self.relayOk = true } }
+                var acks: [String] = []
+                for it in r["items"] as? [[String: Any]] ?? [] {
+                    if let q = it["qid"] as? String { acks.append(q) }
+                    guard let b = it["blob"] as? String, let raw = Data(base64Encoded: b), let d = dec(raw),
+                          let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { continue }
+                    relayItem(m)
+                }
+                if !acks.isEmpty { _ = try? relayJSON("POST", "/r/ack", ["qids": acks]) }
+            } catch {
+                DispatchQueue.main.async { if self.relayOk != false { self.relayOk = false } }
+                probePorts()
+                if gen == g { Thread.sleep(forTimeInterval: 5) }
+            }
+        }
+    }
+
+    func relayHello() throws {
+        guard let raw = try? JSONSerialization.data(withJSONObject: profile), let blob = enc(raw) else { return }
+        let r = try relayJSON("POST", "/r/hello", ["profile": blob.base64EncodedString()])
+        let now = (r["now"] as? NSNumber)?.doubleValue ?? Date().timeIntervalSince1970
+        for p in r["peers"] as? [[String: Any]] ?? [] {
+            guard let pid = p["id"] as? String, pid != id, let b = p["profile"] as? String,
+                  let pr = Data(base64Encoded: b), let d = dec(pr),
+                  let prof = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  prof["id"] as? String == pid else { continue }
+            let seen = Date().timeIntervalSince1970 - (now - ((p["last"] as? NSNumber)?.doubleValue ?? 0))
+            DispatchQueue.main.async { self.upsertRelay(prof, seen) }
+        }
+    }
+
+    func relayItem(_ m: [String: Any]) {
+        if m["type"] as? String == "ack" {                    // получатель подтвердил — ✓✓
+            let mid = m["id"] as? String ?? ""
+            DispatchQueue.main.async {
+                if let i = self.messages.firstIndex(where: { $0.id == mid }), self.messages[i].mine, self.messages[i].chat != Node.all {
+                    self.messages[i].status = "delivered"; self.persist()
+                }
+            }
+            return
+        }
+        guard let from = m["from"] as? String, from != id, m["id"] as? String != nil else { return }
+        receive(m, "")
+        _ = relaySend(from, ["type": "ack", "id": m["id"] as? String ?? "", "from": id])
+    }
+
+    /// Участник на связи через сервер (вызывать на главном потоке).
+    func upsertRelay(_ d: [String: Any], _ seen: Double) {
+        adoptServer(d)
+        guard let pid = d["id"] as? String, pid != id else { return }
+        let now = Date().timeIntervalSince1970
+        let nowOnline = now - seen < Node.relayOnlineSec
+        if let i = peers.firstIndex(where: { $0.id == pid }) {
+            if let n = d["name"] as? String, !n.isEmpty { peers[i].name = n }
+            if let dp = d["dept"] as? String { peers[i].dept = dp }
+            let was = peers[i].online
+            peers[i].relaySeen = max(peers[i].relaySeen, seen)
+            if !was && nowOnline { kick() }
+            return
+        }
+        // сервер помнит устройства 60 дней: старые установки и удалённые чаты не показываем, пока не выйдут на связь
+        let name = d["name"] as? String ?? "", dept = d["dept"] as? String ?? ""
+        if !nowOnline {
+            if Profile.hidden.contains(pid) || now - seen > 3 * 86400 { return }
+            if name.lowercased() == Profile.name.lowercased() && dept.lowercased() == Profile.dept.lowercased() { return }
+        } else {
+            var h = Profile.hidden; h.remove(pid); Profile.hidden = h
+        }
+        peers.append(Peer(id: pid, name: name.isEmpty ? "?" : name, dept: dept, ip: "", port: Int(Node.tcpPort),
+                          plat: d["plat"] as? String ?? "", lastSeen: 0, relaySeen: seen))
+        if nowOnline { mergeDupes(pid) }
+        catchUp(pid)
+        store.save("peers.json", peers)
+        kick()
+    }
+
+    /// Адрес сервера расходится сам: берём более новый (сервер сменили) или любой, если у нас пусто.
+    func adoptServer(_ d: [String: Any]) {
+        guard let srv = (d["srv"] as? String)?.trimmingCharacters(in: .whitespaces), !srv.isEmpty else { return }
+        let t = (d["srvt"] as? NSNumber)?.doubleValue ?? 0
+        if srv != Profile.server && t > Profile.serverT {
+            Profile.adoptServer(srv, t)
+            altPort = nil; altTLS = false
+        }
+    }
+
+    /// Тот же человек с нового устройства: старая запись с тем же именем и отделом, которая не в сети, склеивается.
+    func mergeDupes(_ pid: String) {
+        guard let me = peers.first(where: { $0.id == pid }), !me.name.isEmpty, me.name != "?" else { return }
+        for p in peers where p.id != pid && !p.online
+            && p.name.lowercased() == me.name.lowercased() && p.dept.lowercased() == me.dept.lowercased() {
+            for i in messages.indices where messages[i].chat == p.id { messages[i].chat = pid }
+            outbox.removeAll { $0.peer == p.id }
+            peers.removeAll { $0.id == p.id }
+            var h = Profile.hidden; h.insert(p.id); Profile.hidden = h
+        }
+        persist()
+    }
+
+    func viaRelay(_ mid: String) {
+        guard let i = messages.firstIndex(where: { $0.id == mid }) else { return }
+        if messages[i].chat == Node.all { delivered(mid); return }
+        if messages[i].status != "delivered" { messages[i].status = "relay"; persist() }
+    }
+
+    /// Сменить статус задания — у себя и у всех, кому оно было отправлено.
+    func taskUpdate(_ mid: String, _ st: String) {
+        guard let i = messages.firstIndex(where: { $0.id == mid }), var t = messages[i].taskObj else { return }
+        let ts = Int64(Date().timeIntervalSince1970 * 1000)
+        t["status"] = st; t["by"] = Profile.name; t["at"] = ts
+        messages[i].task = Msg.json(t)
+        let chat = messages[i].chat
+        let uid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let upd: [String: Any] = ["id": uid, "from": id, "name": Profile.name, "to": chat, "ts": ts, "type": "task",
+                                  "task_id": mid, "status": st, "port": Int(Node.tcpPort), "file": NSNull(),
+                                  "text": "📋 «\(t["title"] as? String ?? "")» — \(st)"]
+        if let pd = try? JSONSerialization.data(withJSONObject: upd), let ps = String(data: pd, encoding: .utf8) {
+            for p in (chat == Node.all ? peers.map { $0.id } : [chat]) { outbox.append(OutItem(peer: p, msgId: uid, payload: ps)) }
+        }
+        persist()
+        kick()
+    }
+
+    /// Удалить чат: переписку и очередь; личный — вместе с участником (вернётся, если выйдет на связь).
+    func deleteChat(_ key: String) {
+        messages.removeAll { $0.chat == key }
+        if key != Node.all {
+            outbox.removeAll { $0.peer == key }
+            peers.removeAll { $0.id == key }
+            var h = Profile.hidden; h.insert(key); Profile.hidden = h
+            store.save("peers.json", peers)
+        }
+        persist()
+    }
+
+    func search(_ q: String) -> [Msg] {
+        let k = q.lowercased()
+        return messages.filter {
+            ($0.text + " " + ($0.file?.name ?? "") + " " + ($0.task ?? "") + " " + $0.senderName).lowercased().contains(k)
+        }.sorted { $0.ts > $1.ts }.prefix(100).map { $0 }
+    }
+
+    var tasks: [Msg] {
+        messages.filter { $0.task != nil }.sorted {
+            let a = TaskStatus.order[$0.taskObj?["status"] as? String ?? ""] ?? 9
+            let b = TaskStatus.order[$1.taskObj?["status"] as? String ?? ""] ?? 9
+            return a != b ? a < b : $0.ts > $1.ts
+        }
+    }
 }
