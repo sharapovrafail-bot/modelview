@@ -3,6 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// адрес сервера организации, встроенный в установщик (rafchat/defaults.json)
+val defaultServer: String = Regex("\"server\"\\s*:\\s*\"([^\"]*)\"")
+    .find(rootProject.file("../defaults.json").takeIf { it.exists() }?.readText() ?: "")?.groupValues?.get(1) ?: ""
+
 android {
     namespace = "ru.sharapov.rafchat"
     compileSdk = 35
@@ -11,8 +15,9 @@ android {
         applicationId = "ru.sharapov.rafchat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.2.1"
+        versionCode = 6
+        versionName = "0.2.2"
+        buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
     }
 
     // Постоянный ключ подписи: новые версии ставятся поверх старых без удаления.
@@ -41,6 +46,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    buildFeatures { buildConfig = true }
 }
 
 dependencies {

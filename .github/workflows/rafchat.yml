@@ -53,7 +53,7 @@ jobs:
         working-directory: rafchat/pc
         run: |
           python make_version.py
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" rafchat_pc.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" --add-data "../defaults.json:." rafchat_pc.py
       - name: Проверка запуском и снимок окна
         working-directory: rafchat/pc
         shell: pwsh

@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.2.1"
+APP_VER = "0.2.2"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -761,6 +761,15 @@ class Node(QObject):
 
 # ======================================================================= настройки
 
+def defaults() -> dict:
+    """Настройки, встроенные в установщик (адрес сервера организации)."""
+    base = Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+    try:
+        return json.loads((base / "defaults.json").read_text("utf-8"))
+    except Exception:
+        return {}
+
+
 def load_cfg() -> dict:
     f = DATA_DIR / "config.json"
     try:
@@ -1425,6 +1434,12 @@ class ServerSetupDialog(QDialog):
         self.pw.setEchoMode(QLineEdit.Password)
         self.pw.setPlaceholderText("если вход по ключу SSH — оставьте пустым")
         cl.addWidget(self.pw)
+        from PySide6.QtWidgets import QCheckBox
+        self.force = QCheckBox("Переустановить / обновить сервер, даже если он уже работает")
+        cl.addWidget(self.force)
+        srv = (cfg.get("server") or "").strip()
+        if srv:
+            self.host.setText(srv.rsplit(":", 1)[0])
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Здесь будет ход установки…")
@@ -1438,17 +1453,45 @@ class ServerSetupDialog(QDialog):
         self.failed.connect(self._fail)
 
     def start(self):
-        host = self.host.text().strip()
+        # защита от типичных ошибок ввода: «root 1.2.3.4», «root@1.2.3.4», «1.2.3.4:47888», порт 47888 в поле SSH
+        host = self.host.text().strip().replace("ssh ", "").split("@")[-1].split()[0] if self.host.text().strip() else ""
+        host = host.split(":")[0]
+        user = (self.user.text().strip() or "root").split("@")[0].split()[0]
+        try:
+            sport = int(self.sshport.text() or 22)
+        except ValueError:
+            sport = 22
+        self.log.clear()
+        if sport == 47888:
+            sport = 22
+            self.sshport.setText("22")
+            self.log.appendPlainText("Порт 47888 — это порт самого RafChat; для SSH использую 22.")
         if not host:
             self.log.appendPlainText("Укажите IP-адрес VPS.")
             return
+        self.host.setText(host)
+        self.user.setText(user)
         self.go.setEnabled(False)
         self.go.setText("Устанавливаю…")
-        self.log.clear()
-        args = (host, int(self.sshport.text() or 22), self.user.text().strip() or "root", self.pw.text())
+        args = (host, sport, user, self.pw.text())
         threading.Thread(target=self._work, args=args, daemon=True).start()
 
+    def _relay_alive(self, host) -> bool:
+        try:
+            c = http.client.HTTPConnection(host, 47888, timeout=4)
+            c.request("GET", "/")
+            r = c.getresponse()
+            ok = r.status == 200 and b"RafChat" in r.read()
+            c.close()
+            return ok
+        except OSError:
+            return False
+
     def _work(self, host, port, user, pw):
+        if not self.force.isChecked() and self._relay_alive(host):
+            self.log_line.emit(f"Сервер RafChat на {host}:47888 уже работает — подключаю без установки.")
+            self.finished_ok.emit(f"{host}:47888")
+            return
         try:
             import paramiko
             import shlex
@@ -1619,6 +1662,8 @@ def main():
 
     cfg = load_cfg()
     cfg.setdefault("id", uuid.uuid4().hex)
+    if not (cfg.get("server") or "").strip() and defaults().get("server"):
+        cfg["server"] = defaults()["server"]          # адрес сервера встроен в установщик
     if "--screenshot" in args and not cfg.get("name"):
         cfg.update(name="Проверка", org="test")
     if not cfg.get("name") or not cfg.get("org"):
