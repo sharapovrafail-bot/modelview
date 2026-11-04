@@ -168,6 +168,62 @@ jobs:
           name: rafchat-ios
           path: out/*.ipa
 
+  mac:
+    # RafChat для Mac (Apple M и Intel): та же программа, что для ПК
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости
+        run: python -m pip install --upgrade pip pyinstaller pillow -r rafchat/pc/requirements.txt
+      - name: Сборка RafChat.app
+        working-directory: rafchat/pc
+        run: |
+          python -c "from PIL import Image; Image.open('../assets/icon/icon-3d.png').save('rafchat.icns')"
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.icns \
+            --osx-bundle-identifier ru.sharapov.rafchat --collect-all ifaddr --collect-submodules cryptography \
+            --collect-submodules paramiko --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" \
+            --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." \
+            --add-data "../assets/corp_pattern.png:." --add-data "../assets/corp_logo.png:." rafchat_pc.py
+          VER=$(python -c "import re;print(re.search(r'APP_VER = \"([^\"]+)\"', open('rafchat_pc.py').read()).group(1))")
+          echo "VER=$VER" >> $GITHUB_ENV
+          PL=dist/RafChat.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" $PL || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VER" $PL
+          /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string 'RafChat находит коллег и передаёт сообщения и файлы в локальной сети.'" $PL || true
+          /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string '© 2026 Рафаил Шарапов · rafail@sharapov-cnc.ru'" $PL || true
+          codesign --force --deep --sign - dist/RafChat.app
+          codesign --verify --deep --strict dist/RafChat.app && echo "подпись OK"
+      - name: Проверка запуском и снимок окна
+        working-directory: rafchat/pc
+        run: |
+          export RAFCHAT_HOME=$PWD/testhome
+          ./dist/RafChat.app/Contents/MacOS/RafChat --screenshot $PWD/screenshot-mac-${{ matrix.arch }}.png &
+          P=$!
+          for i in $(seq 1 90); do kill -0 $P 2>/dev/null || break; sleep 1; done
+          kill $P 2>/dev/null || true
+          test -f screenshot-mac-${{ matrix.arch }}.png && echo "окно открылось"
+      - name: DMG
+        working-directory: rafchat/pc
+        run: |
+          mkdir dmg && cp -R dist/RafChat.app dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "RafChat $VER" -srcfolder dmg -ov -format UDZO "RafChat-$VER-mac-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-mac-${{ matrix.arch }}
+          path: |
+            rafchat/pc/RafChat-*.dmg
+            rafchat/pc/screenshot-mac-*.png
+
   release:
     # iPhone не задерживает выкладку: Mac на GitHub бывает занят — .ipa добавится позже (job ios-release)
     needs: [android, windows]
@@ -204,3 +260,20 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           for i in 1 2 3; do gh release upload rafchat-latest out/*.ipa --clobber && break || sleep 15; done
+
+  mac-release:
+    needs: [mac, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rafchat-mac-*
+          merge-multiple: true
+          path: out
+      - name: Добавить .dmg в релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la out
+          for i in 1 2 3; do gh release upload rafchat-latest out/*.dmg --clobber && break || sleep 15; done

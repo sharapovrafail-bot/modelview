@@ -36,16 +36,19 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.5.4"
+APP_VER = "0.5.5"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
 IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+EMOJI_FONT = "Segoe UI Emoji" if IS_WIN else ("Apple Color Emoji" if IS_MAC else "Noto Color Emoji")
 
 UDP_PORT = int(os.environ.get("RAFCHAT_UDP") or 47800)
 TCP_PORT = int(os.environ.get("RAFCHAT_PORT") or 47801)
 DATA_DIR = Path(os.environ.get("RAFCHAT_HOME") or
-                Path(os.environ.get("APPDATA") or Path.home() / ".config") / "RafChat")
+                (Path.home() / "Library" / "Application Support" / "RafChat" if sys.platform == "darwin" else
+                 Path(os.environ.get("APPDATA") or Path.home() / ".config") / "RafChat"))
 AUTO_DOWNLOAD = 50 * 1024 * 1024        # файлы до 50 МБ скачиваются сами
 RELAY_FILE_MAX = 50 * 1024 * 1024       # через сервер — файлы до 50 МБ
 RELAY_ONLINE_SEC = 75                   # «в сети через интернет», если опрашивал сервер не позже 75 с назад
@@ -1182,7 +1185,7 @@ class EmojiPanel(QFrame):
         g = QGridLayout(w)
         g.setSpacing(2)
         g.setContentsMargins(0, 0, 0, 0)
-        f = QFont("Segoe UI Emoji" if IS_WIN else "Noto Color Emoji")
+        f = QFont(EMOJI_FONT)
         f.setPixelSize(24)
         for i, e in enumerate(split_emoji(EMOJI[k])):
             b = button(e, "icon", fn=lambda _=False, e=e: self.picked.emit(e))
@@ -1453,7 +1456,7 @@ class Bubble(QFrame):
         elif m["text"] and jumbo:
             t = QLabel(m["text"].strip())
             t.setObjectName("jumbo")
-            f = QFont("Segoe UI Emoji" if IS_WIN else "Noto Color Emoji")
+            f = QFont(EMOJI_FONT)
             f.setPixelSize(46)
             t.setFont(f)
             lay.addWidget(t)
@@ -2749,7 +2752,7 @@ def main():
         return
     app.setApplicationName("RafChat")
     app.setQuitOnLastWindowClosed(False)
-    f = QFont("Segoe UI Variable Text" if IS_WIN else "Inter")
+    f = QFont("Segoe UI Variable Text") if IS_WIN else (QApplication.font() if IS_MAC else QFont("Inter"))
     f.setPixelSize(15)
     app.setFont(f)
     app.setStyleSheet(chat_qss())
