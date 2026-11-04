@@ -123,8 +123,12 @@
             android:id="@+id/btnPhoto"
             style="@style/BigButton"
             android:text="Фото на ПК"
-            app:backgroundTint="@color/orange"
-            app:icon="@drawable/ic_camera" />
+            android:textColor="@color/text"
+            app:backgroundTint="@color/surface2"
+            app:icon="@drawable/ic_camera"
+            app:iconTint="@color/accent"
+            app:strokeColor="#36434E"
+            app:strokeWidth="1dp" />
 
         <!-- Настройка -->
         <TextView

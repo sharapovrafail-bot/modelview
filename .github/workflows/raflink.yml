@@ -1,0 +1,100 @@
+# Сборка RafLink: приложение для Android (APK) и программа для Windows (EXE).
+# Результат — в релизе «raflink-latest» (вкладка Releases) и в артефактах запуска.
+name: RafLink build
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths: ['raflink/**', '.github/workflows/raflink.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Сборка APK
+        working-directory: raflink/android
+        run: gradle --no-daemon assembleRelease
+
+      - name: Имя файла
+        run: |
+          VER=$(grep -oP 'versionName = "\K[^"]+' raflink/android/app/build.gradle.kts)
+          cp raflink/android/app/build/outputs/apk/release/app-release.apk RafLink-$VER.apk
+          ls -la RafLink-*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raflink-android
+          path: RafLink-*.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Зависимости
+        run: python -m pip install --upgrade pip pyinstaller pillow -r raflink/pc/requirements.txt
+
+      - name: Значок
+        working-directory: raflink/pc
+        run: |
+          python raflink_pc.py --make-icon icon.png
+          python -c "from PIL import Image; Image.open('icon.png').save('raflink.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: Сборка RafLink.exe
+        working-directory: raflink/pc
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RafLink --icon raflink.ico --collect-all zeroconf raflink_pc.py
+
+      - name: Проверка запуском и снимок окна
+        working-directory: raflink/pc
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\dist\RafLink.exe -ArgumentList '--screenshot', "$PWD\screenshot-win.png" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "программа не закрылась" }
+          if (-not (Test-Path screenshot-win.png)) { throw "окно не открылось" }
+          Copy-Item dist\RafLink.exe ..\..\RafLink.exe
+          Copy-Item screenshot-win.png ..\..\screenshot-win.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raflink-windows
+          path: |
+            RafLink.exe
+            screenshot-win.png
+
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Релиз raflink-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete raflink-latest --yes --cleanup-tag || true
+          gh release create raflink-latest out/raflink-android/RafLink-*.apk out/raflink-windows/RafLink.exe \
+            --target "${{ github.sha }}" \
+            --title "RafLink — телефон ↔ ПК (последняя сборка)" \
+            --notes "RafLink-*.apk — поставить на телефон Android. RafLink.exe — запустить на ПК с Windows 10/11. Инструкция — raflink/README.md." \
+            --prerelease

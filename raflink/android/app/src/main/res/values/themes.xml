@@ -2,7 +2,7 @@
 <resources>
     <style name="Theme.RafLink" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">@color/accent</item>
-        <item name="colorOnPrimary">#04161A</item>
+        <item name="colorOnPrimary">#0C2A31</item>
         <item name="colorSecondary">@color/orange</item>
         <item name="android:colorBackground">@color/bg</item>
         <item name="colorSurface">@color/surface</item>

@@ -5,3 +5,10 @@ desktop.ini
 ModelView.exe
 ModelView-Setup-*.exe
 RafCADView-Setup-*.exe
+raflink/android/.gradle/
+raflink/android/build/
+raflink/android/app/build/
+raflink/android/local.properties
+raflink/pc/build/
+raflink/pc/dist/
+raflink/pc/*.spec
