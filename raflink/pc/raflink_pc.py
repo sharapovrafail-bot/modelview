@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QProgressBar, QPushButton, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.2.1"
+APP_VER = "0.2.2"
 PHONE_PORT = 47700
 IS_WIN = sys.platform == "win32"
 
@@ -645,10 +645,36 @@ def cache_path(e: dict) -> Path:
     return CACHE_DIR / h / clean_name(e["name"])
 
 
-def start_discovery():
-    """Поиск телефонов RafLink в сети (mDNS _raflink._tcp)."""
+VIRTUAL_ADAPTERS = ("vpn", "tap", "tun", "wireguard", "wintun", "virtual", "vethernet", "hyper-v", "vmware",
+                    "virtualbox", "loopback", "angel", "outline", "openvpn", "zerotier", "tailscale", "radmin",
+                    "hamachi", "docker", "wsl")
+
+
+def lan_ips():
+    """IPv4-адреса обычных сетевых адаптеров (Ethernet/Wi-Fi), без VPN и виртуальных."""
     try:
-        from zeroconf import ServiceBrowser, Zeroconf
+        import ipaddress
+        import ifaddr
+    except Exception:
+        return None
+    out = []
+    for ad in ifaddr.get_adapters():
+        nm = f"{ad.nice_name or ''} {ad.name or ''}".lower()
+        if any(b in nm for b in VIRTUAL_ADAPTERS):
+            continue
+        for ip in ad.ips:
+            if isinstance(ip.ip, str):
+                a = ipaddress.ip_address(ip.ip)
+                if a.is_private and not a.is_loopback and not a.is_link_local:
+                    out.append(ip.ip)
+    return out or None
+
+
+def start_discovery():
+    """Поиск телефонов RafLink в сети (mDNS _raflink._tcp).
+    Только IPv4 и только обычные адаптеры: VPN-клиенты не любят широковещание через свой туннель."""
+    try:
+        from zeroconf import InterfaceChoice, IPVersion, ServiceBrowser, Zeroconf
     except Exception:
         return None
 
@@ -670,7 +696,7 @@ def start_discovery():
             pass
 
     try:
-        zc = Zeroconf()
+        zc = Zeroconf(interfaces=lan_ips() or InterfaceChoice.Default, ip_version=IPVersion.V4Only)
         ServiceBrowser(zc, "_raflink._tcp.local.", L())
         return zc
     except Exception:
@@ -1162,6 +1188,7 @@ class MainWindow(QMainWindow):
         self.back_stack: list = []
         self._loaded_once = False
         self._outbox_busy = False
+        self._zc = None
         self.found: dict = {}
         self._polling = False
         self._fails = 0
@@ -1445,8 +1472,23 @@ class MainWindow(QMainWindow):
 
     # ---------- навигация по страницам
 
+    def discovery(self, on: bool, wait=False):
+        """Поиск телефона в сети работает только пока он нужен: при подключении и при потере связи."""
+        if on and self._zc is None:
+            self._zc = start_discovery()
+        elif not on and self._zc is not None:
+            zc, self._zc = self._zc, None
+            if wait:
+                try:
+                    zc.close()
+                except Exception:
+                    pass
+            else:
+                threading.Thread(target=lambda: zc.close(), daemon=True).start()
+
     def show_page(self, name):
         idx = {"files": 0, "photos": 1, "hist": 2, "offline": 3, "pair": 4}[name]
+        self.discovery(name in ("offline", "pair"))
         self.pages.setCurrentIndex(idx)
         self.tabbar.setVisible(idx < 3)
         for i, b in enumerate(self.tab_btns):
@@ -2181,7 +2223,6 @@ def main():
     BRIDGE = Bridge()
     config = Config()
     apply_theme(config["theme"] or "dark")
-    zc = start_discovery()
     win = MainWindow(config)
 
     def on_peer():
@@ -2213,11 +2254,7 @@ def main():
     elif "--tray" not in args:
         win.show()
     rc = app.exec()
-    if zc:
-        try:
-            zc.close()
-        except Exception:
-            pass
+    win.discovery(False, wait=True)
     sys.exit(rc)
 
 
