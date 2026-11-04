@@ -246,5 +246,15 @@
             android:padding="8dp"
             android:textColor="@color/text2"
             android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/mail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:padding="8dp"
+            android:textColor="@color/accent"
+            android:textSize="15sp" />
     </LinearLayout>
 </ScrollView>

@@ -82,6 +82,10 @@ class MainActivity : AppCompatActivity() {
             text = "RafLink $appVersion\nАвтор: $AUTHOR · © 2026"
             setOnClickListener { showAbout() }
         }
+        findViewById<TextView>(R.id.mail).apply {
+            text = "Связь с автором: $EMAIL"
+            setOnClickListener { mailAuthor() }
+        }
 
         if (!Perms.hasNotifications(this) && Build.VERSION.SDK_INT >= 33) {
             askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -142,10 +146,16 @@ class MainActivity : AppCompatActivity() {
                     "Автор: $AUTHOR\n$EMAIL\n\n© 2026 $AUTHOR. Все права защищены."
             )
             .setPositiveButton("Закрыть", null)
-            .setNeutralButton("Написать автору") { _, _ ->
-                try { startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$EMAIL"))) } catch (_: Exception) {}
-            }
+            .setNeutralButton("Написать автору") { _, _ -> mailAuthor() }
             .show()
+    }
+
+    private fun mailAuthor() {
+        val i = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$EMAIL"))
+            .putExtra(Intent.EXTRA_SUBJECT, "RafLink $appVersion")
+        try { startActivity(i) } catch (_: Exception) {
+            Toast.makeText(this, EMAIL, Toast.LENGTH_LONG).show()
+        }
     }
 
     companion object {

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QProgressBar, QPushButton, QScrollArea, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.3.1"
+APP_VER = "0.3.2"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -1654,6 +1654,7 @@ class MainWindow(QMainWindow):
         gm.addAction("Папка «Входящие»", lambda: open_local(self.config.inbox()))
         gm.addSeparator()
         gm.addAction(f"О программе RafLink {APP_VER}", self.about)
+        gm.addAction(f"Написать автору: {APP_EMAIL}", mail_author)
         gb.clicked.connect(lambda: gm.exec(gb.mapToGlobal(QPoint(gb.width() - gm.sizeHint().width(), gb.height()))))
         h.addWidget(gb)
         self._set_state(False)
@@ -1935,7 +1936,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.pair_btn)
         self.pair_cancel = button("Отмена", "link", fn=lambda: self.show_page("files" if self.online else "offline"))
         lay.addWidget(self.pair_cancel)
-        sign = button(f"RafLink {APP_VER} · {APP_COPYRIGHT}", "link", fn=self.about)
+        sign = button(f"RafLink {APP_VER} · {APP_COPYRIGHT} · {APP_EMAIL}", "link", fn=self.about)
         sign.setStyleSheet(f"color:{P['muted']}; font-weight:400; font-size:13px")
         lay.addWidget(sign)
         return w
@@ -2504,6 +2505,7 @@ class MainWindow(QMainWindow):
         m = QMenu()
         m.addAction("Открыть RafLink", self.show_normal)
         m.addAction(f"О программе (версия {APP_VER})", lambda: (self.show_normal(), self.about()))
+        m.addAction(f"Написать автору: {APP_EMAIL}", mail_author)
         m.addAction("Мини-режим", self.to_mini)
         m.addAction("Папка «Входящие»", lambda: open_local(self.config.inbox()))
         m.addSeparator()
@@ -2584,6 +2586,10 @@ def get_autostart() -> bool:
         return False
 
 
+def mail_author():
+    QDesktopServices.openUrl(QUrl(f"mailto:{APP_EMAIL}?subject=RafLink {APP_VER}"))
+
+
 class AboutDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -2617,6 +2623,7 @@ class AboutDialog(QDialog):
         mail.setTextInteractionFlags(Qt.TextBrowserInteraction)
         cl.addWidget(mail)
         cl.addWidget(label(f"{APP_COPYRIGHT}. Все права защищены.", "small", wrap=True))
+        cl.addWidget(label("Вопросы и предложения — пишите на почту.", "small", wrap=True))
         lay.addSpacing(10)
         lay.addWidget(button("Закрыть", "primary", fn=self.accept))
 
@@ -2673,6 +2680,7 @@ class SettingsDialog(QDialog):
 
         ab = button(f"О программе · RafLink {APP_VER} · {APP_AUTHOR}", "link", fn=lambda: (self.reject(), win.about()))
         lay.addWidget(ab)
+        lay.addWidget(button(f"Связь с автором: {APP_EMAIL}", "link", fn=mail_author))
         row = QHBoxLayout()
         row.addStretch(1)
         row.addWidget(button("Отмена", fn=self.reject))
