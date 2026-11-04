@@ -61,7 +61,9 @@ jobs:
 
       - name: Сборка RafLink (папка с программой)
         working-directory: raflink/pc
-        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafLink --icon raflink.ico --collect-all zeroconf raflink_pc.py
+        run: |
+          python make_version.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafLink --icon raflink.ico --version-file version_info.txt --collect-all zeroconf raflink_pc.py
 
       - name: Проверка запуском и снимок окна
         working-directory: raflink/pc

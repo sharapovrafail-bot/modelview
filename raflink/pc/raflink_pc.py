@@ -32,7 +32,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QProgressBar, QPushButton, QScrollArea, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.3.0"
+APP_VER = "0.3.1"
+APP_AUTHOR = "Рафаил Шарапов"
+APP_EMAIL = "rafail@sharapov-cnc.ru"
+APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
 PHONE_PORT = 47700
 IS_WIN = sys.platform == "win32"
 
@@ -123,10 +126,14 @@ def app_icon_pixmap(size=256) -> QPixmap:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor("#69d5e3"))
+    from PySide6.QtGui import QLinearGradient
+    g = QLinearGradient(0, 0, 0, size)
+    g.setColorAt(0, QColor("#3D9BFF"))
+    g.setColorAt(1, QColor("#0062E0"))
+    p.setBrush(g)
     p.setPen(Qt.NoPen)
-    p.drawRoundedRect(QRectF(0, 0, size, size), size * 0.3, size * 0.3)
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#092731" '
+    p.drawRoundedRect(QRectF(0, 0, size, size), size * 0.23, size * 0.23)
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" '
            f'stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="{PATHS["link"]}"/></svg>')
     QSvgRenderer(QByteArray(svg.encode())).render(p, QRectF(size * .16, size * .16, size * .68, size * .68))
     p.end()
@@ -1601,7 +1608,7 @@ class MainWindow(QMainWindow):
         self._fails = 0
         self.transfers = Transfers(self)
 
-        self.setWindowTitle("RafLink")
+        self.setWindowTitle(f"RafLink {APP_VER}")
         self.setWindowIcon(QIcon(app_icon_pixmap()))
         self.resize(520, 880)
         self.setMinimumSize(440, 600)
@@ -1641,7 +1648,14 @@ class MainWindow(QMainWindow):
         h.addSpacing(4)
         h.addWidget(button("", "icon", icon="mini", tip="Мини-режим: капсула для файлов", fn=self.to_mini,
                            color=P["muted"]))
-        h.addWidget(button("", "icon", icon="gear", tip="Настройки", fn=self.settings, color=P["muted"]))
+        gb = button("", "icon", icon="gear", tip="Настройки и «О программе»", color=P["muted"])
+        gm = QMenu(gb)
+        gm.addAction("Настройки…", self.settings)
+        gm.addAction("Папка «Входящие»", lambda: open_local(self.config.inbox()))
+        gm.addSeparator()
+        gm.addAction(f"О программе RafLink {APP_VER}", self.about)
+        gb.clicked.connect(lambda: gm.exec(gb.mapToGlobal(QPoint(gb.width() - gm.sizeHint().width(), gb.height()))))
+        h.addWidget(gb)
         self._set_state(False)
 
         # переключатель «Файлы | Галерея | История»
@@ -1921,6 +1935,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.pair_btn)
         self.pair_cancel = button("Отмена", "link", fn=lambda: self.show_page("files" if self.online else "offline"))
         lay.addWidget(self.pair_cancel)
+        sign = button(f"RafLink {APP_VER} · {APP_COPYRIGHT}", "link", fn=self.about)
+        sign.setStyleSheet(f"color:{P['muted']}; font-weight:400; font-size:13px")
+        lay.addWidget(sign)
         return w
 
     def _set_state(self, online: bool):
@@ -2486,6 +2503,7 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(QIcon(app_icon_pixmap()), self)
         m = QMenu()
         m.addAction("Открыть RafLink", self.show_normal)
+        m.addAction(f"О программе (версия {APP_VER})", lambda: (self.show_normal(), self.about()))
         m.addAction("Мини-режим", self.to_mini)
         m.addAction("Папка «Входящие»", lambda: open_local(self.config.inbox()))
         m.addSeparator()
@@ -2527,6 +2545,9 @@ class MainWindow(QMainWindow):
         self.capsule.hide()
         QApplication.quit()
 
+    def about(self):
+        AboutDialog(self).exec()
+
     def settings(self):
         d = SettingsDialog(self)
         d.exec()
@@ -2561,6 +2582,43 @@ def get_autostart() -> bool:
         return True
     except OSError:
         return False
+
+
+class AboutDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("О программе RafLink")
+        self.setFixedWidth(400)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(6)
+        ic = QLabel()
+        pm = app_icon_pixmap(160)
+        pm.setDevicePixelRatio(2)
+        ic.setPixmap(pm)
+        ic.setAlignment(Qt.AlignCenter)
+        lay.addWidget(ic)
+        t = label("RafLink", "h1")
+        t.setAlignment(Qt.AlignCenter)
+        lay.addWidget(t)
+        v = label(f"Версия {APP_VER}", "muted")
+        v.setAlignment(Qt.AlignCenter)
+        v.setStyleSheet("font-size:16px")
+        lay.addWidget(v)
+        d = label("Телефон Android ↔ ПК по Wi-Fi: файлы, галерея и перетаскивание мышкой.", "muted", wrap=True)
+        d.setAlignment(Qt.AlignCenter)
+        lay.addSpacing(6)
+        lay.addWidget(d)
+        lay.addSpacing(10)
+        c, cl = card(lay, (18, 14, 18, 14), 6)
+        cl.addWidget(QLabel(f'Автор: <b>{APP_AUTHOR}</b>'))
+        mail = QLabel(f'<a href="mailto:{APP_EMAIL}" style="color:{P["accent"]}; text-decoration:none">{APP_EMAIL}</a>')
+        mail.setOpenExternalLinks(True)
+        mail.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        cl.addWidget(mail)
+        cl.addWidget(label(f"{APP_COPYRIGHT}. Все права защищены.", "small", wrap=True))
+        lay.addSpacing(10)
+        lay.addWidget(button("Закрыть", "primary", fn=self.accept))
 
 
 class SettingsDialog(QDialog):
@@ -2613,7 +2671,8 @@ class SettingsDialog(QDialog):
         nl.addLayout(r2)
         lay.addWidget(note)
 
-        lay.addWidget(label(f"RafLink {APP_VER} · Рафаил Шарапов", "small"))
+        ab = button(f"О программе · RafLink {APP_VER} · {APP_AUTHOR}", "link", fn=lambda: (self.reject(), win.about()))
+        lay.addWidget(ab)
         row = QHBoxLayout()
         row.addStretch(1)
         row.addWidget(button("Отмена", fn=self.reject))

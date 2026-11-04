@@ -442,4 +442,4 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     }
 }
 
-object BuildConfigVersion { const val NAME = "0.3.0" }
+object BuildConfigVersion { const val NAME = "0.3.1" }

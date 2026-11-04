@@ -78,6 +78,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         findViewById<View>(R.id.rowPin).setOnClickListener { Prefs.newPin(this); refresh() }
+        findViewById<TextView>(R.id.about).apply {
+            text = "RafLink $appVersion\nАвтор: $AUTHOR · © 2026"
+            setOnClickListener { showAbout() }
+        }
 
         if (!Perms.hasNotifications(this) && Build.VERSION.SDK_INT >= 33) {
             askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -125,6 +129,28 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, Sender.message(r), Toast.LENGTH_LONG).show()
             refresh()
         }
+    }
+
+    private val appVersion: String
+        get() = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
+
+    private fun showAbout() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("RafLink $appVersion")
+            .setMessage(
+                "Телефон Android ↔ ПК по Wi-Fi: файлы, галерея, перетаскивание мышкой.\n\n" +
+                    "Автор: $AUTHOR\n$EMAIL\n\n© 2026 $AUTHOR. Все права защищены."
+            )
+            .setPositiveButton("Закрыть", null)
+            .setNeutralButton("Написать автору") { _, _ ->
+                try { startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$EMAIL"))) } catch (_: Exception) {}
+            }
+            .show()
+    }
+
+    companion object {
+        const val AUTHOR = "Рафаил Шарапов"
+        const val EMAIL = "rafail@sharapov-cnc.ru"
     }
 
     private fun color(id: Int) = ContextCompat.getColor(this, id)

@@ -1,16 +1,9 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
-    android:viewportWidth="108" android:viewportHeight="108">
-    <!-- телефон -->
-    <path android:fillColor="#00000000" android:strokeColor="#E8EDF2" android:strokeWidth="4"
-        android:pathData="M33,30h18a4,4 0,0 1,4 4v40a4,4 0,0 1,-4 4h-18a4,4 0,0 1,-4 -4v-40a4,4 0,0 1,4 -4z" />
-    <!-- монитор -->
-    <path android:fillColor="#00000000" android:strokeColor="#E8EDF2" android:strokeWidth="4"
-        android:pathData="M61,38h16a4,4 0,0 1,4 4v22a4,4 0,0 1,-4 4h-16a4,4 0,0 1,-4 -4v-22a4,4 0,0 1,4 -4z" />
-    <path android:fillColor="#00000000" android:strokeColor="#E8EDF2" android:strokeWidth="4"
-        android:pathData="M64,76h10M69,68v8" />
-    <!-- стрелка передачи -->
-    <path android:fillColor="#00000000" android:strokeColor="#F28C28" android:strokeWidth="4.5"
-        android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M38,54h22M54,48l6,6l-6,6" />
+    android:viewportWidth="24" android:viewportHeight="24">
+    <group android:scaleX="0.5" android:scaleY="0.5" android:translateX="6" android:translateY="6">
+        <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="2.1"
+            android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="M9,15l6,-6M7,13l-1,1a3.5,3.5 0,0 0,5 5l3,-3M17,11l1,-1a3.5,3.5 0,0 0,-5 -5l-3,3" />
+    </group>
 </vector>

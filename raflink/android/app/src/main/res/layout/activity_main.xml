@@ -234,5 +234,17 @@
                 <TextView style="@style/RowState" android:text="Новый код" />
             </LinearLayout>
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/about"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:lineSpacingExtra="3dp"
+            android:padding="8dp"
+            android:textColor="@color/text2"
+            android:textSize="14sp" />
     </LinearLayout>
 </ScrollView>

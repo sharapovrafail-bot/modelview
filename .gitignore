@@ -12,3 +12,4 @@ raflink/android/local.properties
 raflink/pc/build/
 raflink/pc/dist/
 raflink/pc/*.spec
+raflink/pc/version_info.txt
