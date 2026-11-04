@@ -54,12 +54,32 @@ object Prefs {
     fun lastSeen(ctx: Context): Long = sp(ctx).getLong("lastSeen", 0)
     fun touch(ctx: Context) = sp(ctx).edit().putLong("lastSeen", System.currentTimeMillis()).apply()
 
-    fun events(ctx: Context): List<String> =
-        sp(ctx).getString("events", "")!!.split('\n').filter { it.isNotBlank() }
+    /** Запись журнала: время, вид ("out" — на ПК, "in" — с ПК, "info"), имя/текст. */
+    data class Event(val time: Long, val kind: String, val text: String)
 
-    fun addEvent(ctx: Context, text: String) {
-        val t = SimpleDateFormat("dd.MM HH:mm", Locale.getDefault()).format(Date())
-        val list = (listOf("$t  $text") + events(ctx)).take(15)
-        sp(ctx).edit().putString("events", list.joinToString("\n")).apply()
+    fun events(ctx: Context): List<Event> =
+        sp(ctx).getString("events2", "")!!.split('\n').filter { it.isNotBlank() }.mapNotNull {
+            val a = it.split('|', limit = 3)
+            if (a.size == 3) Event(a[0].toLongOrNull() ?: 0, a[1], a[2]) else null
+        }
+
+    fun addEvent(ctx: Context, kind: String, text: String) {
+        val line = "${System.currentTimeMillis()}|$kind|${text.replace('\n', ' ')}"
+        val old = sp(ctx).getString("events2", "")!!.split('\n').filter { it.isNotBlank() }
+        sp(ctx).edit().putString("events2", (listOf(line) + old).take(20).joinToString("\n")).apply()
+    }
+
+    fun timeText(t: Long): String {
+        val now = java.util.Calendar.getInstance()
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = t }
+        val hm = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(t))
+        val sameDay = now.get(java.util.Calendar.DAY_OF_YEAR) == c.get(java.util.Calendar.DAY_OF_YEAR) &&
+            now.get(java.util.Calendar.YEAR) == c.get(java.util.Calendar.YEAR)
+        if (sameDay) return "Сегодня, $hm"
+        now.add(java.util.Calendar.DAY_OF_YEAR, -1)
+        val yday = now.get(java.util.Calendar.DAY_OF_YEAR) == c.get(java.util.Calendar.DAY_OF_YEAR) &&
+            now.get(java.util.Calendar.YEAR) == c.get(java.util.Calendar.YEAR)
+        if (yday) return "Вчера, $hm"
+        return SimpleDateFormat("dd.MM, HH:mm", Locale.getDefault()).format(Date(t))
     }
 }

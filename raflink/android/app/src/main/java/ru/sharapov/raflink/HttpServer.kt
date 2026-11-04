@@ -201,7 +201,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             val pcName = o.optString("pc_name", "ПК").take(64)
             Prefs.savePairing(ctx, token, pcName, r.remote, o.optInt("pc_port", 47701))
             Prefs.newPin(ctx)
-            Prefs.addEvent(ctx, "Подключён ПК «$pcName»")
+            Prefs.addEvent(ctx, "info", "Подключён ПК «$pcName»")
             onEvent()
             json(out, 200, JSONObject().put("token", token).put("name", deviceName(ctx)).put("model", Build.MODEL))
         }
@@ -257,7 +257,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         head(out, 200, "application/octet-stream", f.length())
         FileInputStream(f).use { it.copyTo(out, 65536) }
         if (r.query["log"] == "1") {
-            Prefs.addEvent(ctx, "→ ПК: ${f.name}")
+            Prefs.addEvent(ctx, "out", f.name)
             onEvent()
         }
     }
@@ -315,7 +315,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         if (left > 0) { tmp.delete(); return err(out, 400, "incomplete") }
         tmp.renameTo(dst)
         MediaScannerConnection.scanFile(ctx, arrayOf(dst.path), null, null)
-        Prefs.addEvent(ctx, "← с ПК: ${dst.name}")
+        Prefs.addEvent(ctx, "in", dst.name)
         Notify.received(ctx, dst.name)
         onEvent()
         json(out, 200, JSONObject().put("path", dst.path).put("name", dst.name))
@@ -393,7 +393,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     private fun outboxDone(r: Req, out: OutputStream) {
         val it = Outbox.find(ctx, r.query["id"] ?: "") ?: return json(out, 200, JSONObject().put("ok", true))
         it.file.delete()
-        Prefs.addEvent(ctx, "→ ПК: ${it.name}")
+        Prefs.addEvent(ctx, "out", it.name)
         Notify.delivered(ctx, it.name)
         onEvent()
         json(out, 200, JSONObject().put("ok", true))
@@ -442,4 +442,4 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     }
 }
 
-object BuildConfigVersion { const val NAME = "0.2.1" }
+object BuildConfigVersion { const val NAME = "0.3.0" }

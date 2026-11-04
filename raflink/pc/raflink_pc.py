@@ -29,10 +29,10 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QProgressBar, QPushButton, QStackedWidget, QStyle,
+                               QProgressBar, QPushButton, QScrollArea, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.2.2"
+APP_VER = "0.3.0"
 PHONE_PORT = 47700
 IS_WIN = sys.platform == "win32"
 
@@ -44,14 +44,21 @@ PHONE_ROOT = "/storage/emulated/0"
 # ---------------------------------------------------------------- оформление (из прототипа)
 
 PALETTES = {
-    "dark": dict(bg="#0c1218", surface="#17212b", sub="#202e39", text="#eff5f8", muted="#b1c0cb",
-                 accent="#65d4e5", ok="#78deb1", warn="#ffc07c", err="#ff9699", line="#36434e",
-                 wash="#193840", on_accent="#0c2a31"),
-    "light": dict(bg="#edf2f4", surface="#ffffff", sub="#edf2f5", text="#152634", muted="#4e626e",
-                  accent="#006679", ok="#176942", warn="#903e00", err="#a12432", line="#c7d2d9",
-                  wash="#d9eff1", on_accent="#ffffff"),
+    # светлая — как iOS (основная)
+    "light": dict(bg="#F2F2F7", surface="#FFFFFF", sub="#EEEEF3", tile="#F7F7FA", hover="#F2F2F7",
+                  text="#1C1C1E", muted="#8A8A8E", accent="#007AFF", ok="#34C759", warn="#FF9500",
+                  err="#FF3B30", line="#E5E5EA", wash="#E7F0FF", on_accent="#FFFFFF", veil="rgba(234,242,255,0.96)"),
+    "dark": dict(bg="#000000", surface="#1C1C1E", sub="#2C2C2E", tile="#2C2C2E", hover="#2C2C2E",
+                 text="#F2F2F7", muted="#8E8E93", accent="#0A84FF", ok="#30D158", warn="#FF9F0A",
+                 err="#FF453A", line="#38383A", wash="#0B2A4A", on_accent="#FFFFFF", veil="rgba(8,30,56,0.96)"),
 }
-P = dict(PALETTES["dark"])
+# цвета значков по типу файла (как в макете)
+TYPE_STYLE = {
+    "cad": ("#AF52DE", "cube"), "mesh": ("#FF9500", "layers"), "draw": ("#30B0C7", "ruler"),
+    "code": ("#34C759", "mill"), "image": ("#32ADE6", "image"), "video": ("#FF2D55", "play"),
+    "pdf": ("#FF3B30", "doc"), "archive": ("#8E8E93", "archive"), "file": ("#8E8E93", "file"),
+}
+P = dict(PALETTES["light"])
 
 PATHS = {
     "link": "M9 15l6-6 M7 13l-1 1a3.5 3.5 0 005 5l3-3 M17 11l1-1a3.5 3.5 0 00-5-5l-3 3",
@@ -76,7 +83,18 @@ PATHS = {
     "mini": "M4 14h6v6 M20 10h-6V4 M14 10l7-7 M3 21l7-7",
     "doc": "M6 2h12v20H6z M9 7h6 M9 11h6 M9 15h4",
     "shot": "M3 7V3h4 M17 3h4v4 M21 17v4h-4 M7 21H3v-4",
-    "back": "M19 12H5 M12 19l-7-7 7-7",
+    "back": "M15 4l-8 8 8 8",
+    "chev": "M9 5l7 7-7 7",
+    "layers": "M12 3l9 5-9 5-9-5z M3 12.5l9 5 9-5 M3 16.5l9 5 9-5",
+    "mill": "M9 2h6v5H9z M10 7h4v7l-2 4-2-4z M10 9.5l4 2 M10 12l4 2 M5 21h14",
+    "image": "M3 4h18v16H3z M3 16l5-5 5 5 3-3 5 5 M16.5 8.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0",
+    "play": "M8 5v14l11-7z",
+    "archive": "M4 4h16v4H4z M5 8h14v12H5z M10 12h4",
+    "ruler": "M3 17L17 3l4 4L7 21z M7 13l2 2 M10 10l2 2 M13 7l2 2",
+    "search": "M10.5 18a7.5 7.5 0 110-15 7.5 7.5 0 010 15z M16 16l5 5",
+    "open": "M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6",
+    "check": "M5 12.5l4.5 4.5L19 7",
+    "sort": "M4 6h16 M7 12h10 M10 18h4",
     "gallery": "M3 3h18v18H3z M3 16l5-5 4 4 3-3 6 6 M15.5 8.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0",
 }
 
@@ -118,68 +136,128 @@ def app_icon_pixmap(size=256) -> QPixmap:
 def qss() -> str:
     return f"""
     QWidget {{ color: {P['text']}; font-size: 15px; }}
-    QMainWindow, QDialog, QWidget#root {{ background: {P['surface']}; }}
+    QMainWindow, QDialog, QWidget#root {{ background: {P['bg']}; }}
+    QWidget#page, QScrollArea, QScrollArea > QWidget > QWidget#chips {{ background: transparent; }}
     QLabel {{ background: transparent; }}
     QLabel#muted, QLabel#small {{ color: {P['muted']}; }}
     QLabel#small {{ font-size: 13px; }}
-    QLabel#label {{ color: {P['muted']}; font-size: 12px; font-weight: 600; }}
-    QLabel#h2 {{ font-size: 21px; font-weight: 650; }}
+    QLabel#label {{ color: {P['muted']}; font-size: 13px; font-weight: 600; }}
+    QLabel#h1 {{ font-size: 30px; font-weight: 700; }}
+    QLabel#h2 {{ font-size: 22px; font-weight: 700; }}
     QLabel#h3 {{ font-size: 17px; font-weight: 650; }}
-    QLabel#ok {{ color: {P['ok']}; font-size: 13px; }}
-    QLabel#warn {{ color: {P['warn']}; font-size: 13px; }}
+    QLabel#devname {{ font-size: 21px; font-weight: 700; }}
     QLabel#err {{ color: {P['err']}; }}
     QLabel#accent {{ color: {P['accent']}; }}
-    QLabel#pin {{ font-family: Consolas, monospace; font-size: 30px; color: {P['accent']}; }}
-    QWidget#device {{ background: {P['surface']}; }}
-    QWidget#tabbar {{ background: {P['surface']}; border-bottom: 1px solid {P['line']}; }}
-    QFrame#iconbox {{ background: {P['wash']}; border-radius: 10px; }}
-    QFrame#note {{ background: {P['sub']}; border: 1px solid {P['line']}; border-radius: 12px; }}
-    QFrame#banner {{ background: {P['wash']}; border: 1px solid {P['accent']}; border-radius: 12px; }}
-    QFrame#toast {{ background: {P['sub']}; border: 1px solid {P['line']}; border-radius: 14px; }}
-    QFrame#veil {{ background: {P['wash']}; border: 3px solid {P['accent']}; border-radius: 16px; }}
-    QFrame#capsule {{ background: {P['wash']}; border: 1px solid {P['accent']}; border-radius: 28px; }}
-    QPushButton {{ background: {P['sub']}; border: 1px solid {P['line']}; border-radius: 10px;
-                   min-height: 36px; padding: 6px 12px; }}
-    QPushButton:hover {{ border-color: {P['accent']}; }}
-    QPushButton:focus {{ border: 2px solid {P['accent']}; }}
+    QLabel#veiltext {{ color: {P['accent']}; font-size: 28px; font-weight: 700; }}
+    QFrame#card {{ background: {P['surface']}; border-radius: 16px; }}
+    QFrame#iconbox {{ background: {P['wash']}; border-radius: 14px; }}
+    QFrame#segtrack {{ background: {P['sub']}; border-radius: 12px; }}
+    QFrame#note {{ background: {P['surface']}; border-radius: 14px; }}
+    QFrame#banner {{ background: {P['wash']}; border: 1px solid {P['accent']}; border-radius: 14px; }}
+    QFrame#toast {{ background: {P['surface']}; border-radius: 16px; }}
+    QFrame#veil {{ background: {P['veil']}; border: 2px solid {P['accent']}; border-radius: 18px; }}
+    QFrame#capsule {{ background: {P['surface']}; border: 1px solid {P['line']}; border-radius: 28px; }}
+    QFrame#sep {{ background: {P['line']}; max-height: 1px; min-height: 1px; border: 0; }}
+    QPushButton {{ background: {P['sub']}; border: 0; border-radius: 12px; min-height: 40px; padding: 6px 14px;
+                   color: {P['accent']}; font-weight: 600; }}
+    QPushButton:hover {{ background: {P['wash']}; }}
+    QPushButton:focus {{ outline: none; }}
     QPushButton:disabled {{ color: {P['muted']}; }}
-    QPushButton#pill {{ background: {P['wash']}; color: {P['accent']}; }}
-    QPushButton#primary {{ background: {P['accent']}; color: {P['on_accent']}; border: 0; font-weight: 600;
-                           min-height: 44px; }}
-    QPushButton#icon {{ background: transparent; border: 0; min-height: 32px; padding: 4px 6px; }}
+    QPushButton#primary {{ background: {P['accent']}; color: {P['on_accent']}; min-height: 46px; font-size: 16px; }}
+    QPushButton#primary:hover {{ background: {P['accent']}; }}
+    QPushButton#primary:disabled {{ background: {P['line']}; color: {P['muted']}; }}
+    QPushButton#tinted {{ background: {P['wash']}; color: {P['accent']}; min-height: 46px; font-size: 16px; }}
+    QPushButton#tinted:disabled {{ background: {P['sub']}; color: {P['muted']}; }}
+    QPushButton#icon {{ background: transparent; border: 0; min-height: 34px; min-width: 34px; padding: 4px; }}
     QPushButton#icon:hover {{ background: {P['sub']}; }}
-    QPushButton#tab {{ background: transparent; border: 0; border-radius: 0; color: {P['muted']};
-                       border-bottom: 3px solid transparent; padding: 9px 4px; min-height: 30px; }}
-    QPushButton#tab:checked {{ color: {P['accent']}; border-bottom: 3px solid {P['accent']}; }}
-    QPushButton#quick {{ font-size: 14px; padding: 4px 2px; min-height: 34px; }}
-    QPushButton#quick:checked {{ background: {P['wash']}; color: {P['accent']}; border-color: {P['accent']}; }}
-    QPushButton#crumb {{ background: transparent; border: 0; padding: 2px 4px; min-height: 24px;
-                         color: {P['muted']}; }}
-    QPushButton#crumb:hover {{ color: {P['accent']}; }}
-    QPushButton#crumblast {{ background: transparent; border: 0; padding: 2px 4px; min-height: 24px;
-                             font-weight: 650; }}
-    QLineEdit, QComboBox {{ background: {P['sub']}; border: 1px solid {P['line']}; border-radius: 9px;
-                            padding: 7px 9px; min-height: 22px; }}
+    QPushButton#link {{ background: transparent; min-height: 30px; padding: 2px 4px; }}
+    QPushButton#seg {{ background: transparent; border: 0; border-radius: 10px; color: {P['text']};
+                       font-weight: 500; font-size: 16px; min-height: 40px; }}
+    QPushButton#seg:hover {{ background: {P['line']}; }}
+    QPushButton#seg:checked {{ background: {P['accent']}; color: {P['on_accent']}; font-weight: 650; }}
+    QPushButton#quick {{ background: {P['tile']}; border: 1px solid {P['line']}; border-radius: 14px;
+                         color: {P['text']}; font-weight: 650; font-size: 15px; min-height: 46px;
+                         text-align: left; padding-left: 12px; }}
+    QPushButton#quick:hover {{ border-color: {P['accent']}; }}
+    QPushButton#quick:checked {{ background: {P['wash']}; border-color: {P['accent']}; }}
+    QPushButton#chip {{ background: transparent; border-radius: 10px; color: {P['text']}; font-weight: 500;
+                        min-height: 38px; padding: 4px 14px; }}
+    QPushButton#chip:checked {{ background: {P['wash']}; color: {P['accent']}; }}
+    QPushButton#crumb {{ background: transparent; border: 0; padding: 2px 3px; min-height: 28px;
+                         color: {P['accent']}; font-weight: 500; font-size: 16px; }}
+    QPushButton#crumblast {{ background: transparent; border: 0; padding: 2px 3px; min-height: 28px;
+                             color: {P['text']}; font-weight: 650; font-size: 16px; }}
+    QLineEdit, QComboBox {{ background: {P['sub']}; border: 0; border-radius: 11px; padding: 8px 10px;
+                            min-height: 22px; }}
     QLineEdit:focus, QComboBox:focus {{ border: 2px solid {P['accent']}; }}
-    QLineEdit#pinedit {{ font-family: Consolas, monospace; font-size: 26px; padding: 8px 12px; }}
+    QLineEdit#search {{ font-size: 16px; padding-left: 4px; }}
+    QLineEdit#digit {{ background: {P['surface']}; border: 1px solid {P['line']}; border-radius: 12px;
+                       font-size: 30px; padding: 0; }}
+    QLineEdit#digit:focus {{ border: 2px solid {P['accent']}; }}
     QComboBox QAbstractItemView {{ background: {P['surface']}; border: 1px solid {P['line']};
                                    selection-background-color: {P['wash']}; }}
     QListWidget {{ background: transparent; border: 0; outline: 0; }}
-    QListWidget#plain::item {{ border-radius: 8px; padding: 8px; }}
-    QListWidget#plain::item:selected {{ background: {P['wash']}; color: {P['text']}; }}
-    QProgressBar {{ background: {P['line']}; border: 0; border-radius: 4px; max-height: 8px; }}
-    QProgressBar::chunk {{ background: {P['accent']}; border-radius: 4px; }}
-    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-    QScrollBar::handle:vertical {{ background: {P['line']}; border-radius: 4px; min-height: 30px; }}
-    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+    QListWidget::item:selected, QListWidget::item:hover {{ background: transparent; }}
+    QProgressBar {{ background: {P['line']}; border: 0; border-radius: 3px; max-height: 6px; }}
+    QProgressBar::chunk {{ background: {P['accent']}; border-radius: 3px; }}
+    QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
+    QScrollBar::handle:vertical {{ background: {P['line']}; border-radius: 3px; min-height: 30px; }}
+    QScrollBar:horizontal {{ height: 0; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
     QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-    QMenu {{ background: {P['surface']}; border: 1px solid {P['line']}; padding: 4px; }}
-    QMenu::item {{ padding: 7px 22px; border-radius: 6px; }}
-    QMenu::item:selected {{ background: {P['wash']}; }}
+    QMenu {{ background: {P['surface']}; border: 1px solid {P['line']}; border-radius: 10px; padding: 5px; }}
+    QMenu::item {{ padding: 8px 24px; border-radius: 7px; }}
+    QMenu::item:selected {{ background: {P['wash']}; color: {P['text']}; }}
+    QMenu::separator {{ height: 1px; background: {P['line']}; margin: 4px 8px; }}
     QCheckBox {{ spacing: 10px; }}
     QToolTip {{ background: {P['surface']}; color: {P['text']}; border: 1px solid {P['line']}; }}
     """
 
+
+def card(parent_layout=None, margins=(14, 12, 14, 12), spacing=8, horizontal=False):
+    """Белая карточка со скруглением (как группа в «Настройках» iOS)."""
+    f = QFrame()
+    f.setObjectName("card")
+    lay = (QHBoxLayout if horizontal else QVBoxLayout)(f)
+    lay.setContentsMargins(*margins)
+    lay.setSpacing(spacing)
+    if parent_layout is not None:
+        parent_layout.addWidget(f)
+    return f, lay
+
+
+def sep_line() -> QFrame:
+    f = QFrame()
+    f.setObjectName("sep")
+    return f
+
+
+class Battery(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.level = -1
+        self.charging = False
+        self.setFixedSize(34, 18)
+
+    def set(self, level, charging):
+        self.level, self.charging = level, charging
+        self.update()
+
+    def paintEvent(self, ev):
+        if self.level < 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor(P["muted"]), 1.4))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(1, 2, 28, 14), 4, 4)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(P["muted"]))
+        p.drawRoundedRect(QRectF(30.5, 7, 2.5, 4), 1, 1)
+        color = P["ok"] if self.level > 20 or self.charging else P["err"]
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(QRectF(3, 4, 24 * max(self.level, 4) / 100, 10), 2.5, 2.5)
+        p.end()
 
 def label(text="", name=None, wrap=False) -> QLabel:
     lb = QLabel(text)
@@ -271,6 +349,91 @@ def kind_of(e: dict) -> str:
     return "file"
 
 
+def type_of(e: dict) -> str:
+    x = ext_of(e["name"])
+    if x in NC_EXT:
+        return "code"
+    if x in {"step", "stp", "igs", "iges", "brep", "f3d", "sldprt", "sldasm"}:
+        return "cad"
+    if x in {"stl", "3mf", "obj"}:
+        return "mesh"
+    if x in {"dxf", "dwg"}:
+        return "draw"
+    if x in IMG_EXT:
+        return "image"
+    if x in VID_EXT:
+        return "video"
+    if x == "pdf":
+        return "pdf"
+    if x in ARC_EXT:
+        return "archive"
+    return "file"
+
+
+def short_when(ts: float) -> str:
+    d = datetime.fromtimestamp(ts or 0)
+    now = datetime.now()
+    if d.date() == now.date():
+        return "сегодня " + d.strftime("%H:%M")
+    if (now.date() - d.date()).days == 1:
+        return "вчера " + d.strftime("%H:%M")
+    return d.strftime("%d.%m.%Y")
+
+
+_type_icon_cache: dict = {}
+
+
+def type_icon(e: dict, w=40) -> QPixmap:
+    """Значок файла как в iOS «Файлы»: цветной лист с загнутым уголком; папка — синяя."""
+    key = ("dir" if e.get("dir") else type_of(e), w, P["accent"])
+    if key in _type_icon_cache:
+        return _type_icon_cache[key]
+    h = int(w * 1.15)
+    pm = QPixmap(w * 2, h * 2)
+    pm.setDevicePixelRatio(2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    if e.get("dir"):
+        top = h * 0.22
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#5AA2F8"))
+        tab = QPainterPath()
+        tab.addRoundedRect(QRectF(1, top - 4, w * 0.45, 12), 3, 3)
+        p.drawPath(tab)
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(1, top + 2, w - 2, h * 0.62), 5, 5)
+        p.setBrush(QColor("#74B3FA"))
+        p.drawPath(body)
+    else:
+        color, g = TYPE_STYLE[type_of(e)]
+        fold = w * 0.3
+        path = QPainterPath()
+        r = 7
+        path.moveTo(r, 0)
+        path.lineTo(w - fold, 0)
+        path.lineTo(w, fold)
+        path.lineTo(w, h - r)
+        path.quadTo(w, h, w - r, h)
+        path.lineTo(r, h)
+        path.quadTo(0, h, 0, h - r)
+        path.lineTo(0, r)
+        path.quadTo(0, 0, r, 0)
+        p.fillPath(path, QColor(color))
+        corner = QPainterPath()
+        corner.moveTo(w - fold, 0)
+        corner.lineTo(w - fold, fold * 0.8)
+        corner.quadTo(w - fold, fold, w - fold * 0.8, fold)
+        corner.lineTo(w, fold)
+        corner.closeSubpath()
+        p.fillPath(corner, QColor(255, 255, 255, 110))
+        gs = int(w * 0.5)
+        p.drawPixmap(QRectF((w - gs) / 2, h * 0.58 - gs / 2, gs, gs).toRect(), glyph(g, "#FFFFFF", gs, 2.0))
+    p.end()
+    _type_icon_cache[key] = pm
+    return pm
+
+
 def has_thumb(e: dict) -> bool:
     return not e.get("dir") and ext_of(e["name"]) in IMG_EXT | VID_EXT
 
@@ -333,12 +496,15 @@ def default_inbox() -> str:
 
 class Config:
     def __init__(self):
-        self.data = {"phone": None, "inbox": default_inbox(), "theme": "dark", "history": [],
+        self.data = {"phone": None, "inbox": default_inbox(), "theme": "light", "history": [],
                      "hint_tray": False}
         try:
             self.data.update(json.loads(CONFIG_FILE.read_text("utf-8")))
         except Exception:
             pass
+        if self.data.get("ui") != 3:
+            self.data["ui"] = 3
+            self.data["theme"] = "light"
 
     def __getitem__(self, k):
         return self.data.get(k)
@@ -714,9 +880,12 @@ class FileDelegate(QStyledItemDelegate):
         self.view = view
 
     def sizeHint(self, opt, idx):
+        if self.view.photo_mode:
+            g = self.view.gridSize()
+            return g if g.isValid() else QSize(150, 150)
         if self.view.tiles:
             return QSize(150, 156)
-        return QSize(max(self.view.viewport().width() - 4, 200), 60)
+        return QSize(max(self.view.viewport().width() - 4, 200), 66)
 
     def paint(self, p: QPainter, opt, idx):
         e = idx.data(ROLE)
@@ -725,40 +894,91 @@ class FileDelegate(QStyledItemDelegate):
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        r = QRectF(opt.rect).adjusted(2, 2, -2, -2)
+        r = QRectF(opt.rect)
         sel = bool(opt.state & QStyle.State_Selected)
         hover = bool(opt.state & QStyle.State_MouseOver)
+        thumb = self.view.thumbs.get(e["path"])
+
+        if self.view.photo_mode:
+            box = r.adjusted(2, 2, -2, -2)
+            path = QPainterPath()
+            path.addRoundedRect(box, 6, 6)
+            p.fillPath(path, QColor(P["sub"]))
+            if thumb:
+                p.setClipPath(path)
+                sc = thumb.size().scaled(box.size().toSize(), Qt.KeepAspectRatioByExpanding)
+                tr = QRectF(0, 0, sc.width(), sc.height())
+                tr.moveCenter(box.center())
+                p.drawPixmap(tr.toRect(), thumb)
+                p.setClipping(False)
+            else:
+                gs = 28
+                p.drawPixmap(QRectF(box.center().x() - gs / 2, box.center().y() - gs / 2, gs, gs).toRect(),
+                             glyph("play" if type_of(e) == "video" else "image", P["muted"], gs))
+            if type_of(e) == "video":
+                p.drawPixmap(QRectF(box.left() + 8, box.bottom() - 26, 18, 18).toRect(), glyph("play", "#FFFFFF", 18, 2))
+            if sel:
+                p.setPen(QPen(QColor(P["accent"]), 3))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(box.adjusted(1.5, 1.5, -1.5, -1.5), 6, 6)
+                c = QRectF(box.right() - 36, box.top() + 8, 28, 28)
+                p.setPen(QPen(QColor("#FFFFFF"), 2))
+                p.setBrush(QColor(P["accent"]))
+                p.drawEllipse(c)
+                p.drawPixmap(c.adjusted(5, 5, -5, -5).toRect(), glyph("check", "#FFFFFF", 18, 2.6))
+            p.restore()
+            return
+
         if sel:
             p.setBrush(QColor(P["wash"]))
-            p.setPen(QPen(QColor(P["accent"]), 1.2))
-            p.drawRoundedRect(r, 9, 9)
-        elif hover:
-            p.setBrush(QColor(P["sub"]))
             p.setPen(Qt.NoPen)
-            p.drawRoundedRect(r, 9, 9)
-        elif not self.view.tiles:
-            p.setPen(QPen(QColor(P["line"]), 1))
-            p.drawLine(r.bottomLeft() + QPoint(6, 1), r.bottomRight() + QPoint(-6, 1))
+            p.drawRoundedRect(r.adjusted(2, 1, -2, -1), 12, 12)
+        elif hover:
+            p.setBrush(QColor(P["hover"]))
+            p.setPen(Qt.NoPen)
+            p.drawRoundedRect(r.adjusted(2, 1, -2, -1), 12, 12)
 
-        k = kind_of(e)
-        color = P["warn"] if k == "code" else P["accent"]
-        gname = "folder" if k == "dir" else k
-        thumb = self.view.thumbs.get(e["path"])
-        meta = self.view.meta_text(e)
         name_font = QFont(opt.font)
-        name_font.setPixelSize(15)
+        name_font.setPixelSize(16)
         name_font.setWeight(QFont.DemiBold)
         small = QFont(opt.font)
         small.setPixelSize(13)
+        meta = self.view.meta_text(e)
 
         if self.view.tiles:
-            box = QRectF(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 58)
-        else:
-            box = QRectF(r.left() + 6, r.center().y() - 19, 38, 38)
-        path = QPainterPath()
-        path.addRoundedRect(box, 10, 10)
-        p.fillPath(path, QColor(P["wash"]))
+            box = QRectF(r.left() + 10, r.top() + 8, r.width() - 20, r.height() - 58)
+            if thumb:
+                path = QPainterPath()
+                path.addRoundedRect(box, 10, 10)
+                p.setClipPath(path)
+                sc = thumb.size().scaled(box.size().toSize(), Qt.KeepAspectRatioByExpanding)
+                tr = QRectF(0, 0, sc.width(), sc.height())
+                tr.moveCenter(box.center())
+                p.drawPixmap(tr.toRect(), thumb)
+                p.setClipping(False)
+            else:
+                ic = type_icon(e, 56)
+                s_ = ic.size() / ic.devicePixelRatio()
+                p.drawPixmap(QRectF(box.center().x() - s_.width() / 2, box.center().y() - s_.height() / 2,
+                                    s_.width(), s_.height()).toRect(), ic)
+            tx = QRectF(r.left() + 8, box.bottom() + 6, r.width() - 16, 20)
+            p.setFont(name_font)
+            p.setPen(QColor(P["text"]))
+            p.drawText(tx, Qt.AlignHCenter | Qt.AlignVCenter,
+                       QFontMetrics(name_font).elidedText(disp_name(e), Qt.ElideMiddle, int(tx.width())))
+            p.setFont(small)
+            p.setPen(QColor(P["muted"]))
+            p.drawText(QRectF(tx.left(), tx.bottom(), tx.width(), 18), Qt.AlignHCenter | Qt.AlignVCenter,
+                       QFontMetrics(small).elidedText(meta, Qt.ElideRight, int(tx.width())))
+            p.restore()
+            return
+
+        # строка списка: значок · имя · подробности · «›» или «•••»
+        ic_w = 38
+        box = QRectF(r.left() + 12, r.center().y() - ic_w * 1.15 / 2, ic_w, ic_w * 1.15)
         if thumb:
+            path = QPainterPath()
+            path.addRoundedRect(box, 8, 8)
             p.setClipPath(path)
             sc = thumb.size().scaled(box.size().toSize(), Qt.KeepAspectRatioByExpanding)
             tr = QRectF(0, 0, sc.width(), sc.height())
@@ -766,28 +986,27 @@ class FileDelegate(QStyledItemDelegate):
             p.drawPixmap(tr.toRect(), thumb)
             p.setClipping(False)
         else:
-            gs = 34 if self.view.tiles else 22
-            pm = glyph(gname, color, gs)
-            p.drawPixmap(QRectF(box.center().x() - gs / 2, box.center().y() - gs / 2, gs, gs).toRect(), pm)
-
+            p.drawPixmap(box.toRect(), type_icon(e, ic_w))
+        right = r.right() - 44
+        tx = QRectF(box.right() + 14, r.top() + 11, right - box.right() - 18, 22)
+        p.setFont(name_font)
         p.setPen(QColor(P["text"]))
-        if self.view.tiles:
-            tx = QRectF(r.left() + 8, box.bottom() + 6, r.width() - 16, 20)
-            p.setFont(name_font)
-            p.drawText(tx, Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetrics(name_font).elidedText(disp_name(e), Qt.ElideMiddle, int(tx.width())))
-            p.setFont(small)
-            p.setPen(QColor(P["muted"]))
-            p.drawText(QRectF(tx.left(), tx.bottom(), tx.width(), 18), Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetrics(small).elidedText(meta, Qt.ElideRight, int(tx.width())))
+        p.drawText(tx, Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(name_font).elidedText(disp_name(e), Qt.ElideMiddle, int(tx.width())))
+        p.setFont(small)
+        p.setPen(QColor(P["muted"]))
+        p.drawText(QRectF(tx.left(), tx.bottom() + 1, tx.width(), 19), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(small).elidedText(meta, Qt.ElideRight, int(tx.width())))
+        if e.get("dir"):
+            p.drawPixmap(QRectF(r.right() - 32, r.center().y() - 9, 18, 18).toRect(), glyph("chev", P["muted"], 18, 2))
         else:
-            tx = QRectF(box.right() + 12, r.top() + 9, r.width() - box.width() - 30, 21)
-            p.setFont(name_font)
-            p.drawText(tx, Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetrics(name_font).elidedText(disp_name(e), Qt.ElideMiddle, int(tx.width())))
-            p.setFont(small)
-            p.setPen(QColor(P["muted"]))
-            p.drawText(QRectF(tx.left(), tx.bottom() + 1, tx.width(), 19), Qt.AlignLeft | Qt.AlignVCenter, meta)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(P["muted"]))
+            for k in range(3):
+                p.drawEllipse(QRectF(r.right() - 35 + k * 8, r.center().y() - 2, 4.2, 4.2))
+        if not sel and not hover and idx.row() < self.view.count() - 1:
+            p.setPen(QPen(QColor(P["line"]), 1))
+            p.drawLine(QPoint(int(tx.left()), int(r.bottom())), QPoint(int(r.right() - 8), int(r.bottom())))
         p.restore()
 
 
@@ -799,6 +1018,7 @@ class FileView(QListWidget):
         super().__init__()
         self.app = app
         self.tiles = False
+        self.photo_mode = False
         self.thumbs: dict = {}
         self._thumb_wait: set = set()
         self._thumb_sem = threading.Semaphore(4)
@@ -818,11 +1038,39 @@ class FileView(QListWidget):
         self.verticalScrollBar().valueChanged.connect(lambda *_: self._want_thumbs())
         self.set_tiles(False)
 
+    def set_photo_mode(self):
+        """Галерея: квадратные миниатюры по 3 в ряд, без подписей, синие галочки у выбранных."""
+        self.photo_mode = True
+        self.set_tiles(True)
+        self._fit_grid()
+
+    def _fit_grid(self):
+        if self.photo_mode:
+            w = max(90, (self.width() - 2 * self.frameWidth() - 14) // 3)   # 14 — запас под полосу прокрутки
+            self.setGridSize(QSize(w, w))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        QTimer.singleShot(0, self._refit)
+
+    def _refit(self):
+        if self.photo_mode:
+            old = self.gridSize()
+            self._fit_grid()
+            if self.gridSize() != old:
+                self.doItemsLayout()
+        self._want_thumbs()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        QTimer.singleShot(0, self._refit)
+
     def set_tiles(self, on: bool):
         self.tiles = on
         if on:
             self.setViewMode(QListWidget.IconMode)
             self.setGridSize(QSize(154, 160))
+            self._fit_grid()
             self.setResizeMode(QListWidget.Adjust)
             self.setMovement(QListWidget.Static)
             self.setWrapping(True)
@@ -839,7 +1087,7 @@ class FileView(QListWidget):
         if e.get("dir"):
             return "Папка" + (f' · {e["name"]}' if ru_name(e["name"]) != e["name"] else "")
         x = ext_of(e["name"]).upper() or "Файл"
-        return f'{x} · {human(e.get("size") or 0)} · {datetime.fromtimestamp(e.get("mtime") or 0):%d.%m.%y %H:%M}'
+        return f'{x} · {human(e.get("size") or 0)} · {short_when(e.get("mtime"))}'
 
     def set_entries(self, entries):
         self.clear()
@@ -892,6 +1140,14 @@ class FileView(QListWidget):
     def mousePressEvent(self, ev):
         if ev.button() == Qt.BackButton:
             self.app.go_back()
+            return
+        it = self.itemAt(ev.position().toPoint())
+        if (it and ev.button() == Qt.LeftButton and not self.tiles
+                and ev.position().x() > self.viewport().width() - 46 and not it.data(ROLE).get("dir")):
+            if not it.isSelected():
+                self.clearSelection()
+                it.setSelected(True)
+            self._menu(ev.position().toPoint())
             return
         super().mousePressEvent(ev)
 
@@ -953,24 +1209,28 @@ class FileView(QListWidget):
 def drag_pixmap(files) -> QPixmap:
     text = files[0]["name"] if len(files) == 1 else f"Файлов: {len(files)}"
     f = QFont()
-    f.setPixelSize(14)
+    f.setPixelSize(16)
     f.setWeight(QFont.DemiBold)
     fm = QFontMetrics(f)
-    text = fm.elidedText(text, Qt.ElideMiddle, 240)
-    w, h = fm.horizontalAdvance(text) + 58, 40
-    pm = QPixmap(w * 2, h * 2)
+    text = fm.elidedText(text, Qt.ElideMiddle, 260)
+    pad = 10
+    w, h = fm.horizontalAdvance(text) + 76, 58
+    pm = QPixmap((w + pad * 2) * 2, (h + pad * 2) * 2)
     pm.setDevicePixelRatio(2)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
+    for k in range(pad, 0, -2):   # мягкая тень
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 6))
+        p.drawRoundedRect(QRectF(pad - k / 2, pad - k / 2 + 3, w + k, h + k), 16, 16)
     p.setBrush(QColor(P["surface"]))
-    p.setPen(QPen(QColor(P["accent"]), 1.5))
-    p.drawRoundedRect(QRectF(1, 1, w - 2, h - 2), 12, 12)
-    k = kind_of(files[0])
-    p.drawPixmap(10, 9, glyph(k if k != "dir" else "folder", P["warn"] if k == "code" else P["accent"], 22))
+    p.drawRoundedRect(QRectF(pad, pad, w, h), 14, 14)
+    ic = type_icon(files[0], 34)
+    p.drawPixmap(QRectF(pad + 12, pad + (h - 39) / 2, 34, 39).toRect(), ic)
     p.setFont(f)
     p.setPen(QColor(P["text"]))
-    p.drawText(QRectF(42, 0, w - 50, h), Qt.AlignVCenter, text)
+    p.drawText(QRectF(pad + 58, pad, w - 64, h), Qt.AlignVCenter, text)
     p.end()
     return pm
 
@@ -978,36 +1238,45 @@ def drag_pixmap(files) -> QPixmap:
 # ---------------------------------------------------------------- панель передачи (тост)
 
 class Toast(QFrame):
+    """Плашка внизу: ход передачи и итог (как в макете)."""
+
     def __init__(self, app: "MainWindow"):
         super().__init__()
         self.app = app
         self.setObjectName("toast")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 12)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(16, 12, 12, 12)
+        outer.setSpacing(12)
+        self.icon = QLabel()
+        self.icon.setPixmap(glyph("pc", P["accent"], 28))
+        outer.addWidget(self.icon, 0, Qt.AlignTop)
+        lay = QVBoxLayout()
         lay.setSpacing(6)
         row = QHBoxLayout()
         self.title = label("", "h3")
-        self.title.setStyleSheet("font-size:15px")
+        self.title.setWordWrap(True)
         row.addWidget(self.title, 1)
         self.bx = button("✕", "icon", fn=self.hide)
-        row.addWidget(self.bx)
+        row.addWidget(self.bx, 0, Qt.AlignTop)
         lay.addLayout(row)
-        self.name = label("", wrap=True)
+        self.name = label("", "muted", wrap=True)
         lay.addWidget(self.name)
-        brow = QHBoxLayout()
-        self.b1 = button("", "pill")
-        self.b2 = button("")
-        brow.addWidget(self.b1)
-        brow.addWidget(self.b2)
-        brow.addStretch(1)
         self.bar = QProgressBar()
-        self.bar.setFixedHeight(8)
+        self.bar.setFixedHeight(6)
         self.bar.setTextVisible(False)
         self.bar.setRange(0, 1000)
         lay.addWidget(self.bar)
         self.sub = label("", "small")
         lay.addWidget(self.sub)
+        brow = QHBoxLayout()
+        self.b1 = button("", "tinted")
+        self.b2 = button("")
+        for b in (self.b1, self.b2):
+            b.setMinimumHeight(38)
+            brow.addWidget(b)
+        brow.addStretch(1)
         lay.addLayout(brow)
+        outer.addLayout(lay, 1)
         self._timer = QTimer(self, singleShot=True, timeout=self.hide)
         self.hide()
 
@@ -1022,7 +1291,8 @@ class Toast(QFrame):
 
     def transfer(self, direction, first, count):
         self._timer.stop()
-        self.title.setStyleSheet("font-size:15px")
+        self.icon.setPixmap(glyph("pc" if direction != "out" else "phone", P["accent"], 28))
+        self.title.setStyleSheet("")
         self.title.setText({"in": "Телефон → ПК", "push": "Принимаю с телефона", "out": "ПК → Телефон"}[direction])
         self.name.setText(first + (f"  +{count - 1}" if count > 1 else ""))
         self.name.show()
@@ -1030,8 +1300,8 @@ class Toast(QFrame):
         self.bar.show()
         self.sub.setText("Начинаю передачу…")
         self.sub.show()
-        self._btn(self.b1, "", None)
-        self._btn(self.b2, "Отмена", self.app.transfers.cancel)
+        self._btn(self.b1, "Отмена", self.app.transfers.cancel)
+        self._btn(self.b2, "", None)
         self.bx.hide()
         self.show()
 
@@ -1039,12 +1309,13 @@ class Toast(QFrame):
         self.bar.setValue(int(done * 1000 / max(total, 1)))
         if speed > 0:
             left = (total - done) / speed
-            self.sub.setText(f"{human(done)} из {human(total)} · {human(speed)}/с · осталось {max(1, int(left))} с")
+            self.sub.setText(f"{human(speed)}/с · осталось {max(1, int(left))} с · {human(done)} из {human(total)}")
 
     def result(self, title, text="", ok=True, b1=None, b2=None, hide_after=0):
         self._timer.stop()
+        self.icon.setPixmap(glyph("check" if ok else "wifi", P["ok"] if ok else P["err"], 28, 2.2))
         self.title.setText(title)
-        self.title.setStyleSheet(f"font-size:15px; color:{P['ok'] if ok else P['err']}")
+        self.title.setStyleSheet(f"color:{P['text'] if ok else P['err']}")
         self.name.setText(text)
         self.name.setVisible(bool(text))
         self.bar.hide()
@@ -1059,9 +1330,9 @@ class Toast(QFrame):
     def message(self, text, ok=False):
         if self.app.transfers.busy:
             return
-        self.result(text, ok=ok, hide_after=4500)
+        self.result(text, ok=True, hide_after=4500)
         if not ok:
-            self.title.setStyleSheet("font-size:15px")
+            self.icon.setPixmap(glyph("doc", P["accent"], 28))
 
 
 # ---------------------------------------------------------------- подложка «Отпустите»
@@ -1075,11 +1346,22 @@ class Veil(QFrame):
         self.setAcceptDrops(True)
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignCenter)
+        lay.setSpacing(14)
         ic = QLabel()
-        ic.setPixmap(glyph("up", P["accent"], 48, 2))
+        circ = QPixmap(220, 220)
+        circ.setDevicePixelRatio(2)
+        circ.fill(Qt.transparent)
+        cp = QPainter(circ)
+        cp.setRenderHint(QPainter.Antialiasing)
+        cp.setPen(Qt.NoPen)
+        cp.setBrush(QColor(P["accent"]))
+        cp.drawEllipse(QRectF(2, 2, 106, 106))
+        cp.drawPixmap(QRectF(27, 27, 56, 56).toRect(), glyph("down", "#FFFFFF", 56, 2.4))
+        cp.end()
+        ic.setPixmap(circ)
         ic.setAlignment(Qt.AlignCenter)
         lay.addWidget(ic)
-        t = label("Отпустите — отправлю на телефон", "h2", wrap=True)
+        t = label("Отпустите — отправлю\nна телефон", "veiltext", wrap=True)
         t.setAlignment(Qt.AlignCenter)
         lay.addWidget(t)
         s = label("Файлы попадут в «Загрузки/RafLink» на телефоне", "muted", wrap=True)
@@ -1171,6 +1453,131 @@ class Capsule(QFrame):
 
 # ---------------------------------------------------------------- окно
 
+PAIR_ART = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 130" fill="none" stroke-linecap="round"
+ stroke-linejoin="round"><ellipse cx="150" cy="66" rx="128" ry="58" stroke="{a}" stroke-opacity=".35" stroke-width="2"/>
+<rect x="26" y="34" width="96" height="62" rx="8" fill="{w}" stroke="{a}" stroke-width="3"/>
+<path d="M14 102h120l-6 8H20z" fill="{w}" stroke="{a}" stroke-width="3"/>
+<path d="M66 69l14-14 M62 66l-3 3a7 7 0 0010 10l6-6 M84 58l3-3a7 7 0 00-10-10l-6 6" stroke="{a}" stroke-width="3"/>
+<path d="M134 56q16-14 32 0 M140 64q10-8 20 0" stroke="{a}" stroke-width="4"/><circle cx="150" cy="72" r="3.5" fill="{a}"/>
+<rect x="196" y="18" width="52" height="96" rx="11" fill="{w}" stroke="{a}" stroke-width="3"/>
+<path d="M214 26h16" stroke="{a}" stroke-width="3"/>
+<path d="M216 69l12-12 M213 66l-3 3a6 6 0 008 8l5-5 M231 60l3-3a6 6 0 00-8-8l-5 5" stroke="{a}" stroke-width="3"/></svg>"""
+
+
+def svg_pixmap(svg: str, w: int, h: int) -> QPixmap:
+    pm = QPixmap(w * 2, h * 2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    QSvgRenderer(QByteArray(svg.encode())).render(p, QRectF(0, 0, w * 2, h * 2))
+    p.end()
+    pm.setDevicePixelRatio(2)
+    return pm
+
+
+class PinBoxes(QWidget):
+    """6 клеток для кода с телефона; вставка из буфера тоже работает."""
+    submitted = Signal()
+
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        self.boxes = []
+        for i in range(6):
+            e = QLineEdit()
+            e.setObjectName("digit")
+            e.setAlignment(Qt.AlignCenter)
+            e.setMaxLength(6)
+            e.setFixedHeight(62)
+            e.setMinimumWidth(44)
+            e.textEdited.connect(lambda t, i=i: self._typed(i, t))
+            e.installEventFilter(self)
+            e.returnPressed.connect(self.submitted.emit)
+            lay.addWidget(e)
+            self.boxes.append(e)
+
+    def _typed(self, i, t):
+        digits = re.sub(r"\D", "", t)
+        if len(digits) > 1:          # вставили весь код
+            self.set_value(digits)
+            return
+        self.boxes[i].setText(digits)
+        if digits and i < 5:
+            self.boxes[i + 1].setFocus()
+            self.boxes[i + 1].selectAll()
+        if len(self.value()) == 6:
+            self.submitted.emit()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == ev.Type.KeyPress and ev.key() == Qt.Key_Backspace and not obj.text():
+            i = self.boxes.index(obj)
+            if i > 0:
+                self.boxes[i - 1].clear()
+                self.boxes[i - 1].setFocus()
+                return True
+        return False
+
+    def value(self):
+        return "".join(b.text() for b in self.boxes)
+
+    def set_value(self, digits):
+        for i, b in enumerate(self.boxes):
+            b.setText(digits[i] if i < len(digits) else "")
+        self.boxes[min(len(digits), 5)].setFocus()
+
+    def clear(self):
+        self.set_value("")
+        self.boxes[0].setFocus()
+
+
+class AlbumChips(QWidget):
+    """Альбомы галереи — ряд «чипов» как в макете (повторяет нужную часть API QComboBox)."""
+    currentIndexChanged = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("chips")
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(0, 0, 0, 0)
+        self.row.setSpacing(4)
+        self.row.addStretch(1)
+        self.items = []   # (кнопка, данные)
+        self.cur = -1
+
+    def clear(self):
+        for b, _ in self.items:
+            b.hide()
+            b.deleteLater()
+        self.items = []
+        self.cur = -1
+
+    def addItem(self, text, data):
+        b = button(text, "chip")
+        b.setCheckable(True)
+        i = len(self.items)
+        b.clicked.connect(lambda _=False, i=i: self.setCurrentIndex(i))
+        self.row.insertWidget(self.row.count() - 1, b)
+        self.items.append((b, data))
+
+    def count(self):
+        return len(self.items)
+
+    def findData(self, data):
+        return next((i for i, (_, d) in enumerate(self.items) if d == data), -1)
+
+    def currentData(self):
+        return self.items[self.cur][1] if 0 <= self.cur < len(self.items) else None
+
+    def setCurrentIndex(self, i):
+        changed = i != self.cur
+        self.cur = i
+        for k, (b, _) in enumerate(self.items):
+            b.setChecked(k == i)
+        if changed and not self.signalsBlocked():
+            self.currentIndexChanged.emit(i)
+
+
 QUICK = [("Загрузки", "down", "Download"), ("Камера", "cam", "DCIM/Camera"), ("Документы", "doc", "Documents"),
          ("Telegram", "send", "Download/Telegram"), ("WhatsApp", "chat", "Android/media/com.whatsapp/WhatsApp/Media"),
          ("Скриншоты", "shot", "DCIM/Screenshots")]
@@ -1196,51 +1603,62 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("RafLink")
         self.setWindowIcon(QIcon(app_icon_pixmap()))
-        self.resize(500, 800)
-        self.setMinimumSize(420, 560)
+        self.resize(520, 880)
+        self.setMinimumSize(440, 600)
         self.setAcceptDrops(True)
 
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
         v = QVBoxLayout(root)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(10)
 
-        # шапка: телефон, статус, заряд
-        dev = QWidget()
-        dev.setObjectName("device")
-        h = QHBoxLayout(dev)
-        h.setContentsMargins(16, 14, 10, 12)
-        h.setSpacing(12)
-        h.addWidget(icon_box("phone", P["accent"]))
+        # карточка телефона: значок, имя, статус, заряд
+        dev, h = card(v, (14, 12, 8, 12), 12, horizontal=True)
+        box = QFrame()
+        box.setObjectName("iconbox")
+        box.setFixedSize(54, 54)
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        ic = QLabel()
+        ic.setPixmap(glyph("phone", P["accent"], 32, 1.8))
+        ic.setAlignment(Qt.AlignCenter)
+        bl.addWidget(ic)
+        h.addWidget(box)
         col = QVBoxLayout()
-        col.setSpacing(0)
-        self.dev_name = label("Телефон", "h3")
-        self.dev_state = label("● Нет связи", "warn")
+        col.setSpacing(2)
+        self.dev_name = label("Телефон", "devname")
+        self.dev_state = QLabel()
         col.addWidget(self.dev_name)
         col.addWidget(self.dev_state)
         h.addLayout(col, 1)
+        self.battery = Battery()
         self.batt = label("", "muted")
+        self.batt.setStyleSheet("font-size:16px")
+        h.addWidget(self.battery)
         h.addWidget(self.batt)
-        h.addWidget(button("", "icon", icon="mini", tip="Мини-режим: капсула для файлов", fn=self.to_mini))
-        h.addWidget(button("", "icon", icon="gear", tip="Настройки", fn=self.settings))
-        v.addWidget(dev)
+        h.addSpacing(4)
+        h.addWidget(button("", "icon", icon="mini", tip="Мини-режим: капсула для файлов", fn=self.to_mini,
+                           color=P["muted"]))
+        h.addWidget(button("", "icon", icon="gear", tip="Настройки", fn=self.settings, color=P["muted"]))
+        self._set_state(False)
 
-        # вкладки
-        tb = QWidget()
-        tb.setObjectName("tabbar")
-        th = QHBoxLayout(tb)
-        th.setContentsMargins(12, 0, 12, 0)
-        th.setSpacing(2)
+        # переключатель «Файлы | Галерея | История»
+        tb, tl = card(v, (6, 6, 6, 6), 0)
+        track = QFrame()
+        track.setObjectName("segtrack")
+        th = QHBoxLayout(track)
+        th.setContentsMargins(3, 3, 3, 3)
+        th.setSpacing(3)
         self.tab_btns = []
         for i, t in enumerate(["Файлы", "Галерея", "История"]):
-            b = button(t, "tab", fn=lambda _=False, i=i: self.switch_tab(i))
+            b = button(t, "seg", fn=lambda _=False, i=i: self.switch_tab(i))
             b.setCheckable(True)
             th.addWidget(b, 1)
             self.tab_btns.append(b)
+        tl.addWidget(track)
         self.tabbar = tb
-        v.addWidget(tb)
 
         # страницы
         self.pages = QStackedWidget()
@@ -1253,12 +1671,8 @@ class MainWindow(QMainWindow):
         for w in (self.page_files, self.page_photos, self.page_hist, self.page_offline, self.page_pair):
             self.pages.addWidget(w)
 
-        tw = QWidget()
-        tl = QVBoxLayout(tw)
-        tl.setContentsMargins(12, 0, 12, 12)
         self.toast = Toast(self)
-        tl.addWidget(self.toast)
-        v.addWidget(tw)
+        v.addWidget(self.toast)
 
         self.veil = Veil(root)
         self.veil.dropped.connect(self.upload_paths)
@@ -1287,9 +1701,10 @@ class MainWindow(QMainWindow):
 
     def _page(self):
         w = QWidget()
+        w.setObjectName("page")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(16, 14, 16, 10)
-        lay.setSpacing(8)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
         return w, lay
 
     def _build_files(self):
@@ -1301,113 +1716,140 @@ class MainWindow(QMainWindow):
                            "«Доступ ко всем файлам» и включите переключатель.", wrap=True))
         self.banner.hide()
         lay.addWidget(self.banner)
-        lay.addWidget(label("Быстрые папки", "label"))
+
+        qc, ql = card(lay, (12, 12, 12, 12), 0)
         grid = QGridLayout()
-        grid.setSpacing(6)
+        grid.setSpacing(8)
         self.quick_btns = []
         for i, (t, ic, sub) in enumerate(QUICK):
             b = button(t, "quick", fn=lambda _=False, sub=sub: self.load(PHONE_ROOT + "/" + sub))
-            b.setIcon(QIcon(glyph(ic, P["accent"], 22)))
-            b.setIconSize(QSize(22, 22))
+            b.setIcon(QIcon(glyph("folder", P["accent"], 26, 1.6)))
+            b.setIconSize(QSize(26, 26))
             b.setCheckable(True)
             grid.addWidget(b, i // 3, i % 3)
             self.quick_btns.append((b, PHONE_ROOT + "/" + sub))
-        lay.addLayout(grid)
+        ql.addLayout(grid)
 
+        lc, ll = card(lay, (8, 10, 8, 6), 6)
         self.crumbs = QHBoxLayout()
         self.crumbs.setSpacing(0)
-        self.crumbs.setContentsMargins(0, 0, 0, 0)
+        self.crumbs.setContentsMargins(4, 0, 0, 0)
         self.back_btn = button("", "icon", icon="back", tip="Назад (Alt+←, Backspace)", fn=self.go_back)
         self.up_btn = button("", "icon", icon="up", tip="На уровень выше", fn=self.go_up)
-        cw = QWidget()
-        cw.setLayout(self.crumbs)
-        lay.addWidget(cw)
+        ll.addLayout(self.crumbs)
 
         tools = QHBoxLayout()
-        tools.setSpacing(6)
+        tools.setContentsMargins(6, 0, 6, 0)
+        tools.setSpacing(4)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск файлов")
+        self.search.setObjectName("search")
+        self.search.setPlaceholderText("Поиск")
         self.search.setClearButtonEnabled(True)
+        self.search.addAction(QIcon(glyph("search", P["muted"], 20)), QLineEdit.LeadingPosition)
         self.search.textChanged.connect(self.refilter)
         tools.addWidget(self.search, 1)
-        self.sort = QComboBox()
+        self.sort = QComboBox()            # невидимый: хранит выбранную сортировку
         self.sort.addItems(["Сначала новые", "По имени", "По размеру"])
         self.sort.currentIndexChanged.connect(self.refilter)
-        tools.addWidget(self.sort)
-        self.view_btn = button("", icon="tiles", tip="Список или плитка", fn=self.toggle_view)
+        self.sort.hide()
+        sb = button("", "icon", icon="sort", tip="Сортировка")
+        sm = QMenu(sb)
+        for i, t in enumerate(["Сначала новые", "По имени", "По размеру"]):
+            sm.addAction(t, lambda i=i: self.sort.setCurrentIndex(i))
+        sb.clicked.connect(lambda: sm.exec(sb.mapToGlobal(QPoint(0, sb.height()))))
+        tools.addWidget(sb)
+        self.view_btn = button("", "icon", icon="tiles", tip="Список или плитка", fn=self.toggle_view)
         tools.addWidget(self.view_btn)
-        tools.addWidget(button("", icon="refresh", tip="Обновить (F5)", fn=self.reload))
-        lay.addLayout(tools)
+        tools.addWidget(button("", "icon", icon="refresh", tip="Обновить (F5)", fn=self.reload))
+        ll.addLayout(tools)
+        ll.addSpacing(2)
+        ll.addWidget(sep_line())
 
         self.view = FileView(self)
         self.view.open_dir.connect(self.load)
         self.view.itemSelectionChanged.connect(self._sel_changed)
-        lay.addWidget(self.view, 1)
+        ll.addWidget(self.view, 1)
         self.empty = label("", "muted")
         self.empty.setAlignment(Qt.AlignCenter)
+        self.empty.setWordWrap(True)
         self.empty.hide()
-        lay.addWidget(self.empty, 1)
+        ll.addWidget(self.empty, 1)
+        lay.setStretchFactor(lc, 1)
 
-        foot = QHBoxLayout()
-        self.count_lbl = label("", "small")
-        foot.addWidget(self.count_lbl, 1)
-        self.btn_open = button("Открыть", fn=lambda: self.open_entries(self._sel_files()))
-        self.btn_save = button("На ПК", "pill", icon="down",
-                               tip="Сохранить выбранные в папку «Входящие»",
+        fc, fl = card(lay, (10, 10, 10, 10), 8, horizontal=True)
+        self.count_lbl = label("", "small")   # число объектов — в подсказке кнопки «Открыть»
+        self.btn_open = button("Открыть", "primary", fn=lambda: self.open_entries(self._sel_files()))
+        self.btn_open.setIcon(QIcon(glyph("open", "#FFFFFF", 20, 2)))
+        self.btn_save = button("На ПК", "tinted", tip="Сохранить выбранные в папку «Входящие»",
                                fn=lambda: self.save_entries(self._sel_files()))
-        self.btn_send = button("На телефон", icon="send", tip="Выбрать файлы на ПК и отправить на телефон",
+        self.btn_save.setIcon(QIcon(glyph("pc", P["accent"], 20, 2)))
+        self.btn_send = button("На телефон", "tinted", tip="Выбрать файлы на ПК и отправить на телефон",
                                fn=self.pick_upload)
-        foot.addWidget(self.btn_open)
-        foot.addWidget(self.btn_save)
-        foot.addWidget(self.btn_send)
-        lay.addLayout(foot)
+        self.btn_send.setIcon(QIcon(glyph("phone", P["accent"], 20, 2)))
+        for b in (self.btn_open, self.btn_save, self.btn_send):
+            b.setIconSize(QSize(20, 20))
+            fl.addWidget(b, 1)
         self.view.setToolTip("Перетащите файл мышкой в Проводник или на рабочий стол.\n"
                              "Обратно — бросьте файл с ПК на это окно.")
         return w
 
     def _build_photos(self):
         w, lay = self._page()
-        top = QHBoxLayout()
-        top.addWidget(label("Галерея", "h2"), 1)
-        top.addWidget(button("", icon="refresh", tip="Обновить", fn=self.load_albums))
-        lay.addLayout(top)
-        self.album_box = QComboBox()
+        ac, al = card(lay, (8, 8, 8, 8), 0)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sc.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sc.setFixedHeight(46)
+        self.album_box = AlbumChips()
         self.album_box.currentIndexChanged.connect(self.load_photos)
-        lay.addWidget(self.album_box)
+        sc.setWidget(self.album_box)
+        al.addWidget(sc)
+
+        pc, pl = card(lay, (10, 12, 10, 10), 8)
+        top = QHBoxLayout()
+        top.setContentsMargins(6, 0, 0, 0)
+        self.photo_count = label("", "h3")
+        top.addWidget(self.photo_count, 1)
+        top.addWidget(button("", "icon", icon="refresh", tip="Обновить", fn=self.load_albums))
+        pl.addLayout(top)
         self.photos = FileView(self)
-        self.photos.set_tiles(True)
+        self.photos.set_photo_mode()
         self.photos.itemSelectionChanged.connect(self._photo_sel)
-        lay.addWidget(self.photos, 1)
+        pl.addWidget(self.photos, 1)
         self.photo_empty = label("", "muted")
         self.photo_empty.setAlignment(Qt.AlignCenter)
         self.photo_empty.setWordWrap(True)
         self.photo_empty.hide()
-        lay.addWidget(self.photo_empty, 1)
-        foot = QHBoxLayout()
-        self.photo_count = label("", "small")
-        foot.addWidget(self.photo_count, 1)
-        foot.addWidget(button("Сохранить выбранные на ПК", "pill", icon="down",
-                              fn=lambda: self.save_entries(self.photos.entries())))
-        lay.addLayout(foot)
+        pl.addWidget(self.photo_empty, 1)
+        lay.setStretchFactor(pc, 1)
+        self.photo_btn = button("На ПК", "primary", fn=lambda: self.save_entries(self.photos.entries()))
+        self.photo_btn.setIcon(QIcon(glyph("pc", "#FFFFFF", 22, 2)))
+        self.photo_btn.setIconSize(QSize(22, 22))
+        self.photo_btn.setMinimumHeight(52)
+        lay.addWidget(self.photo_btn)
         return w
 
     def _build_history(self):
         w, lay = self._page()
+        hc, hl = card(lay, (12, 12, 12, 12), 8)
         top = QHBoxLayout()
         top.addWidget(label("История передач", "h2"), 1)
-        top.addWidget(button("Папка «Входящие»", icon="folder", fn=lambda: open_local(self.config.inbox())))
-        lay.addLayout(top)
+        top.addWidget(button("Входящие", "tinted", fn=lambda: open_local(self.config.inbox())))
+        hl.addLayout(top)
         self.hist = QListWidget()
         self.hist.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.hist.setSelectionMode(QAbstractItemView.NoSelection)
-        lay.addWidget(self.hist, 1)
+        hl.addWidget(self.hist, 1)
+        lay.setStretchFactor(hc, 1)
         return w
 
     def _build_offline(self):
         w, lay = self._page()
         lay.addStretch(1)
         ic = QLabel()
-        ic.setPixmap(glyph("wifi", P["warn"], 56, 1.6))
+        ic.setPixmap(glyph("wifi", P["warn"], 64, 1.8))
         ic.setAlignment(Qt.AlignCenter)
         lay.addWidget(ic)
         t = label("Нет связи с телефоном", "h2")
@@ -1416,59 +1858,76 @@ class MainWindow(QMainWindow):
         self.off_text = label("", "muted", wrap=True)
         self.off_text.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.off_text)
-        note = QFrame()
-        note.setObjectName("note")
-        nl = QVBoxLayout(note)
-        for s in ["1. Телефон и ПК подключены к одной сети Wi-Fi.",
-                  "2. На телефоне открыто приложение RafLink (в шторке — «На связи…»).",
-                  "3. Xiaomi: RafLink → «Работа в фоне без ограничений» и «Автозапуск»."]:
-            nl.addWidget(label(s, wrap=True))
-        lay.addWidget(note)
+        nc, nl = card(lay, (16, 14, 16, 14), 10)
+        for s_ in ["1. Телефон и ПК подключены к одной сети.",
+                   "2. На телефоне открыто приложение RafLink (в шторке — «На связи…»).",
+                   "3. Xiaomi: RafLink → «Работа в фоне без ограничений» и «Автозапуск»."]:
+            nl.addWidget(label(s_, wrap=True))
         row = QHBoxLayout()
         row.addWidget(button("Повторить", "primary", fn=self.poll), 1)
-        row.addWidget(button("Подключить другой телефон", fn=lambda: self.show_page("pair")), 1)
+        row.addWidget(button("Другой телефон", "tinted", fn=lambda: self.show_page("pair")), 1)
         lay.addLayout(row)
         lay.addStretch(2)
         return w
 
     def _build_pair(self):
         w, lay = self._page()
-        lay.addWidget(label("Первое подключение", "h2"))
-        note = QFrame()
-        note.setObjectName("note")
-        nl = QVBoxLayout(note)
-        for s in ["1. Установите на телефон приложение RafLink и откройте его.",
-                  "2. Подключите телефон к той же сети Wi-Fi, что и компьютер.",
-                  "3. Выберите телефон ниже и введите 6-значный код с его экрана."]:
-            nl.addWidget(label(s, wrap=True))
-        lay.addWidget(note)
-        lay.addWidget(label("Телефоны в сети", "label"))
+        lay.setSpacing(8)
+        art = QLabel()
+        art.setPixmap(svg_pixmap(PAIR_ART.format(a=P["accent"], w=P["wash"]), 300, 130))
+        art.setAlignment(Qt.AlignCenter)
+        lay.addWidget(art)
+        t = label("Первое подключение", "h1")
+        t.setAlignment(Qt.AlignCenter)
+        lay.addWidget(t)
+        sub = label("Выберите телефон в сети Wi-Fi.", "muted")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setStyleSheet("font-size:16px")
+        lay.addWidget(sub)
+
+        fc, fl = card(lay, (6, 12, 6, 8), 4)
+        hdr = label("Найденные телефоны", "label")
+        hdr.setContentsMargins(12, 0, 0, 0)
+        fl.addWidget(hdr)
         self.found_list = QListWidget()
-        self.found_list.setObjectName("plain")
-        self.found_list.setMaximumHeight(150)
-        self.found_list.itemClicked.connect(lambda it: self.addr.setText(it.data(ROLE)))
-        lay.addWidget(self.found_list)
+        self.found_list.setMaximumHeight(130)
+        self.found_list.setMinimumHeight(52)
+        self.found_list.currentRowChanged.connect(self._found_pick)
+        fl.addWidget(self.found_list)
         self.searching = label("Ищу телефон…", "accent")
-        lay.addWidget(self.searching)
-        lay.addWidget(label("Адрес телефона", "label"))
+        self.searching.setContentsMargins(12, 0, 0, 0)
+        fl.addWidget(self.searching)
         self.addr = QLineEdit()
-        self.addr.setPlaceholderText("например 192.168.1.34 — виден на экране RafLink")
-        lay.addWidget(self.addr)
-        lay.addWidget(label("Код с экрана телефона", "label"))
-        self.pin = QLineEdit()
-        self.pin.setObjectName("pinedit")
-        self.pin.setPlaceholderText("000 000")
-        self.pin.setMaxLength(7)
-        self.pin.returnPressed.connect(self.do_pair)
-        lay.addWidget(self.pin)
+        self.addr.setPlaceholderText("или адрес телефона, например 192.168.1.34")
+        fl.addWidget(self.addr)
+
+        t2 = label("Код с телефона", "h2")
+        t2.setAlignment(Qt.AlignCenter)
+        lay.addSpacing(6)
+        lay.addWidget(t2)
+        s2 = label("Введите 6 цифр из приложения RafLink.", "muted")
+        s2.setAlignment(Qt.AlignCenter)
+        lay.addWidget(s2)
+        pc, pl = card(lay, (14, 12, 14, 12), 0)
+        self.pin = PinBoxes()
+        self.pin.submitted.connect(self.do_pair)
+        pl.addWidget(self.pin)
         self.pair_err = label("", "err", wrap=True)
+        self.pair_err.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.pair_err)
-        self.pair_btn = button("Подключить", "primary", fn=self.do_pair)
-        lay.addWidget(self.pair_btn)
-        self.pair_cancel = button("Отмена", fn=lambda: self.show_page("files" if self.online else "offline"))
-        lay.addWidget(self.pair_cancel)
         lay.addStretch(1)
+        self.pair_btn = button("Подключить", "primary", fn=self.do_pair)
+        self.pair_btn.setMinimumHeight(52)
+        lay.addWidget(self.pair_btn)
+        self.pair_cancel = button("Отмена", "link", fn=lambda: self.show_page("files" if self.online else "offline"))
+        lay.addWidget(self.pair_cancel)
         return w
+
+    def _set_state(self, online: bool):
+        c = P["ok"] if online else P["warn"]
+        t = "Подключено" if online else "Нет связи"
+        self.dev_state.setText(f'<span style="color:{c}; font-size:15px">●</span>&nbsp;&nbsp;'
+                               f'<span style="color:{P["muted"]}; font-size:16px">{t}</span>')
 
     # ---------- навигация по страницам
 
@@ -1497,7 +1956,6 @@ class MainWindow(QMainWindow):
             self.pair_cancel.setVisible(self.config["phone"] is not None)
             self.pin.clear()
             self.pair_err.clear()
-            self.pin.setFocus()
         if name == "hist":
             self.fill_history()
 
@@ -1515,12 +1973,27 @@ class MainWindow(QMainWindow):
         if ip in self.found:
             return
         self.found[ip] = (name, port)
-        it = QListWidgetItem(QIcon(glyph("phone", P["accent"], 20)), f"{name}   ·   {ip}")
+        it = QListWidgetItem()
         it.setData(ROLE, ip)
+        row = QWidget()
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(12, 6, 12, 6)
+        ic = QLabel()
+        ic.setPixmap(glyph("phone", P["accent"], 26, 1.8))
+        rl.addWidget(ic)
+        nm = QLabel(f'<span style="font-size:17px">{name}</span>&nbsp;&nbsp;'
+                    f'<span style="color:{P["muted"]}; font-size:13px">{ip}</span>')
+        rl.addWidget(nm, 1)
+        mark = QLabel()
+        mark.setObjectName("mark")
+        rl.addWidget(mark)
+        it.setSizeHint(QSize(100, 50))
         self.found_list.addItem(it)
+        self.found_list.setItemWidget(it, row)
         self.searching.setText(f"Найдено телефонов: {len(self.found)}")
-        if not self.addr.text():
-            self.addr.setText(ip)
+        if self.found_list.currentRow() < 0:
+            self.found_list.setCurrentRow(0)
+        self._found_pick(self.found_list.currentRow())
         # телефон сменил адрес в сети — подхватываем новый
         ph = self.config["phone"]
         if ph and not self.online and ph.get("model") and ph["model"] in name and ph["host"] != ip:
@@ -1529,9 +2002,32 @@ class MainWindow(QMainWindow):
             self.client = PhoneClient(ip, ph.get("port", PHONE_PORT), ph["token"])
             self.poll()
 
+    def _found_pick(self, row):
+        for i in range(self.found_list.count()):
+            it = self.found_list.item(i)
+            mark = self.found_list.itemWidget(it).findChild(QLabel, "mark")
+            on = i == row
+            pm = QPixmap(52, 52)
+            pm.setDevicePixelRatio(2)
+            pm.fill(Qt.transparent)
+            mp = QPainter(pm)
+            mp.setRenderHint(QPainter.Antialiasing)
+            if on:
+                mp.setPen(Qt.NoPen)
+                mp.setBrush(QColor(P["accent"]))
+                mp.drawEllipse(QRectF(1, 1, 24, 24))
+                mp.drawPixmap(QRectF(5, 5, 16, 16).toRect(), glyph("check", "#FFFFFF", 16, 2.8))
+            else:
+                mp.setPen(QPen(QColor(P["line"]), 2))
+                mp.drawEllipse(QRectF(2, 2, 22, 22))
+            mp.end()
+            mark.setPixmap(pm)
+            if on:
+                self.addr.setText(it.data(ROLE))
+
     def do_pair(self):
         host = self.addr.text().strip()
-        pin = re.sub(r"\D", "", self.pin.text())
+        pin = re.sub(r"\D", "", self.pin.value())
         if not host:
             self.pair_err.setText("Укажите адрес телефона или выберите его в списке.")
             return
@@ -1587,12 +2083,10 @@ class MainWindow(QMainWindow):
             ph["name"] = info["name"]
             self.config["phone"] = ph
             self.dev_name.setText(info["name"])
-        ch = " ⚡" if info.get("charging") else ""
-        self.batt.setText(f'{info.get("battery", "?")}%{ch}')
+        self.battery.set(int(info.get("battery") or 0), bool(info.get("charging")))
+        self.batt.setText(f'{info.get("battery", "?")}%')
         self.batt.setToolTip(f'Свободно {human(info.get("free", 0))} из {human(info.get("total", 0))}')
-        self.dev_state.setText("● Подключено")
-        self.dev_state.setObjectName("ok")
-        self.dev_state.setStyleSheet(f"color:{P['ok']}; font-size:13px")
+        self._set_state(True)
         self.banner.setVisible(not info.get("files_access", True))
         self.tray.setToolTip(f"RafLink — {self.dev_name.text()}, {info.get('battery', '?')}%")
         if not was:
@@ -1636,8 +2130,8 @@ class MainWindow(QMainWindow):
             return  # одна осечка Wi-Fi — не повод пугать
         self.online = False
         self.batt.setText("")
-        self.dev_state.setText("● Нет связи")
-        self.dev_state.setStyleSheet(f"color:{P['warn']}; font-size:13px")
+        self.battery.set(-1, False)
+        self._set_state(False)
         ph = self.config["phone"] or {}
         self.off_text.setText(f'Последний адрес телефона: {ph.get("host", "—")}. Жду, пока он появится в сети…')
         if self.pages.currentIndex() < 3:
@@ -1707,13 +2201,11 @@ class MainWindow(QMainWindow):
         while self.crumbs.count():
             it = self.crumbs.takeAt(0)
             wd = it.widget()
-            if wd and wd not in (self.back_btn, self.up_btn):
+            if wd and wd is not self.back_btn:
                 wd.hide()
                 wd.deleteLater()
         self.crumbs.addWidget(self.back_btn)
-        self.crumbs.addWidget(self.up_btn)
-        self.back_btn.setEnabled(bool(self.back_stack))
-        self.up_btn.setEnabled(self.cur_path != PHONE_ROOT)
+        self.back_btn.setEnabled(bool(self.back_stack) or self.cur_path != PHONE_ROOT)
         rel = self.cur_path[len(PHONE_ROOT):].strip("/")
         parts = [("Память телефона", PHONE_ROOT)]
         acc = PHONE_ROOT
@@ -1727,7 +2219,8 @@ class MainWindow(QMainWindow):
             b = button(t, "crumblast" if last else "crumb", fn=lambda _=False, p=p: self.load(p))
             self.crumbs.addWidget(b)
             if not last:
-                sep = label("›", "muted")
+                sep = QLabel()
+                sep.setPixmap(glyph("chev", P["muted"], 14, 2))
                 self.crumbs.addWidget(sep)
         self.crumbs.addStretch(1)
 
@@ -1753,6 +2246,7 @@ class MainWindow(QMainWindow):
     def toggle_view(self):
         self.view.set_tiles(not self.view.tiles)
         self.view_btn.setIcon(QIcon(glyph("list" if self.view.tiles else "tiles", P["accent"])))
+        self.view.viewport().update()
 
     def _sel_files(self):
         return [e for e in self.view.entries() if not e.get("dir")]
@@ -1761,6 +2255,7 @@ class MainWindow(QMainWindow):
         files = self._sel_files()
         n = self.view.count()
         self.count_lbl.setText(f"Выбрано: {len(files)}" if files else f"Объектов: {n}")
+        self.btn_open.setToolTip(self.count_lbl.text())
         self.btn_open.setEnabled(len(files) >= 1)
         self.btn_save.setEnabled(len(files) >= 1)
 
@@ -1775,10 +2270,9 @@ class MainWindow(QMainWindow):
             cur = self.album_box.currentData()
             self.album_box.blockSignals(True)
             self.album_box.clear()
-            self.album_box.addItem(QIcon(glyph("gallery", P["accent"])), f'Все фото и видео  ·  {r.get("total", 0)}', "all")
+            self.album_box.addItem(f'Все фото · {r.get("total", 0)}', "all")
             for a in r.get("albums", []):
-                ic = "cam" if a["name"] == "Camera" else "shot" if "Screenshot" in a["name"] else "folder"
-                self.album_box.addItem(QIcon(glyph(ic, P["accent"])), f'{ru_name(a["name"])}  ·  {a["count"]}', a["id"])
+                self.album_box.addItem(f'{ru_name(a["name"])} · {a["count"]}', a["id"])
             i = self.album_box.findData(cur)
             self.album_box.setCurrentIndex(i if i >= 0 else 0)
             self.album_box.blockSignals(False)
@@ -1810,6 +2304,7 @@ class MainWindow(QMainWindow):
             self.photo_empty.setVisible(not items)
             self.photo_empty.setText("В этом альбоме пусто")
             self.photo_count.setText(f"Фото и видео: {len(items)}")
+            self._photo_sel()
 
         def fail(e):
             self.photo_empty.setText(str(e))
@@ -1819,6 +2314,8 @@ class MainWindow(QMainWindow):
     def _photo_sel(self):
         n = len(self.photos.selectedItems())
         self.photo_count.setText(f"Выбрано: {n}" if n else f"Фото и видео: {self.photos.count()}")
+        self.photo_btn.setEnabled(n > 0)
+        self.photo_btn.setText(f"На ПК · {n}" if n else "На ПК")
 
     # ---------- передачи
 
@@ -1913,33 +2410,45 @@ class MainWindow(QMainWindow):
             it = QListWidgetItem("Передач пока не было")
             self.hist.addItem(it)
             return
-        for h in items[:150]:
-            card = QFrame()
-            card.setObjectName("note")
-            cl = QVBoxLayout(card)
-            cl.setContentsMargins(12, 10, 12, 10)
-            cl.setSpacing(3)
-            arrow = "Телефон → ПК" if h["dir"] == "in" else "ПК → Телефон"
-            cl.addWidget(label(f'{when(h["t"])} · {arrow} · {human(h.get("size") or 0)}', "small"))
+        for n, h in enumerate(items[:150]):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(4, 8, 4, 8)
+            rl.setSpacing(12)
+            ic = QLabel()
+            ic.setPixmap(type_icon({"name": h["name"]}, 36))
+            rl.addWidget(ic, 0, Qt.AlignTop)
+            col = QVBoxLayout()
+            col.setSpacing(2)
             nm = label(h["name"], wrap=True)
-            nm.setStyleSheet("font-weight:600")
-            cl.addWidget(nm)
+            nm.setStyleSheet("font-weight:650; font-size:16px")
+            col.addWidget(nm)
+            arrow = "↓ Получено с телефона" if h["dir"] == "in" else "↑ Отправлено на телефон"
+            col.addWidget(label(f'{arrow} · {human(h.get("size") or 0)} · {when(h["t"])}', "small"))
             local = Path(h.get("local") or "")
-            row = QHBoxLayout()
-            ob = button("Открыть", fn=lambda _=False, p=local: open_local(p) if p.exists() else None)
-            fb = button("Показать в папке", fn=lambda _=False, p=local: show_in_folder(p))
-            ob.setEnabled(local.exists())
-            fb.setEnabled(local.exists())
-            row.addWidget(ob)
-            row.addWidget(fb)
-            if h["dir"] == "out" and local.exists():
-                row.addWidget(button("Повторить", fn=lambda _=False, p=local: self.upload_paths([p])))
-            row.addStretch(1)
-            cl.addLayout(row)
+            btns = QHBoxLayout()
+            btns.setSpacing(2)
+            if local.exists():
+                btns.addWidget(button("Открыть", "link", fn=lambda _=False, p=local: open_local(p)))
+                btns.addWidget(button("Показать в папке", "link", fn=lambda _=False, p=local: show_in_folder(p)))
+                if h["dir"] == "out":
+                    btns.addWidget(button("Повторить", "link", fn=lambda _=False, p=local: self.upload_paths([p])))
+            else:
+                btns.addWidget(label("файл перемещён или удалён", "small"))
+            btns.addStretch(1)
+            col.addLayout(btns)
+            rl.addLayout(col, 1)
+            wrap = QWidget()
+            wl = QVBoxLayout(wrap)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.setSpacing(0)
+            wl.addWidget(row)
+            if n < min(len(items), 150) - 1:
+                wl.addWidget(sep_line())
             it = QListWidgetItem()
-            it.setSizeHint(QSize(100, card.sizeHint().height() + 8))
+            it.setSizeHint(QSize(100, wrap.sizeHint().height()))
             self.hist.addItem(it)
-            self.hist.setItemWidget(it, card)
+            self.hist.setItemWidget(it, wrap)
 
     # ---------- перетаскивание с ПК на окно
 
@@ -2079,8 +2588,8 @@ class SettingsDialog(QDialog):
         lay.addWidget(label("Тема", "label"))
         self.theme = QComboBox()
         self.theme.addItems(["Тёмная", "Светлая"])
-        self.theme.setCurrentIndex(0 if win.config["theme"] != "light" else 1)
-        self.old_theme = win.config["theme"] or "dark"
+        self.theme.setCurrentIndex(0 if win.config["theme"] == "dark" else 1)
+        self.old_theme = win.config["theme"] or "light"
         lay.addWidget(self.theme)
 
         self.auto = QCheckBox("Запускать вместе с Windows (в фоне, у часов)")
@@ -2222,7 +2731,7 @@ def main():
 
     BRIDGE = Bridge()
     config = Config()
-    apply_theme(config["theme"] or "dark")
+    apply_theme(config["theme"] or "light")
     win = MainWindow(config)
 
     def on_peer():

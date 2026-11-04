@@ -6,17 +6,21 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.ColorStateList
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.google.android.material.button.MaterialButton
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -27,11 +31,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusDot: View
     private lateinit var statusText: TextView
     private lateinit var statusSub: TextView
+    private lateinit var pinCard: View
     private lateinit var pinText: TextView
-    private lateinit var logText: TextView
-    private lateinit var btnFiles: MaterialButton
-    private lateinit var btnNotif: MaterialButton
-    private lateinit var btnBattery: MaterialButton
+    private lateinit var pinRowText: TextView
+    private lateinit var events: LinearLayout
     private var photoUri: Uri? = null
 
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -57,27 +60,24 @@ class MainActivity : AppCompatActivity() {
         statusDot = findViewById(R.id.statusDot)
         statusText = findViewById(R.id.statusText)
         statusSub = findViewById(R.id.statusSub)
+        pinCard = findViewById(R.id.pinCard)
         pinText = findViewById(R.id.pinText)
-        logText = findViewById(R.id.logText)
-        btnFiles = findViewById(R.id.btnFiles)
-        btnNotif = findViewById(R.id.btnNotif)
-        btnBattery = findViewById(R.id.btnBattery)
+        pinRowText = findViewById(R.id.pinRowText)
+        events = findViewById(R.id.events)
 
-        findViewById<MaterialButton>(R.id.btnNewPin).setOnClickListener { Prefs.newPin(this); refresh() }
-        findViewById<MaterialButton>(R.id.btnSend).setOnClickListener {
-            if (needPc()) pickFiles.launch(arrayOf("*/*"))
-        }
-        findViewById<MaterialButton>(R.id.btnPhoto).setOnClickListener { if (needPc()) photo() }
-        btnFiles.setOnClickListener { open(Perms.allFilesIntent(this)) }
-        btnNotif.setOnClickListener {
+        findViewById<View>(R.id.btnSend).setOnClickListener { if (needPc()) pickFiles.launch(arrayOf("*/*")) }
+        findViewById<View>(R.id.btnPhoto).setOnClickListener { if (needPc()) photo() }
+        findViewById<View>(R.id.rowFiles).setOnClickListener { open(Perms.allFilesIntent(this)) }
+        findViewById<View>(R.id.rowNotif).setOnClickListener {
             if (Build.VERSION.SDK_INT >= 33) askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        btnBattery.setOnClickListener { open(Perms.batteryIntent(this)) }
-        findViewById<MaterialButton>(R.id.btnAutostart).setOnClickListener {
+        findViewById<View>(R.id.rowBattery).setOnClickListener { open(Perms.batteryIntent(this)) }
+        findViewById<View>(R.id.rowAutostart).setOnClickListener {
             for (i in Perms.autostartIntents(this)) {
                 try { startActivity(i); return@setOnClickListener } catch (_: Exception) {}
             }
         }
+        findViewById<View>(R.id.rowPin).setOnClickListener { Prefs.newPin(this); refresh() }
 
         if (!Perms.hasNotifications(this) && Build.VERSION.SDK_INT >= 33) {
             askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -122,13 +122,13 @@ class MainActivity : AppCompatActivity() {
     private fun send(uris: List<Uri>) {
         Toast.makeText(this, "Отправляю на ПК: ${uris.size} шт.…", Toast.LENGTH_SHORT).show()
         Sender.sendAll(this, uris) { r ->
-            val msg = Sender.message(r)
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+            Toast.makeText(this, Sender.message(r), Toast.LENGTH_LONG).show()
             refresh()
         }
     }
 
     private fun color(id: Int) = ContextCompat.getColor(this, id)
+    private fun dp(v: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
 
     private fun refresh() {
         val ip = LinkService.localIp()
@@ -137,28 +137,105 @@ class MainActivity : AppCompatActivity() {
         val (dot, title) = when {
             ip == null -> R.color.err to "Нет Wi-Fi"
             !LinkService.running -> R.color.err to "Связь выключена"
-            pc != null && recent -> R.color.ok to "На связи с «$pc»"
-            pc != null -> R.color.warn to "ПК «$pc» сейчас не на связи"
+            pc != null && recent -> R.color.ok to "На связи с $pc"
+            pc != null -> R.color.warn to "$pc не на связи"
             else -> R.color.warn to "Ждёт подключения ПК"
         }
         statusDot.backgroundTintList = ColorStateList.valueOf(color(dot))
         statusText.text = title
         val queued = Outbox.count(this)
-        statusSub.text = (if (ip != null) "Телефон в сети: $ip" else "Подключитесь к той же сети Wi-Fi, что и компьютер") +
+        statusSub.text = (if (ip != null) "Wi-Fi · $ip" else "Подключитесь к той же сети, что и компьютер") +
             (if (queued > 0) "\nЖдут отправки на ПК: $queued" else "")
-        pinText.text = Prefs.pin(this).chunked(3).joinToString(" ")
+        val pin = Prefs.pin(this).chunked(3).joinToString(" ")
+        pinText.text = pin
+        pinCard.visibility = if (Prefs.isPaired(this)) View.GONE else View.VISIBLE
+        pinRowText.text = "Код для другого ПК: $pin"
 
-        fun mark(b: MaterialButton, ok: Boolean, text: String) {
-            b.text = if (ok) "✓  $text" else "$text  →"
-            b.setTextColor(color(if (ok) R.color.ok else R.color.text))
-            b.isEnabled = !ok
+        fun state(id: Int, ok: Boolean) {
+            val t = findViewById<TextView>(id)
+            t.text = if (ok) "✓" else "Включить ›"
+            t.setTextColor(color(if (ok) R.color.ok else R.color.accent))
+            t.textSize = if (ok) 20f else 16f
         }
-        mark(btnFiles, Perms.hasAllFiles(), "Доступ ко всем файлам")
-        mark(btnNotif, Perms.hasNotifications(this), "Уведомления")
-        mark(btnBattery, Perms.ignoresBattery(this), "Работа в фоне без ограничений")
+        state(R.id.stFiles, Perms.hasAllFiles())
+        state(R.id.stNotif, Perms.hasNotifications(this))
+        state(R.id.stBattery, Perms.ignoresBattery(this))
 
-        val ev = Prefs.events(this)
-        logText.text = if (ev.isEmpty()) "Пока ничего не передавали" else ev.joinToString("\n")
-        logText.setTextColor(color(if (ev.isEmpty()) R.color.text2 else R.color.text))
+        fillEvents()
+    }
+
+    /** «Последние передачи» — как в макете: цветной значок, имя, направление, время. */
+    private fun fillEvents() {
+        events.removeAllViews()
+        val list = Prefs.events(this).filter { it.kind != "info" }.take(8)
+        if (list.isEmpty()) {
+            events.addView(TextView(this).apply {
+                text = "Пока ничего не передавали"
+                setTextColor(color(R.color.text2))
+                textSize = 16f
+                setPadding(dp(18f).toInt(), dp(16f).toInt(), dp(18f).toInt(), dp(16f).toInt())
+            })
+            return
+        }
+        list.forEachIndexed { i, e ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16f).toInt(), dp(12f).toInt(), dp(16f).toInt(), dp(12f).toInt())
+            }
+            row.addView(fileBadge(e.text), LinearLayout.LayoutParams(dp(42f).toInt(), dp(48f).toInt()))
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(this).apply {
+                text = e.text
+                setTextColor(color(R.color.text))
+                textSize = 17f
+                setTypeface(typeface, Typeface.BOLD)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            })
+            col.addView(TextView(this).apply {
+                text = if (e.kind == "out") "↑ Отправлено на ПК" else "↓ Получено с ПК"
+                setTextColor(color(R.color.text2))
+                textSize = 14f
+            })
+            row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(14f).toInt(); marginEnd = dp(8f).toInt()
+            })
+            row.addView(TextView(this).apply {
+                text = Prefs.timeText(e.time)
+                setTextColor(color(R.color.text2))
+                textSize = 14f
+            })
+            events.addView(row)
+            if (i < list.size - 1) {
+                events.addView(View(this).apply { setBackgroundColor(color(R.color.line)) },
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1f).toInt()).apply {
+                        marginStart = dp(72f).toInt()
+                    })
+            }
+        }
+    }
+
+    private fun fileBadge(name: String): TextView {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        val c = when (ext) {
+            "step", "stp", "igs", "iges", "f3d", "sldprt" -> 0xFFAF52DE
+            "stl", "3mf", "obj" -> 0xFFFF9500
+            "nc", "tap", "cnc", "ngc", "gcode", "mpf" -> 0xFF34C759
+            "dxf", "dwg" -> 0xFF30B0C7
+            "jpg", "jpeg", "png", "heic", "webp", "gif" -> 0xFF32ADE6
+            "mp4", "mov", "3gp" -> 0xFFFF2D55
+            "pdf" -> 0xFFFF3B30
+            "zip", "rar", "7z" -> 0xFF8E8E93
+            else -> 0xFF8E8E93
+        }.toInt()
+        return TextView(this).apply {
+            text = if (ext.isEmpty()) "•" else ext.uppercase().take(4)
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = if (text.length > 3) 10f else 12f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply { setColor(c); cornerRadius = dp(9f) }
+        }
     }
 }

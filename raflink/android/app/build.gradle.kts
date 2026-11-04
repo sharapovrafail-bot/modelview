@@ -11,8 +11,8 @@ android {
         applicationId = "ru.sharapov.raflink"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.3.0"
     }
 
     // Постоянный ключ подписи: новые версии ставятся поверх старых без удаления.

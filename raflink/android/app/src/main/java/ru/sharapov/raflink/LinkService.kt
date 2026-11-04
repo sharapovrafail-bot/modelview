@@ -56,7 +56,7 @@ class LinkService : Service() {
         )
         running = true
         server = HttpServer(this, PORT) { changed() }.also {
-            try { it.start() } catch (e: Exception) { Prefs.addEvent(this, "Ошибка сервера: ${e.message}") }
+            try { it.start() } catch (e: Exception) { Prefs.addEvent(this, "info", "Ошибка сервера: ${e.message}") }
         }
         registerNsd()
         @Suppress("DEPRECATION")
