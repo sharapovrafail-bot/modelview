@@ -237,13 +237,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          for i in 1 2 3; do gh release delete rafchat-latest --yes --cleanup-tag && break || sleep 10; done
-          gh release view rafchat-latest >/dev/null 2>&1 && { echo "старый релиз не удалился"; exit 1; } || true
-          for i in 1 2 3; do gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe \
-            --target "${{ github.sha }}" \
-            --title "RafChat — чат и файлы по локальной сети (последняя сборка)" \
-            --notes "RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — приложение для Android. RafChat-*-iOS-unsigned.ipa — для iPhone (ставится через Sideloadly). Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md." \
-            --prerelease && break || sleep 15; done
+          NOTES="RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — Android. RafChat-*-mac-*.dmg — Mac (arm64 — Apple M, x64 — Intel). RafChat-*-iOS-unsigned.ipa — iPhone (через Sideloadly). Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md."
+          if gh release view rafchat-latest >/dev/null 2>&1; then
+            # релиз не пересоздаём: файлы Mac и iPhone от прошлой сборки остаются, пока собираются новые
+            for a in $(gh release view rafchat-latest --json assets -q '.assets[].name' | grep -E '\.(apk|exe)$' || true); do
+              gh release delete-asset rafchat-latest "$a" --yes || true
+            done
+            for i in 1 2 3; do gh release upload rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe --clobber && break || sleep 15; done
+            gh release edit rafchat-latest --target "${{ github.sha }}" --notes "$NOTES" --prerelease || true
+          else
+            for i in 1 2 3; do gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe \
+              --target "${{ github.sha }}" --title "RafChat — корпоративный чат (последняя сборка)" --notes "$NOTES" \
+              --prerelease && break || sleep 15; done
+          fi
           gh release view rafchat-latest >/dev/null
 
   ios-release:
@@ -259,6 +265,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          for a in $(gh release view rafchat-latest --json assets -q '.assets[].name' | grep -E '\.ipa$' || true); do
+            gh release delete-asset rafchat-latest "$a" --yes || true
+          done
           for i in 1 2 3; do gh release upload rafchat-latest out/*.ipa --clobber && break || sleep 15; done
 
   mac-release:
@@ -276,4 +285,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           ls -la out
+          for a in $(gh release view rafchat-latest --json assets -q '.assets[].name' | grep -E '\.dmg$' || true); do
+            gh release delete-asset rafchat-latest "$a" --yes || true
+          done
           for i in 1 2 3; do gh release upload rafchat-latest out/*.dmg --clobber && break || sleep 15; done
