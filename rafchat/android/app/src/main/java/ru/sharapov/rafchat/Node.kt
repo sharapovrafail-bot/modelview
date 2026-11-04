@@ -144,6 +144,7 @@ object Node {
         val raw = JSONObject()
             .put("app", "RafChat").put("v", 1).put("id", id).put("name", Prefs.name(ctx))
             .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android").put("ask", ask).put("bye", bye)
+            .put("srv", Prefs.server(ctx))
             .toString()
         return JSONObject().put("d", raw).put("s", sign(raw.toByteArray())).toString().toByteArray()
     }
@@ -209,11 +210,20 @@ object Node {
     }
 
     fun profile(): JSONObject = JSONObject().put("app", "RafChat").put("id", id).put("name", Prefs.name(ctx))
-        .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android")
+        .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android").put("srv", Prefs.server(ctx))
+
+    /** Адрес сервера расходится сам: если у нас он не задан, а у коллеги из нашей организации есть — берём. */
+    private fun adoptServer(srv: String) {
+        if (srv.isNotBlank() && Prefs.server(ctx).isBlank()) {
+            Prefs.setServer(ctx, srv.trim())
+            changed()
+        }
+    }
 
     /** Запомнить участника (маяк, сообщение или ответ на /ping). Возвращает true, если он только что появился в сети. */
     @Synchronized
     private fun upsert(d: JSONObject, ip: String): Boolean {
+        adoptServer(d.optString("srv", ""))
         val pid = d.getString("id")
         val prev = db.peer(pid)
         val wasOnline = prev?.lan == true

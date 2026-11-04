@@ -11,8 +11,8 @@ android {
         applicationId = "ru.sharapov.rafchat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.2.1"
     }
 
     // Постоянный ключ подписи: новые версии ставятся поверх старых без удаления.

@@ -1,3 +1,4 @@
 PySide6-Essentials>=6.7
 ifaddr>=0.2
 cryptography>=42
+paramiko>=3.4

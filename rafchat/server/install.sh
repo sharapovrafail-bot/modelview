@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Установка RafChat Relay на VPS (Ubuntu/Debian). Запуск от root:
+# Установка RafChat Relay на VPS (Ubuntu/Debian). Обычно его запускает сама программа RafChat на ПК
+# (⚙ → «Установить сервер на VPS…»). Вручную, от root:
 #   curl -fsSL https://raw.githubusercontent.com/sharapovrafail-bot/modelview/claude/adoring-edison-95p0fr/rafchat/server/install.sh | sudo bash
 # Повторный запуск обновляет сервер. Ваш VPN и другие службы не затрагиваются.
 set -euo pipefail
@@ -14,9 +15,17 @@ if ! command -v python3 >/dev/null 2>&1; then
   (apt-get update -qq && apt-get install -y -qq python3) || (yum install -y python3) || (dnf install -y python3)
 fi
 
+if ! command -v curl >/dev/null 2>&1; then
+  (apt-get update -qq && apt-get install -y -qq curl) || (yum install -y curl) || (dnf install -y curl)
+fi
+
 id rafchat >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin rafchat
 mkdir -p /opt/rafchat /var/lib/rafchat
-curl -fsSL "$SRC" -o /opt/rafchat/rafchat_relay.py
+if [ -n "${RAFCHAT_RELAY_SRC:-}" ] && [ -f "$RAFCHAT_RELAY_SRC" ]; then
+  cp "$RAFCHAT_RELAY_SRC" /opt/rafchat/rafchat_relay.py          # привезла программа RafChat с ПК
+else
+  curl -fsSL "$SRC" -o /opt/rafchat/rafchat_relay.py
+fi
 chown -R rafchat:rafchat /var/lib/rafchat
 
 cat > /etc/systemd/system/rafchat-relay.service <<EOF
@@ -48,6 +57,11 @@ systemctl restart rafchat-relay
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
   ufw allow "${PORT}/tcp" >/dev/null && echo "== ufw: порт ${PORT}/tcp открыт"
 fi
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C INPUT -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null || \
+    { iptables -I INPUT -p tcp --dport "${PORT}" -j ACCEPT && echo "== iptables: порт ${PORT}/tcp открыт"; }
+  command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+fi
 
 sleep 1
 if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null; then
@@ -56,6 +70,7 @@ if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null; then
   echo "== Готово. RafChat Relay работает."
   echo "   В RafChat на каждом устройстве: ⚙ → «Профиль и сеть» → «Сервер (через интернет)»:"
   echo "       ${IP}:${PORT}"
+  echo "RAFCHAT_ADDRESS=${IP}:${PORT}"
   echo "   Если устройства не подключаются — откройте TCP-порт ${PORT} в панели хостинга (облачный брандмауэр)."
 else
   echo "!! Сервер не ответил. Журнал: journalctl -u rafchat-relay -n 50"

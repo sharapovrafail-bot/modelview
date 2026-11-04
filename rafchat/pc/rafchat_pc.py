@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.2.0"
+APP_VER = "0.2.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -281,7 +281,7 @@ class Node(QObject):
     # ---------- маяк «я здесь»
     def _beacon_payload(self, ask=False, bye=False) -> bytes:
         d = {"app": "RafChat", "v": 1, "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
-             "port": TCP_PORT, "plat": "pc", "ask": ask, "bye": bye}
+             "port": TCP_PORT, "plat": "pc", "ask": ask, "bye": bye, "srv": self.cfg.get("server", "")}
         raw = json.dumps(d, ensure_ascii=False, sort_keys=True)
         return json.dumps({"d": raw, "s": self.sign(raw.encode())}, ensure_ascii=False).encode()
 
@@ -341,10 +341,19 @@ class Node(QObject):
 
     def profile(self):
         return {"app": "RafChat", "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
-                "port": TCP_PORT, "plat": "pc"}
+                "port": TCP_PORT, "plat": "pc", "srv": self.cfg.get("server", "")}
+
+    def adopt_server(self, srv):
+        """Адрес сервера расходится сам: если у нас он не задан, а у коллеги из нашей организации есть — берём."""
+        srv = (srv or "").strip()
+        if srv and not (self.cfg.get("server") or "").strip():
+            self.cfg["server"] = srv
+            save_cfg(self.cfg)
+            self.peers_changed.emit()
 
     def _upsert(self, d, ip):
         """Запомнить участника (из маяка, сообщения или ответа на /ping). Возвращает (был ли известен, был ли в сети)."""
+        self.adopt_server(d.get("srv"))
         prev = self.store.q("SELECT last_seen, name, dept FROM peers WHERE id=?", (d["id"],), one=True)
         was_online = bool(prev and time.time() - (prev[0] or 0) < ONLINE_SEC)
         self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen) VALUES(?,?,?,?,?,?,?) "
@@ -980,6 +989,7 @@ class ChatWindow(QMainWindow):
         gb = button("", "icon", icon="gear", tip="Настройки", color=P["muted"])
         gm = QMenu(gb)
         gm.addAction("Профиль и сеть…", self.settings)
+        gm.addAction("Установить сервер на VPS…", self.setup_server)
         gm.addAction("Папка с файлами", lambda: open_local(self._downloads()))
         gm.addSeparator()
         gm.addAction(f"О программе RafChat {APP_VER}", self.about)
@@ -1354,6 +1364,13 @@ class ChatWindow(QMainWindow):
                                     "после перезапуска.")
             self.me_lbl.setText(self._me_text())
 
+    def setup_server(self):
+        d = ServerSetupDialog(self.cfg, self)
+        if d.exec() and d.address:
+            self.cfg["server"] = d.address
+            save_cfg(self.cfg)
+            self._refresh_timer.start()
+
     def _me_text(self):
         return f"Вы: {self.cfg['name']}" + (f" · {self.cfg['dept']}" if self.cfg.get("dept") else "")
 
@@ -1362,6 +1379,141 @@ class ChatWindow(QMainWindow):
                           f"<h2>RafChat {APP_VER}</h2><p>Чат и передача файлов по локальной сети организации — "
                           f"без сервера и интернета.</p><p>Автор: <b>{APP_AUTHOR}</b><br>"
                           f"<a href='mailto:{APP_EMAIL}'>{APP_EMAIL}</a><br>{APP_COPYRIGHT}. Все права защищены.</p>")
+
+
+def server_files() -> tuple[Path, Path]:
+    """Файлы сервера, которые программа везёт с собой (в сборке — рядом с программой)."""
+    base = Path(getattr(sys, "_MEIPASS", "")) / "server" if getattr(sys, "frozen", False) \
+        else Path(__file__).resolve().parent.parent / "server"
+    return base / "rafchat_relay.py", base / "install.sh"
+
+
+class ServerSetupDialog(QDialog):
+    """Установка сервера-ретранслятора на VPS по SSH — без захода в консоль хостинга."""
+    log_line = Signal(str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.address = ""
+        self.setWindowTitle("Установка сервера RafChat на VPS")
+        self.setMinimumSize(560, 560)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(8)
+        lay.addWidget(label("Сервер для работы через интернет", "h2"))
+        lay.addWidget(label("RafChat сам подключится к вашему VPS по SSH, поставит сервер, откроет порт 47888 "
+                            "и проверит работу. Пароль никуда не сохраняется. VPN и другие службы на сервере "
+                            "не затрагиваются.", "muted", wrap=True))
+        c, cl = card(lay, (16, 12, 16, 12), 6)
+        row = QHBoxLayout()
+        self.host = QLineEdit()
+        self.host.setPlaceholderText("IP-адрес VPS, например 185.12.34.56")
+        self.sshport = QLineEdit("22")
+        self.sshport.setFixedWidth(70)
+        row.addWidget(self.host, 1)
+        row.addWidget(self.sshport)
+        cl.addWidget(label("Адрес VPS и порт SSH", "label"))
+        cl.addLayout(row)
+        cl.addWidget(label("Логин", "label"))
+        self.user = QLineEdit("root")
+        cl.addWidget(self.user)
+        cl.addWidget(label("Пароль (из письма Fornex / панели управления)", "label"))
+        self.pw = QLineEdit()
+        self.pw.setEchoMode(QLineEdit.Password)
+        self.pw.setPlaceholderText("если вход по ключу SSH — оставьте пустым")
+        cl.addWidget(self.pw)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setPlaceholderText("Здесь будет ход установки…")
+        self.log.setStyleSheet(f"background:{P['surface']}; border-radius:12px; font-family:Consolas,monospace;"
+                               f"font-size:12px; padding:8px")
+        lay.addWidget(self.log, 1)
+        self.go = button("Установить", "primary", fn=self.start)
+        lay.addWidget(self.go)
+        self.log_line.connect(self.log.appendPlainText)
+        self.finished_ok.connect(self._ok)
+        self.failed.connect(self._fail)
+
+    def start(self):
+        host = self.host.text().strip()
+        if not host:
+            self.log.appendPlainText("Укажите IP-адрес VPS.")
+            return
+        self.go.setEnabled(False)
+        self.go.setText("Устанавливаю…")
+        self.log.clear()
+        args = (host, int(self.sshport.text() or 22), self.user.text().strip() or "root", self.pw.text())
+        threading.Thread(target=self._work, args=args, daemon=True).start()
+
+    def _work(self, host, port, user, pw):
+        try:
+            import paramiko
+            import shlex
+            relay, inst = server_files()
+            self.log_line.emit(f"Подключаюсь к {user}@{host}:{port}…")
+            cli = paramiko.SSHClient()
+            cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            cli.connect(host, port=port, username=user, password=pw or None, timeout=20,
+                        allow_agent=not pw, look_for_keys=not pw)
+            self.log_line.emit("Подключено. Загружаю сервер…")
+            sftp = cli.open_sftp()
+            for local, remote in ((relay, "/tmp/rafchat_relay.py"), (inst, "/tmp/rafchat_install.sh")):
+                with sftp.open(remote, "wb") as fh:
+                    fh.write(local.read_bytes().replace(b"\r\n", b"\n"))
+            sftp.close()
+            cmd = "RAFCHAT_RELAY_SRC=/tmp/rafchat_relay.py bash /tmp/rafchat_install.sh"
+            if user != "root":
+                cmd = (f"echo {shlex.quote(pw)} | sudo -S -p '' env RAFCHAT_RELAY_SRC=/tmp/rafchat_relay.py "
+                       f"bash /tmp/rafchat_install.sh")
+            _, out, _ = cli.exec_command(cmd + " 2>&1", get_pty=True)
+            address = ""
+            for line in iter(out.readline, ""):
+                line = line.rstrip()
+                if line.startswith("RAFCHAT_ADDRESS="):
+                    address = line.split("=", 1)[1].strip()
+                    continue
+                if line:
+                    self.log_line.emit(line)
+            code = out.channel.recv_exit_status()
+            cli.close()
+            if code != 0:
+                raise RuntimeError(f"установка завершилась с ошибкой (код {code})")
+            address = f"{host}:{address.rsplit(':', 1)[-1] if address else 47888}"
+            self.log_line.emit(f"Проверяю доступ к {address} отсюда…")
+            h, p_ = address.rsplit(":", 1)
+            c = http.client.HTTPConnection(h, int(p_), timeout=8)
+            c.request("GET", "/")
+            ok = c.getresponse().status == 200
+            c.close()
+            if not ok:
+                raise RuntimeError("сервер установлен, но с ПК недоступен — откройте TCP-порт 47888 "
+                                   "в панели Fornex (брандмауэр)")
+            self.finished_ok.emit(address)
+        except Exception as e:  # noqa
+            msg = str(e) or type(e).__name__
+            if "Authentication" in type(e).__name__ or "authentication" in msg.lower():
+                msg = "неверный логин или пароль"
+            elif isinstance(e, (socket.timeout, TimeoutError)) or "timed out" in msg:
+                msg = "VPS не отвечает — проверьте IP-адрес и порт SSH"
+            self.failed.emit(msg)
+
+    def _ok(self, address):
+        self.address = address
+        self.log.appendPlainText(f"\n✓ Готово. Сервер работает: {address}\n"
+                                 "Адрес сохранён. Остальные ПК и телефоны организации получат его сами, "
+                                 "как только окажутся в одной сети с этим ПК.")
+        self.go.setEnabled(True)
+        self.go.setText("Закрыть")
+        self.go.clicked.disconnect()
+        self.go.clicked.connect(self.accept)
+
+    def _fail(self, msg):
+        self.log.appendPlainText(f"\n✗ Не получилось: {msg}")
+        self.go.setEnabled(True)
+        self.go.setText("Попробовать ещё раз")
 
 
 class ProfileDialog(QDialog):
