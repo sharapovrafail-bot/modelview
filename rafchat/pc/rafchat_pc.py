@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.5.2"
+APP_VER = "0.5.3"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -90,7 +90,7 @@ def avatar(name: str, key: str, size=40, group=False, photo: str | None = None) 
         p.drawPixmap(QRectF(0, 0, size, size).toRect(), img)
         p.end()
         return pm
-    p.setBrush(QColor(P["accent"] if group else avatar_color(key)))
+    p.setBrush(QColor(ORANGE if group else avatar_color(key)))
     p.drawEllipse(QRectF(0, 0, size, size))
     if group:
         g = int(size * 0.56)
@@ -1210,11 +1210,23 @@ class MsgsArea(QWidget):
         p.end()
 
 
+ORANGE = "#FF8A00"          # «Общий чат» организации выделен оранжевым
+
+
+def company() -> str:
+    return defaults().get("company", "")
+
+
 class ChatRow(QWidget):
-    def __init__(self, title, preview, when, unread, online, pix):
+    def __init__(self, title, preview, when, unread, online, pix, caption=""):
         super().__init__()
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 8)
+        if caption:                                   # «Общий чат»: оранжевая подложка, подпись организации
+            self.setObjectName("corp_row")
+            self.setAttribute(Qt.WA_StyledBackground, True)
+            self.setStyleSheet("QWidget#corp_row { background: #FFF1E0; border: 1px solid #FFD199; border-radius: 12px; }"
+                               "QWidget#corp_row QLabel { background: transparent; }")
         lay.setSpacing(10)
         av = QLabel()
         av.setPixmap(pix)
@@ -1231,11 +1243,19 @@ class ChatRow(QWidget):
         from PySide6.QtGui import QFontMetrics
         t.setText(QFontMetrics(f).elidedText(title, Qt.ElideRight, 170 if when else 210))
         t.setToolTip(title)
+        if caption:
+            t.setStyleSheet("font-weight:700; font-size:15px; color:#D96F00")
         top.addWidget(t, 1)
         w = QLabel(when)
         w.setStyleSheet(f"color:{P['muted']}; font-size:12px")
         top.addWidget(w)
         col.addLayout(top)
+        if caption:
+            cp = QLabel(caption)
+            cp.setStyleSheet("color:#D96F00; font-size:11px; font-weight:600")
+            cp.setWordWrap(True)
+            cp.setToolTip(caption)
+            col.addWidget(cp)
         bot = QHBoxLayout()
         pv = QLabel()
         pv.setStyleSheet(f"color:{P['muted']}; font-size:13px")
@@ -1872,8 +1892,10 @@ class ChatWindow(QMainWindow):
                 when = ""
             it = QListWidgetItem()
             it.setData(ROLE, key)
-            row = ChatRow(title, preview, when, unread if key != self.chat else 0, on, pix)
-            it.setSizeHint(QSize(100, 64))
+            cap = ("Корпоративный · " + company()) if key == ALL and company() else \
+                ("Корпоративный чат организации" if key == ALL else "")
+            row = ChatRow(title, preview, when, unread if key != self.chat else 0, on, pix, cap)
+            it.setSizeHint(QSize(100, 80 if cap else 64))
             self.chats.addItem(it)
             self.chats.setItemWidget(it, row)
             if key == cur:
@@ -1988,8 +2010,8 @@ class ChatWindow(QMainWindow):
             peers = self.node.peers()
             on = sum(p["online"] for p in peers)
             self.head_av.setPixmap(avatar("", "", 38, group=True))
-            self.head_title.setText("Общий чат")
-            self.head_sub.setText(f"Участников: {len(peers) + 1}, в сети: {on + 1}")
+            self.head_title.setText("Общий чат" + (f" · {company()}" if company() else ""))
+            self.head_sub.setText(f"Корпоративный чат · участников: {len(peers) + 1}, в сети: {on + 1}")
         else:
             p = self.node.peer(self.chat)
             if not p:

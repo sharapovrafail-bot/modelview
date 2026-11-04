@@ -221,6 +221,7 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { startActivity(Intent(this@MainActivity, ChatActivity::class.java).putExtra("chat", key)) }
             }
             row.setOnLongClickListener { askDelete(key, title); true }
+            if (key == Node.ALL) row.background = GradientDrawableCompat.corp(this)
             row.addView(Ui.avatar(this, title, key, 48f, online && key != Node.ALL, key == Node.ALL,
                 if (key == Node.ALL) null else Node.avatarFile(key)))
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -228,13 +229,19 @@ class MainActivity : AppCompatActivity() {
             val unread = Node.db.unread(key)
             val line1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             line1.addView(TextView(this).apply {
-                text = title; textSize = 17f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.TEXT)
+                text = title; textSize = 17f; setTypeface(typeface, Typeface.BOLD)
+                setTextColor(if (key == Node.ALL) Ui.ORANGE_TEXT else Ui.TEXT)
                 maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             }, LinearLayout.LayoutParams(0, -2, 1f))
             line1.addView(TextView(this).apply {
                 text = last?.let { Ui.shortWhen(it.ts) } ?: ""; textSize = 13f; setTextColor(Ui.MUTED)
             })
             col.addView(line1)
+            if (key == Node.ALL) col.addView(TextView(this).apply {
+                text = "Корпоративный" + (if (Ui.COMPANY.isNotEmpty()) " · " + Ui.COMPANY else " чат организации")
+                textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.ORANGE_TEXT); maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
             val line2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val preview = if (last == null) {
                 if (key == Node.ALL) "Сообщения для всех" else if (online) "в сети" else "не в сети"
@@ -263,5 +270,12 @@ class MainActivity : AppCompatActivity() {
         val srv = when (Node.relayOk) { true -> "\nСервер: на связи ✓"; false -> "\nСервер: нет связи"; null -> "" }
         status.text = "В сети: $on из ${peers.size}" + (if (q > 0) " · в очереди: $q" else "") +
             "\nТелефон в сети: ${Node.localIp() ?: "нет Wi-Fi"}" + srv
+    }
+}
+
+/** Оранжевая подложка строки «Общий чат». */
+private object GradientDrawableCompat {
+    fun corp(ctx: android.content.Context) = android.graphics.drawable.GradientDrawable().apply {
+        setColor(0xFFFFF1E0.toInt()); setStroke(Ui.dpi(ctx, 1f), 0xFFFFD199.toInt()); cornerRadius = Ui.dp(ctx, 16f)
     }
 }

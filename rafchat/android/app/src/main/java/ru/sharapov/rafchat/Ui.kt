@@ -26,6 +26,10 @@ object Ui {
     const val OK = 0xFF34C759.toInt()
     const val LINE = 0xFFE5E5EA.toInt()
     const val SURFACE = 0xFFFFFFFF.toInt()
+    /** «Общий чат» организации выделен оранжевым */
+    const val ORANGE = 0xFFFF8A00.toInt()
+    const val ORANGE_TEXT = 0xFFD96F00.toInt()
+    val COMPANY: String get() = BuildConfig.COMPANY
     private val COLORS = intArrayOf(
         0xFFFF9500.toInt(), 0xFF34C759.toInt(), 0xFFAF52DE.toInt(), 0xFFFF2D55.toInt(),
         0xFF5AC8FA.toInt(), 0xFFFF3B30.toInt(), 0xFF5856D6.toInt(), 0xFF30B0C7.toInt()
@@ -67,7 +71,7 @@ object Ui {
             textSize = sizeDp * 0.36f
             setTypeface(typeface, Typeface.BOLD)
             background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL; setColor(if (group) ACCENT else color(key))
+                shape = GradientDrawable.OVAL; setColor(if (group) ORANGE else color(key))
             }
         }
         f.addView(t, FrameLayout.LayoutParams(size, size))

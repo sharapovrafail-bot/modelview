@@ -6,6 +6,9 @@ plugins {
 // адрес сервера организации, встроенный в установщик (rafchat/defaults.json)
 val defaultServer: String = Regex("\"server\"\\s*:\\s*\"([^\"]*)\"")
     .find(rootProject.file("../defaults.json").takeIf { it.exists() }?.readText() ?: "")?.groupValues?.get(1) ?: ""
+// название организации для «Общего чата»
+val company: String = Regex("\"company\"\\s*:\\s*\"([^\"]*)\"")
+    .find(rootProject.file("../defaults.json").takeIf { it.exists() }?.readText(Charsets.UTF_8) ?: "")?.groupValues?.get(1) ?: ""
 
 android {
     namespace = "ru.sharapov.rafchat"
@@ -15,9 +18,10 @@ android {
         applicationId = "ru.sharapov.rafchat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "0.5.2"
+        versionCode = 18
+        versionName = "0.5.3"
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
+        buildConfigField("String", "COMPANY", "\"$company\"")
     }
 
     // Постоянный ключ подписи: новые версии ставятся поверх старых без удаления.

@@ -402,7 +402,9 @@ class ChatActivity : AppCompatActivity() {
         if (chat == Node.ALL) {
             val peers = Node.db.peers()
             title.text = "Общий чат"
-            sub.text = "Участников: ${peers.size + 1}, в сети: ${peers.count { it.online } + 1}"
+            title.setTextColor(Ui.ORANGE_TEXT)
+            sub.text = (if (Ui.COMPANY.isNotEmpty()) "${Ui.COMPANY} · " else "Корпоративный · ") +
+                "участников: ${peers.size + 1}, в сети: ${peers.count { it.online } + 1}"
         } else {
             val p = Node.db.peer(chat)
             title.text = p?.title ?: "?"
