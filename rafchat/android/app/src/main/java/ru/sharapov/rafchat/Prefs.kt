@@ -19,6 +19,8 @@ object Prefs {
     fun dept(ctx: Context) = sp(ctx).getString("dept", "") ?: ""
     fun org(ctx: Context) = sp(ctx).getString("org", "") ?: ""
     fun extra(ctx: Context) = sp(ctx).getString("extra", "") ?: ""
+    fun server(ctx: Context) = sp(ctx).getString("server", "") ?: ""
+    fun setServer(ctx: Context, v: String) = sp(ctx).edit().putString("server", v).apply()
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

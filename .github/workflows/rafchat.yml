@@ -53,7 +53,7 @@ jobs:
         working-directory: rafchat/pc
         run: |
           python make_version.py
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr rafchat_pc.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography rafchat_pc.py
       - name: Проверка запуском и снимок окна
         working-directory: rafchat/pc
         shell: pwsh

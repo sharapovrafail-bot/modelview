@@ -124,7 +124,11 @@ class ChatActivity : AppCompatActivity() {
         } else {
             val p = Node.db.peer(chat)
             title.text = p?.title ?: "?"
-            sub.text = if (p?.online == true) "в сети" else "не в сети — сообщения дойдут, когда появится"
+            sub.text = when {
+                p?.lan == true -> "в сети"
+                p?.relay == true -> "в сети через интернет"
+                else -> "не в сети — сообщения дойдут, когда появится"
+            }
         }
         val history = Node.db.history(chat)
         // перерисовываем переписку, только если в ней что-то изменилось (иначе мешаем набору текста)
@@ -204,6 +208,7 @@ class ChatActivity : AppCompatActivity() {
         var st = ""
         if (me) st = when {
             m.status == "queued" -> "  🕓"
+            m.status == "relay" -> "  ✓ на сервере"
             m.status == "delivered" -> "  ✓✓"
             m.status.contains('/') -> {
                 val a = m.status.substringBefore('/'); val all = m.status.substringAfter('/')

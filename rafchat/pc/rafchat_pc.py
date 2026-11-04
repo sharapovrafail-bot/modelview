@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import http.client
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.1.2"
+APP_VER = "0.2.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -45,6 +46,8 @@ TCP_PORT = int(os.environ.get("RAFCHAT_PORT") or 47801)
 DATA_DIR = Path(os.environ.get("RAFCHAT_HOME") or
                 Path(os.environ.get("APPDATA") or Path.home() / ".config") / "RafChat")
 AUTO_DOWNLOAD = 50 * 1024 * 1024        # файлы до 50 МБ скачиваются сами
+RELAY_FILE_MAX = 50 * 1024 * 1024       # через сервер — файлы до 50 МБ
+RELAY_ONLINE_SEC = 75                   # «в сети через интернет», если опрашивал сервер не позже 75 с назад
 ONLINE_SEC = 15                         # «в сети», если маяк был не позже 15 с назад
 ALL = "all"
 
@@ -111,6 +114,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS outbox(peer TEXT, msg_id TEXT, payload TEXT, PRIMARY KEY(peer, msg_id));
             CREATE TABLE IF NOT EXISTS files(fid TEXT PRIMARY KEY, path TEXT);
             """)
+            try:
+                self.db.execute("ALTER TABLE peers ADD COLUMN relay_seen REAL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             self.db.commit()
 
     def q(self, sql, args=(), one=False):
@@ -131,11 +138,27 @@ class Node(QObject):
         super().__init__()
         self.cfg = cfg
         self.id = cfg["id"]
-        self.key = hashlib.sha256(("RafChat:" + cfg["org"].strip()).encode()).digest()
+        org = cfg["org"].strip()
+        self.key = hashlib.sha256(("RafChat:" + org).encode()).digest()
+        # шифрование «от устройства до устройства» для сервера: сервер видит только шифротекст
+        self.ekey = hashlib.sha256(("RafChat-e2e:" + org).encode()).digest()
+        self.org_id = hashlib.sha256(("RafChat-org:" + org).encode()).hexdigest()[:32]
+        self.relay_ok = None                 # None — сервер не задан, True/False — есть ли связь
+        self._relay_uploaded: set = set()
         self.store = Store(DATA_DIR / "rafchat.db")
         self._downloading: set = set()
         self._wake = threading.Event()
         self.running = True
+
+    # ---------- шифрование для сервера (AES-256-GCM: 12 байт nonce + шифротекст + тег)
+    def enc(self, data: bytes) -> bytes:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        n = os.urandom(12)
+        return n + AESGCM(self.ekey).encrypt(n, data, None)
+
+    def dec(self, blob: bytes) -> bytes:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(self.ekey).decrypt(blob[:12], blob[12:], None)
 
     # ---------- подписи
     def sign(self, data: bytes) -> str:
@@ -246,6 +269,7 @@ class Node(QObject):
         threading.Thread(target=self._beacon_loop, daemon=True).start()
         threading.Thread(target=self._outbox_loop, daemon=True).start()
         threading.Thread(target=self._ping_loop, daemon=True).start()
+        threading.Thread(target=self._relay_loop, daemon=True).start()
 
     def stop(self):
         self.running = False
@@ -365,7 +389,7 @@ class Node(QObject):
             time.sleep(6)
             targets = {}
             for p in self.peers():
-                if p["ip"] and time.time() - p["last_seen"] > 8:
+                if p["ip"] and time.time() - p["lan_seen"] > 8:
                     targets[(p["ip"], p["port"])] = True
             for a in (self.cfg.get("extra") or "").replace(";", ",").replace(" ", ",").split(","):
                 host, _, port = a.strip().partition(":")
@@ -387,9 +411,14 @@ class Node(QObject):
             pass
 
     def peers(self):
-        rows = self.store.q("SELECT id,name,dept,ip,port,plat,last_seen FROM peers")
-        return [dict(id=r[0], name=r[1], dept=r[2], ip=r[3], port=r[4], plat=r[5],
-                     online=time.time() - (r[6] or 0) < ONLINE_SEC, last_seen=r[6] or 0) for r in rows]
+        rows = self.store.q("SELECT id,name,dept,ip,port,plat,last_seen,relay_seen FROM peers")
+        out = []
+        for r in rows:
+            lan = bool(r[3]) and time.time() - (r[6] or 0) < ONLINE_SEC
+            relay = time.time() - (r[7] or 0) < RELAY_ONLINE_SEC
+            out.append(dict(id=r[0], name=r[1], dept=r[2], ip=r[3], port=r[4], plat=r[5], lan=lan, relay=relay,
+                            online=lan or relay, last_seen=max(r[6] or 0, r[7] or 0), lan_seen=r[6] or 0))
+        return out
 
     def peer(self, pid):
         return next((p for p in self.peers() if p["id"] == pid), None)
@@ -431,21 +460,166 @@ class Node(QObject):
         while self.running:
             self._wake.wait(3)
             self._wake.clear()
-            online = {p["id"]: p for p in self.peers() if p["online"]}
+            online = {p["id"]: p for p in self.peers() if p["lan"]}
+            relay = bool(self.server_addr())
             for peer_id, mid, payload in self.store.q("SELECT peer,msg_id,payload FROM outbox"):
                 p = online.get(peer_id)
-                if not p:
-                    continue
-                try:
-                    c, r = self._request(p, "POST", "/msg", payload.encode(), timeout=8)
-                    r.read()
-                    c.close()
-                    if r.status != 200:
+                ok = False
+                if p:                                     # в одной сети — напрямую
+                    try:
+                        c, r = self._request(p, "POST", "/msg", payload.encode(), timeout=8)
+                        r.read()
+                        c.close()
+                        ok = r.status == 200
+                    except OSError:
+                        ok = False
+                    if ok:
+                        self.store.q("DELETE FROM outbox WHERE peer=? AND msg_id=?", (peer_id, mid))
+                        self._delivered(mid)
                         continue
-                except OSError:
-                    continue
-                self.store.q("DELETE FROM outbox WHERE peer=? AND msg_id=?", (peer_id, mid))
-                self._delivered(mid)
+                if relay and self._relay_deliver(peer_id, payload):   # иначе — через сервер
+                    self.store.q("DELETE FROM outbox WHERE peer=? AND msg_id=?", (peer_id, mid))
+                    self._via_relay(mid)
+
+    def _via_relay(self, mid):
+        """Сообщение передано на сервер (✓); «✓✓» — когда получатель подтвердит."""
+        row = self.store.q("SELECT chat,status FROM messages WHERE id=?", (mid,), one=True)
+        if not row:
+            return
+        if row[0] == ALL:
+            return self._delivered(mid)
+        if row[1] != "delivered":
+            self.store.q("UPDATE messages SET status='relay' WHERE id=?", (mid,))
+            self.message.emit(mid, False)
+
+    # ---------- сервер-ретранслятор (работа через интернет)
+    def server_addr(self):
+        s = (self.cfg.get("server") or "").strip().replace("http://", "").rstrip("/")
+        if not s:
+            return None
+        host, _, port = s.partition(":")
+        return host, int(port or 47888)
+
+    def _relay_call(self, method, path, body=None, raw=None, timeout=15):
+        host, port = self.server_addr()
+        c = http.client.HTTPConnection(host, port, timeout=timeout)
+        h = {"X-Org": self.org_id, "X-Node": self.id}
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        if data is not None:
+            h["Content-Type"] = "application/octet-stream" if raw is not None else "application/json"
+        try:
+            c.request(method, path, body=data, headers=h)
+            r = c.getresponse()
+            out = r.read()
+        finally:
+            c.close()
+        if r.status != 200:
+            raise OSError(f"сервер ответил {r.status}")
+        return out
+
+    def _relay_json(self, method, path, body=None, timeout=15):
+        return json.loads(self._relay_call(method, path, body=body, timeout=timeout) or b"{}")
+
+    def _relay_send(self, to, m: dict) -> bool:
+        try:
+            blob = base64.b64encode(self.enc(json.dumps(m, ensure_ascii=False).encode())).decode()
+            self._relay_json("POST", "/r/send", {"to": to, "blob": blob})
+            return True
+        except (OSError, ValueError, http.client.HTTPException):
+            return False
+
+    def _relay_deliver(self, to, payload: str) -> bool:
+        m = json.loads(payload)
+        f = m.get("file")
+        if f and not f.get("relay") and f.get("size", 0) <= RELAY_FILE_MAX:
+            if f["fid"] not in self._relay_uploaded:            # файл — на сервер (зашифрованным)
+                row = self.store.q("SELECT path FROM files WHERE fid=?", (f["fid"],), one=True)
+                if row and Path(row[0]).is_file():
+                    try:
+                        self._relay_call("PUT", "/r/file?" + urlencode({"fid": f["fid"]}),
+                                         raw=self.enc(Path(row[0]).read_bytes()), timeout=300)
+                        self._relay_uploaded.add(f["fid"])
+                    except (OSError, http.client.HTTPException):
+                        return False
+            if f["fid"] in self._relay_uploaded:
+                f["relay"] = True
+        return self._relay_send(to, m)
+
+    def _relay_hello(self):
+        prof = base64.b64encode(self.enc(json.dumps(self.profile(), ensure_ascii=False).encode())).decode()
+        r = self._relay_json("POST", "/r/hello", {"profile": prof})
+        now = r.get("now", time.time())
+        for p in r.get("peers", []):
+            try:
+                d = json.loads(self.dec(base64.b64decode(p["profile"])))
+            except Exception:
+                continue                                    # чужая организация или испорчено
+            if d.get("id") != p["id"] or p["id"] == self.id:
+                continue
+            self._upsert_relay(d, time.time() - (now - p.get("last", 0)))
+
+    def _upsert_relay(self, d, seen):
+        prev = self.store.q("SELECT relay_seen, last_seen FROM peers WHERE id=?", (d["id"],), one=True)
+        was = bool(prev) and (time.time() - max(prev[0] or 0, prev[1] or 0) < RELAY_ONLINE_SEC)
+        if prev:
+            self.store.q("UPDATE peers SET name=COALESCE(?,name), dept=COALESCE(?,dept), relay_seen=MAX(relay_seen,?) "
+                         "WHERE id=?", (d.get("name"), d.get("dept"), seen, d["id"]))
+        else:
+            self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen,relay_seen) VALUES(?,?,?,?,?,?,0,?)",
+                         (d["id"], d.get("name") or "?", d.get("dept") or "", "", int(d.get("port") or 47801),
+                          d.get("plat", ""), seen))
+            self._catch_up(d["id"])
+        if not was and time.time() - seen < RELAY_ONLINE_SEC:
+            self._wake.set()
+            self.peers_changed.emit()
+
+    def _relay_loop(self):
+        last_hello = 0.0
+        while self.running:
+            if not self.server_addr():
+                self.relay_ok = None
+                time.sleep(3)
+                continue
+            try:
+                if time.time() - last_hello > 20:
+                    self._relay_hello()
+                    last_hello = time.time()
+                    if self.relay_ok is not True:
+                        self.relay_ok = True
+                        self._wake.set()
+                        self.peers_changed.emit()
+                items = self._relay_json("GET", "/r/poll?wait=25", timeout=40).get("items", [])
+                if self.relay_ok is not True:
+                    self.relay_ok = True
+                    self._wake.set()
+                    self.peers_changed.emit()
+                acks = []
+                for it in items:
+                    acks.append(it["qid"])
+                    try:
+                        m = json.loads(self.dec(base64.b64decode(it["blob"])))
+                    except Exception:
+                        continue
+                    self._relay_item(m)
+                if acks:
+                    self._relay_json("POST", "/r/ack", {"qids": acks})
+            except (OSError, ValueError, http.client.HTTPException):
+                if self.relay_ok is not False:
+                    self.relay_ok = False
+                    self.peers_changed.emit()
+                time.sleep(5)
+
+    def _relay_item(self, m):
+        if m.get("type") == "ack":                          # получатель подтвердил — ✓✓
+            row = self.store.q("SELECT chat,mine FROM messages WHERE id=?", (m.get("id"),), one=True)
+            if row and row[1] and row[0] != ALL:
+                self.store.q("UPDATE messages SET status='delivered' WHERE id=?", (m["id"],))
+                self.message.emit(m["id"], False)
+            return
+        if not m.get("id") or not m.get("from") or m["from"] == self.id:
+            return
+        self.receive(m, None)
+        self._relay_send(m["from"], {"type": "ack", "id": m["id"], "from": self.id})
 
     def _delivered(self, mid):
         row = self.store.q("SELECT chat,status FROM messages WHERE id=?", (mid,), one=True)
@@ -463,8 +637,11 @@ class Node(QObject):
     # ---------- приём
     def receive(self, m, ip):
         if m.get("from") and m["from"] != self.id:
-            self._upsert({"id": m["from"], "name": m.get("name"), "port": m.get("port") or 47801,
-                          "plat": m.get("plat", "")}, ip)   # пришло сообщение — значит, отправитель в сети
+            d = {"id": m["from"], "name": m.get("name"), "port": m.get("port") or 47801, "plat": m.get("plat", "")}
+            if ip:
+                self._upsert(d, ip)            # пришло сообщение по сети — значит, отправитель в сети
+            else:
+                self._upsert_relay(d, time.time())
         if self.store.q("SELECT 1 FROM messages WHERE id=?", (m["id"],), one=True):
             return                                  # повтор после обрыва — уже есть
         chat = ALL if m.get("to") == ALL else m["from"]
@@ -497,7 +674,17 @@ class Node(QObject):
             part = dest_dir / f".{mid}.part"
             for attempt in range(40):           # ждём отправителя до ~10 минут, продолжая с места обрыва
                 p = self.peer(sender)
-                if p and p["online"]:
+                if not (p and p["lan"]) and f.get("relay") and self.server_addr():
+                    try:                                # отправитель не в нашей сети — берём копию с сервера
+                        data = self.dec(self._relay_call("GET", "/r/file?" + urlencode({"fid": f["fid"]}), timeout=300))
+                        dest.write_bytes(data)
+                        self.store.q("UPDATE messages SET local=? WHERE id=?", (str(dest), mid))
+                        self.file_progress.emit(mid, f["size"], f["size"])
+                        self.message.emit(mid, False)
+                        return
+                    except Exception:
+                        pass
+                if p and p["lan"]:
                     have = part.stat().st_size if part.exists() else 0
                     try:
                         path = "/file?" + urlencode({"fid": f["fid"]})
@@ -718,6 +905,8 @@ class Bubble(QFrame):
             s = m["status"] or ""
             if s == "queued":
                 st = "  🕓 ждёт получателя"
+            elif s == "relay":
+                st = "  ✓ на сервере"
             elif s == "delivered":
                 st = "  ✓✓"
             elif "/" in s:
@@ -917,7 +1106,8 @@ class ChatWindow(QMainWindow):
                 self.chats.setCurrentItem(it)
         self.chats.blockSignals(False)
         q = self.node.queued_count()
-        self.net_lbl.setText(f"В сети: {online} из {len(peers)}" + (f" · в очереди: {q}" if q else "") +
+        srv = {None: "", True: "\nСервер: на связи ✓", False: "\nСервер: нет связи"}[self.node.relay_ok]
+        self.net_lbl.setText(f"В сети: {online} из {len(peers)}" + (f" · в очереди: {q}" if q else "") + srv +
                              f"\nКод организации: {'•' * min(len(self.cfg['org']), 8)}")
         self._update_head()
 
@@ -969,7 +1159,8 @@ class ChatWindow(QMainWindow):
             self.head_av.setPixmap(avatar(p["name"], p["id"], 38))
             self.head_title.setText(p["name"] + (f" · {p['dept']}" if p["dept"] else ""))
             if p["online"]:
-                self.head_sub.setText("в сети" + (" · телефон" if p["plat"] == "android" else ""))
+                kind = {"android": " · телефон", "ios": " · iPhone"}.get(p["plat"], "")
+                self.head_sub.setText(("в сети" if p["lan"] else "в сети через интернет") + kind)
             else:
                 seen = datetime.fromtimestamp(p["last_seen"]).strftime("%d.%m %H:%M") if p["last_seen"] else "—"
                 self.head_sub.setText(f"не в сети, был(а) {seen} — сообщения дойдут, когда появится")
@@ -1159,7 +1350,8 @@ class ChatWindow(QMainWindow):
         if d.exec():
             save_cfg(self.cfg)
             QMessageBox.information(self, "RafChat", "Настройки сохранены. Имя и отдел увидят остальные через "
-                                    "несколько секунд; код организации применится после перезапуска.")
+                                    "несколько секунд, сервер подключится сам; код организации применится "
+                                    "после перезапуска.")
             self.me_lbl.setText(self._me_text())
 
     def _me_text(self):
@@ -1214,6 +1406,12 @@ class ProfileDialog(QDialog):
             self.extra = QLineEdit(cfg.get("extra", ""))
             self.extra.setPlaceholderText("например: 192.168.1.20, 192.168.1.21")
             cl.addWidget(self.extra)
+            cl.addWidget(label("Сервер для работы через интернет (из дома, в дороге)", "label"))
+            self.server = QLineEdit(cfg.get("server", ""))
+            self.server.setPlaceholderText("адрес:порт вашего сервера, например 203.0.113.5:47888")
+            cl.addWidget(self.server)
+            cl.addWidget(label("Одинаковый у всех. Переписка шифруется кодом организации — сервер её не видит.",
+                               "small", wrap=True))
         self.err = label("", "err", wrap=True)
         lay.addWidget(self.err)
         ok = button("Начать" if first else "Сохранить", "primary", fn=self._ok)
@@ -1230,6 +1428,7 @@ class ProfileDialog(QDialog):
         self.cfg.update(name=name[:60], dept=self.dept.text().strip()[:40], org=org)
         if hasattr(self, "extra"):
             self.cfg["extra"] = self.extra.text().strip()
+            self.cfg["server"] = self.server.text().strip()
         self.accept()
 
 

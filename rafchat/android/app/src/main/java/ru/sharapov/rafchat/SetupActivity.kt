@@ -50,6 +50,12 @@ class SetupActivity : AppCompatActivity() {
         org.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
         val extra = field("Адреса ПК, если они не находятся сами", Prefs.extra(this), "например: 192.168.1.20, 192.168.1.21")
         extra.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        val server = field("Сервер для работы через интернет (из дома, в дороге)", Prefs.server(this), "адрес:порт, например 203.0.113.5:47888")
+        server.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        card.addView(TextView(this).apply {
+            text = "Одинаковый у всех. Переписка шифруется кодом организации — сервер её не видит."
+            textSize = 13f; setTextColor(Ui.MUTED); setPadding(0, d(6f), 0, 0)
+        })
         col.addView(card)
         val err = TextView(this).apply { setTextColor(0xFFFF3B30.toInt()); textSize = 15f; setPadding(d(4f), d(10f), 0, 0) }
         col.addView(err)
@@ -64,6 +70,7 @@ class SetupActivity : AppCompatActivity() {
                     else -> {
                         val orgChanged = o != Prefs.org(this@SetupActivity)
                         Prefs.save(this@SetupActivity, n.take(60), dept.text.toString().trim().take(40), o, extra.text.toString().trim())
+                        Prefs.setServer(this@SetupActivity, server.text.toString().trim())
                         if (orgChanged || first) ChatService.restart(this@SetupActivity) else ChatService.start(this@SetupActivity)
                         if (first) startActivity(Intent(this@SetupActivity, MainActivity::class.java))
                         finish()

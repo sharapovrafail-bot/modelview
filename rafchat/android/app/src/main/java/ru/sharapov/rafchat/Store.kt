@@ -8,19 +8,25 @@ import org.json.JSONObject
 
 data class Peer(
     val id: String, val name: String, val dept: String, val ip: String, val port: Int,
-    val plat: String, val lastSeen: Long,
+    val plat: String, val lastSeen: Long, val relaySeen: Long = 0,
 ) {
-    val online get() = System.currentTimeMillis() - lastSeen < Node.ONLINE_MS
+    /** в одной сети (напрямую) */
+    val lan get() = ip.isNotEmpty() && System.currentTimeMillis() - lastSeen < Node.ONLINE_MS
+    /** на связи через сервер (интернет) */
+    val relay get() = System.currentTimeMillis() - relaySeen < Node.RELAY_ONLINE_MS
+    val online get() = lan || relay
     val title get() = if (dept.isNotEmpty()) "$name · $dept" else name
 }
 
-data class FileMeta(val fid: String, val name: String, val size: Long) {
+/** relay — копия файла лежит на сервере (можно скачать, даже если отправитель не в нашей сети). */
+data class FileMeta(val fid: String, val name: String, val size: Long, val relay: Boolean = false) {
     fun json(): JSONObject = JSONObject().put("fid", fid).put("name", name).put("size", size)
+        .apply { if (relay) put("relay", true) }
 
     companion object {
         fun of(s: String?): FileMeta? = if (s.isNullOrEmpty() || s == "null") null else try {
             val o = JSONObject(s)
-            FileMeta(o.getString("fid"), o.getString("name"), o.getLong("size"))
+            FileMeta(o.getString("fid"), o.getString("name"), o.getLong("size"), o.optBoolean("relay"))
         } catch (e: Exception) { null }
     }
 }
@@ -31,9 +37,9 @@ data class Msg(
 )
 
 /** Переписка и участники — та же схема, что в программе для ПК. */
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 1) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE peers(id TEXT PRIMARY KEY, name TEXT, dept TEXT, ip TEXT, port INT, plat TEXT, last_seen INT)")
+        db.execSQL("CREATE TABLE peers(id TEXT PRIMARY KEY, name TEXT, dept TEXT, ip TEXT, port INT, plat TEXT, last_seen INT, relay_seen INT DEFAULT 0)")
         db.execSQL("CREATE TABLE messages(id TEXT PRIMARY KEY, chat TEXT, sender TEXT, sender_name TEXT, ts INT, " +
             "text TEXT, file TEXT, mine INT, status TEXT, local TEXT, unread INT DEFAULT 0)")
         db.execSQL("CREATE INDEX msg_chat ON messages(chat, ts)")
@@ -41,15 +47,39 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 1) {
         db.execSQL("CREATE TABLE files(fid TEXT PRIMARY KEY, path TEXT)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
+        if (o < 2) db.execSQL("ALTER TABLE peers ADD COLUMN relay_seen INT DEFAULT 0")
+    }
 
     @Synchronized
     fun upsertPeer(id: String, name: String, dept: String, ip: String, port: Int, plat: String, seen: Long) {
         val v = ContentValues().apply {
-            put("id", id); put("name", name); put("dept", dept); put("ip", ip); put("port", port)
+            put("name", name); put("dept", dept); put("ip", ip); put("port", port)
             put("plat", plat); put("last_seen", seen)
         }
-        writableDatabase.insertWithOnConflict("peers", null, v, SQLiteDatabase.CONFLICT_REPLACE)
+        if (writableDatabase.update("peers", v, "id=?", arrayOf(id)) == 0) {
+            v.put("id", id)
+            writableDatabase.insert("peers", null, v)
+        }
+    }
+
+    /** Участник на связи через сервер: адрес в сети не трогаем. */
+    @Synchronized
+    fun upsertRelay(id: String, name: String?, dept: String?, plat: String, seen: Long): Boolean {
+        val exists = writableDatabase.rawQuery("SELECT 1 FROM peers WHERE id=?", arrayOf(id)).use { it.moveToFirst() }
+        if (exists) {
+            writableDatabase.execSQL(
+                "UPDATE peers SET name=COALESCE(?,name), dept=COALESCE(?,dept), relay_seen=MAX(relay_seen,?) WHERE id=?",
+                arrayOf(name, dept, seen, id)
+            )
+        } else {
+            val v = ContentValues().apply {
+                put("id", id); put("name", name ?: "?"); put("dept", dept ?: ""); put("ip", ""); put("port", Node.TCP)
+                put("plat", plat); put("last_seen", 0); put("relay_seen", seen)
+            }
+            writableDatabase.insert("peers", null, v)
+        }
+        return !exists
     }
 
     @Synchronized
@@ -60,10 +90,10 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 1) {
     @Synchronized
     fun peers(): List<Peer> {
         val out = ArrayList<Peer>()
-        readableDatabase.rawQuery("SELECT id,name,dept,ip,port,plat,last_seen FROM peers", null).use { c ->
+        readableDatabase.rawQuery("SELECT id,name,dept,ip,port,plat,last_seen,relay_seen FROM peers", null).use { c ->
             while (c.moveToNext()) out.add(
                 Peer(c.getString(0), c.getString(1) ?: "?", c.getString(2) ?: "", c.getString(3) ?: "",
-                    c.getInt(4), c.getString(5) ?: "", c.getLong(6))
+                    c.getInt(4), c.getString(5) ?: "", c.getLong(6), c.getLong(7))
             )
         }
         return out

@@ -143,7 +143,8 @@ class MainActivity : AppCompatActivity() {
         }
         val on = peers.count { it.online }
         val q = Node.db.queued()
+        val srv = when (Node.relayOk) { true -> "\nСервер: на связи ✓"; false -> "\nСервер: нет связи"; null -> "" }
         status.text = "В сети: $on из ${peers.size}" + (if (q > 0) " · в очереди: $q" else "") +
-            "\nТелефон в сети: ${Node.localIp() ?: "нет Wi-Fi"}"
+            "\nТелефон в сети: ${Node.localIp() ?: "нет Wi-Fi"}" + srv
     }
 }

@@ -44,6 +44,8 @@ object Node {
     const val TCP = 47801
     const val ALL = "all"
     const val ONLINE_MS = 15_000L
+    const val RELAY_ONLINE_MS = 75_000L
+    const val RELAY_FILE_MAX = 50L * 1024 * 1024
     const val AUTO = 50L * 1024 * 1024
     const val ACTION_CHANGED = "ru.sharapov.rafchat.CHANGED"
 
@@ -54,6 +56,11 @@ object Node {
     @Volatile var running = false
     @Volatile var visibleChat: String? = null
     private var key = ByteArray(0)
+    private var ekey = ByteArray(0)
+    private var orgId = ""
+    /** null — сервер не задан, true/false — есть ли с ним связь */
+    @Volatile var relayOk: Boolean? = null
+    private val relayUploaded = ConcurrentHashMap.newKeySet<String>()
     private var udp: DatagramSocket? = null
     private var server: ServerSocket? = null
     private val wake = Object()
@@ -67,7 +74,11 @@ object Node {
         ctx = c.applicationContext
         if (!::db.isInitialized) db = Store(ctx)
         id = Prefs.id(ctx)
-        key = sha256(("RafChat:" + Prefs.org(ctx).trim()).toByteArray())
+        val org = Prefs.org(ctx).trim()
+        key = sha256(("RafChat:" + org).toByteArray())
+        // шифрование «от устройства до устройства» для сервера: сервер видит только шифротекст
+        ekey = sha256(("RafChat-e2e:" + org).toByteArray())
+        orgId = hex(sha256(("RafChat-org:" + org).toByteArray())).take(32)
         running = true
         val ss = ServerSocket()
         ss.reuseAddress = true
@@ -83,6 +94,7 @@ object Node {
         thread(name = "rc-beacon", isDaemon = true) { beaconLoop() }
         thread(name = "rc-outbox", isDaemon = true) { outboxLoop() }
         thread(name = "rc-ping", isDaemon = true) { pingLoop() }
+        thread(name = "rc-relay", isDaemon = true) { relayLoop() }
     }
 
     @Synchronized
@@ -204,7 +216,7 @@ object Node {
     private fun upsert(d: JSONObject, ip: String): Boolean {
         val pid = d.getString("id")
         val prev = db.peer(pid)
-        val wasOnline = prev?.online == true
+        val wasOnline = prev?.lan == true
         db.upsertPeer(
             pid,
             d.optString("name", "").ifEmpty { prev?.name ?: "?" },
@@ -400,9 +412,17 @@ object Node {
         while (running) {
             synchronized(wake) { try { wake.wait(3000) } catch (_: InterruptedException) {} }
             if (!running) break
-            val online = db.peers().filter { it.online }.associateBy { it.id }
+            val online = db.peers().filter { it.lan }.associateBy { it.id }
+            val relay = serverAddr() != null
             for ((peer, mid, payload) in db.outbox()) {
-                val p = online[peer] ?: continue
+                val p = online[peer]
+                if (p == null) {
+                    if (relay && relayDeliver(peer, payload)) {          // не в одной сети — через сервер
+                        db.delOutbox(peer, mid)
+                        viaRelay(mid)
+                    }
+                    continue
+                }
                 try {
                     val body = payload.toByteArray()
                     val c = URL("http://${p.ip}:${p.port}/msg").openConnection() as HttpURLConnection
@@ -426,6 +446,143 @@ object Node {
         }
     }
 
+    private fun viaRelay(mid: String) {
+        val m = db.msg(mid) ?: return
+        if (m.chat == ALL) return delivered(mid)
+        if (m.status != "delivered") { db.setStatus(mid, "relay"); changed() }
+    }
+
+    // ---------- сервер-ретранслятор (работа через интернет)
+    fun serverAddr(): Pair<String, Int>? {
+        val s = Prefs.server(ctx).trim().removePrefix("http://").trimEnd('/')
+        if (s.isEmpty()) return null
+        return s.substringBefore(':') to (s.substringAfter(':', "").toIntOrNull() ?: 47888)
+    }
+
+    fun enc(data: ByteArray): ByteArray {
+        val n = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(javax.crypto.Cipher.ENCRYPT_MODE, SecretKeySpec(ekey, "AES"), javax.crypto.spec.GCMParameterSpec(128, n))
+        return n + c.doFinal(data)
+    }
+
+    fun dec(blob: ByteArray): ByteArray {
+        val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(javax.crypto.Cipher.DECRYPT_MODE, SecretKeySpec(ekey, "AES"),
+            javax.crypto.spec.GCMParameterSpec(128, blob.copyOfRange(0, 12)))
+        return c.doFinal(blob, 12, blob.size - 12)
+    }
+
+    private fun b64(b: ByteArray) = android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP)
+    private fun unb64(s: String) = android.util.Base64.decode(s, android.util.Base64.DEFAULT)
+
+    private fun relayCall(method: String, path: String, body: ByteArray? = null, json: Boolean = true, timeout: Int = 15000): ByteArray {
+        val (host, port) = serverAddr() ?: throw java.io.IOException("нет сервера")
+        val c = URL("http://$host:$port$path").openConnection() as HttpURLConnection
+        c.connectTimeout = 8000
+        c.readTimeout = timeout
+        c.requestMethod = method
+        c.setRequestProperty("X-Org", orgId)
+        c.setRequestProperty("X-Node", id)
+        try {
+            if (body != null) {
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", if (json) "application/json" else "application/octet-stream")
+                c.setFixedLengthStreamingMode(body.size)
+                c.outputStream.use { it.write(body) }
+            }
+            if (c.responseCode != 200) throw java.io.IOException("сервер ответил ${c.responseCode}")
+            return c.inputStream.use { it.readBytes() }
+        } finally { c.disconnect() }
+    }
+
+    private fun relayJson(method: String, path: String, body: JSONObject? = null, timeout: Int = 15000): JSONObject =
+        JSONObject(String(relayCall(method, path, body?.toString()?.toByteArray(), true, timeout), Charsets.UTF_8).ifEmpty { "{}" })
+
+    private fun relaySend(to: String, m: JSONObject): Boolean = try {
+        relayJson("POST", "/r/send", JSONObject().put("to", to).put("blob", b64(enc(m.toString().toByteArray()))))
+        true
+    } catch (e: Exception) { false }
+
+    private fun relayDeliver(to: String, payload: String): Boolean {
+        val m = JSONObject(payload)
+        val f = m.optJSONObject("file")
+        if (f != null && !f.optBoolean("relay") && f.optLong("size") <= RELAY_FILE_MAX) {
+            val fid = f.getString("fid")
+            if (!relayUploaded.contains(fid)) {                 // файл — на сервер (зашифрованным)
+                val path = db.filePath(fid)
+                if (path != null && File(path).isFile) {
+                    try {
+                        relayCall("PUT", "/r/file?fid=$fid", enc(File(path).readBytes()), false, 300_000)
+                        relayUploaded.add(fid)
+                    } catch (e: Exception) { return false }
+                }
+            }
+            if (relayUploaded.contains(fid)) f.put("relay", true)
+        }
+        return relaySend(to, m)
+    }
+
+    private fun relayHello() {
+        val r = relayJson("POST", "/r/hello", JSONObject().put("profile", b64(enc(profile().toString().toByteArray()))))
+        val now = r.optDouble("now", System.currentTimeMillis() / 1000.0)
+        val arr = r.optJSONArray("peers") ?: return
+        for (i in 0 until arr.length()) {
+            val p = arr.getJSONObject(i)
+            val d = try { JSONObject(String(dec(unb64(p.getString("profile"))), Charsets.UTF_8)) } catch (e: Exception) { continue }
+            if (d.optString("id") != p.getString("id") || d.optString("id") == id) continue
+            val seen = System.currentTimeMillis() - ((now - p.optDouble("last", 0.0)) * 1000).toLong()
+            upsertRelay(d, seen)
+        }
+    }
+
+    private fun upsertRelay(d: JSONObject, seen: Long) {
+        val pid = d.getString("id")
+        val wasOnline = db.peer(pid)?.online == true
+        val isNew = db.upsertRelay(pid, d.optString("name", "").ifEmpty { null },
+            if (d.has("dept")) d.optString("dept") else null, d.optString("plat", ""), seen)
+        if (isNew) catchUp(pid)
+        if (!wasOnline && System.currentTimeMillis() - seen < RELAY_ONLINE_MS) { kick(); changed() }
+    }
+
+    private fun relayLoop() {
+        var lastHello = 0L
+        while (running) {
+            if (serverAddr() == null) { relayOk = null; Thread.sleep(3000); continue }
+            try {
+                if (System.currentTimeMillis() - lastHello > 20_000) {
+                    relayHello()
+                    lastHello = System.currentTimeMillis()
+                    if (relayOk != true) { relayOk = true; kick(); changed() }
+                }
+                val items = relayJson("GET", "/r/poll?wait=25", null, 40_000).optJSONArray("items")
+                val acks = org.json.JSONArray()
+                if (items != null) for (i in 0 until items.length()) {
+                    val it = items.getJSONObject(i)
+                    acks.put(it.getString("qid"))
+                    val m = try { JSONObject(String(dec(unb64(it.getString("blob"))), Charsets.UTF_8)) } catch (e: Exception) { continue }
+                    relayItem(m)
+                }
+                if (acks.length() > 0) relayJson("POST", "/r/ack", JSONObject().put("qids", acks))
+            } catch (e: Exception) {
+                if (relayOk != false) { relayOk = false; changed() }
+                if (running) Thread.sleep(5000)
+            }
+        }
+    }
+
+    private fun relayItem(m: JSONObject) {
+        if (m.optString("type") == "ack") {                  // получатель подтвердил — ✓✓
+            val mine = db.msg(m.optString("id"))
+            if (mine != null && mine.mine && mine.chat != ALL) { db.setStatus(mine.id, "delivered"); changed() }
+            return
+        }
+        val from = m.optString("from")
+        if (m.optString("id").isEmpty() || from.isEmpty() || from == id) return
+        receive(m, "")
+        relaySend(from, JSONObject().put("type", "ack").put("id", m.getString("id")).put("from", id))
+    }
+
     private fun delivered(mid: String) {
         val m = db.msg(mid) ?: return
         val st = if (m.chat == ALL && m.status.contains('/')) {
@@ -440,9 +597,10 @@ object Node {
     private fun receive(m: JSONObject, ip: String) {
         val mid = m.getString("id")
         val from = m.getString("from")
-        if (from != id && ip.isNotEmpty()) {
-            // пришло сообщение — значит, отправитель в сети (даже если его маяки до нас не доходят)
-            upsert(JSONObject().put("id", from).put("name", m.optString("name", "")).put("port", m.optInt("port", TCP)), ip)
+        if (from != id) {
+            val d = JSONObject().put("id", from).put("name", m.optString("name", "")).put("port", m.optInt("port", TCP))
+            // пришло сообщение — значит, отправитель на связи (по сети или через сервер)
+            if (ip.isNotEmpty()) upsert(d, ip) else upsertRelay(d, System.currentTimeMillis())
         }
         if (db.hasMsg(mid)) return
         val chat = if (m.optString("to") == ALL) ALL else from
@@ -469,7 +627,16 @@ object Node {
         val part = File(ctx.cacheDir, "dl/$mid.part").apply { parentFile?.mkdirs() }
         repeat(40) {
             val p = db.peer(m.sender)
-            if (p != null && p.online) {
+            if ((p == null || !p.lan) && f.relay && serverAddr() != null) {
+                try {                                         // отправитель не в нашей сети — берём копию с сервера
+                    val data = dec(relayCall("GET", "/r/file?fid=" + f.fid, null, true, 300_000))
+                    part.writeBytes(data)
+                    db.setLocal(mid, saveToDownloads(part, f.name))
+                    changed()
+                    return
+                } catch (_: Exception) {}
+            }
+            if (p != null && p.lan) {
                 try {
                     var have = if (part.exists()) part.length() else 0L
                     val path = "/file?fid=" + f.fid
