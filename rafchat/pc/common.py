@@ -101,7 +101,21 @@ def glyph(name: str, color: str, size: int = 20, width: float = 1.7) -> QPixmap:
     return pm
 
 
+def _icon_file():
+    import sys
+    from pathlib import Path
+    base = Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "frozen", False) \
+        else Path(__file__).resolve().parent.parent / "assets" / "icon"
+    f = base / "rafchat_icon.png"
+    return f if f.is_file() else None
+
+
 def app_icon_pixmap(size=256) -> QPixmap:
+    f = _icon_file()
+    if f is not None:
+        src = QPixmap(str(f))
+        if not src.isNull():
+            return src.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)

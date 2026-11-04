@@ -47,13 +47,12 @@ jobs:
       - name: Значок
         working-directory: rafchat/pc
         run: |
-          python rafchat_pc.py --make-icon icon.png
-          python -c "from PIL import Image; Image.open('icon.png').save('rafchat.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          python -c "from PIL import Image; Image.open('../assets/icon/icon-3d.png').save('rafchat.ico', sizes=[(16,16),(20,20),(24,24),(32,32),(40,40),(48,48),(64,64),(128,128),(256,256)])"
       - name: Сборка RafChat (папка с программой)
         working-directory: rafchat/pc
         run: |
           python make_version.py
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." rafchat_pc.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." rafchat_pc.py
       - name: Проверка запуском и снимок окна
         working-directory: rafchat/pc
         shell: pwsh
