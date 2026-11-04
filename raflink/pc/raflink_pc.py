@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -22,7 +23,7 @@ from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import (QByteArray, QEventLoop, QMimeData, QObject, QPoint,
                             QRectF, QSize, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon,
+from PySide6.QtGui import (QColor, QDesktopServices, QDrag, QFont, QFontMetrics, QIcon, QImage,
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
@@ -32,7 +33,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QProgressBar, QPushButton, QScrollArea, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.3.2"
+APP_VER = "0.4.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -98,6 +99,13 @@ PATHS = {
     "open": "M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6",
     "check": "M5 12.5l4.5 4.5L19 7",
     "sort": "M4 6h16 M7 12h10 M10 18h4",
+    "clip": "M8 5H5v16h14V5h-3 M8 3h8v4H8z M9 12h6 M9 16h4",
+    "lock": "M6 11h12v10H6z M8 11V7a4 4 0 018 0v4",
+    "home": "M3 11l9-8 9 8 M5 9v12h14V9",
+    "recents": "M5 5h14v14H5z",
+    "bell": "M4 17h16l-2-4V9a6 6 0 00-12 0v4z M10 20h4",
+    "power": "M12 3v9 M6.3 6.3a8 8 0 1011.4 0",
+    "screen": "M7 2h10a1 1 0 011 1v18H6V3z M9 6h6v9H9z",
     "gallery": "M3 3h18v18H3z M3 16l5-5 4 4 3-3 6 6 M15.5 8.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0",
 }
 
@@ -504,7 +512,7 @@ def default_inbox() -> str:
 class Config:
     def __init__(self):
         self.data = {"phone": None, "inbox": default_inbox(), "theme": "light", "history": [],
-                     "hint_tray": False}
+                     "hint_tray": False, "clip_auto": False, "clip_seq": None}
         try:
             self.data.update(json.loads(CONFIG_FILE.read_text("utf-8")))
         except Exception:
@@ -562,8 +570,37 @@ ERRORS = {
 
 
 class PhoneClient:
-    def __init__(self, host: str, port: int = PHONE_PORT, token: str | None = None):
+    """Связь с телефоном. Если известен отпечаток сертификата — только по шифрованному каналу (TLS)."""
+
+    def __init__(self, host: str, port: int = PHONE_PORT, token: str | None = None,
+                 tls_port: int = 0, fp: str | None = None):
         self.host, self.port, self.token = host, port, token
+        self.tls_port, self.fp = tls_port, fp
+
+    @property
+    def secure(self) -> bool:
+        return bool(self.tls_port and self.fp)
+
+    def _conn(self, timeout=8):
+        try:
+            if self.secure:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE      # проверяем сами — по запомненному отпечатку
+                c = http.client.HTTPSConnection(self.host, self.tls_port, timeout=timeout, context=ctx)
+                c.connect()
+                der = c.sock.getpeercert(binary_form=True)
+                if hashlib.sha256(der).hexdigest() != self.fp:
+                    c.close()
+                    raise PhoneError("Телефон не прошёл проверку подлинности. Подключите его заново по коду.", 495)
+                return c
+            c = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+            c.connect()
+            return c
+        except PhoneError:
+            raise
+        except (OSError, ssl.SSLError) as e:
+            raise PhoneError("Нет связи с телефоном") from e
 
     def _url(self, path, params=None):
         return path + ("?" + urlencode(params, quote_via=quote) if params else "")
@@ -574,7 +611,7 @@ class PhoneClient:
         return h
 
     def _open(self, method, path, params=None, body=None, headers=None, timeout=8):
-        c = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+        c = self._conn(timeout)
         try:
             c.request(method, self._url(path, params), body=body, headers=self._headers(headers))
             return c, c.getresponse()
@@ -634,25 +671,36 @@ class PhoneClient:
         self._check(r, raw)
         return raw
 
-    def download(self, path: str, dest: Path, step, log=True, outbox_id=None):
-        if outbox_id:
-            c, r = self._open("GET", "/api/outbox/file", {"id": outbox_id}, timeout=30)
-        else:
-            c, r = self._open("GET", "/api/file", {"path": path, "log": "1" if log else "0"}, timeout=30)
+    def download(self, path: str, dest: Path, step, log=True, outbox_id=None, size=-1):
+        """Скачать файл. Недокачанный кусок (dest.part) продолжается с места обрыва."""
         tmp = dest.with_name(dest.name + ".part")
+        have = tmp.stat().st_size if tmp.exists() else 0
+        hdr = {"Range": f"bytes={have}-"} if have else None
+        if outbox_id:
+            c, r = self._open("GET", "/api/outbox/file", {"id": outbox_id}, headers=hdr, timeout=30)
+        else:
+            c, r = self._open("GET", "/api/file", {"path": path, "log": "1" if log and not have else "0"},
+                              headers=hdr, timeout=30)
         try:
-            if r.status != 200:
+            if r.status not in (200, 206):
                 self._check(r, r.read())
+            if r.status == 200:
+                have = 0
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with open(tmp, "wb") as f:
+            with open(tmp, "ab" if have else "wb") as f:
                 while True:
-                    chunk = r.read(256 * 1024)
+                    try:
+                        chunk = r.read(256 * 1024)
+                    except (OSError, http.client.HTTPException) as e:
+                        raise PhoneError("Связь прервалась") from e
                     if not chunk:
                         break
                     f.write(chunk)
                     step(len(chunk))
+            if size >= 0 and tmp.stat().st_size < size:
+                raise PhoneError("Связь прервалась")
             tmp.replace(dest)
-        except BaseException:
+        except Cancelled:
             try:
                 tmp.unlink()
             except OSError:
@@ -661,16 +709,24 @@ class PhoneClient:
         finally:
             c.close()
 
-    def upload(self, local: Path, step) -> str:
+    def upload_status(self, uid: str) -> int:
+        return int(self.json("GET", "/api/upload/status", {"id": uid}).get("have", 0))
+
+    def upload(self, local: Path, step, uid: str | None = None, offset: int = 0) -> str:
+        """Отправить файл. С uid телефон собирает его частями — можно продолжить после обрыва."""
         size = local.stat().st_size
-        c = http.client.HTTPConnection(self.host, self.port, timeout=30)
+        params = {"name": local.name}
+        if uid:
+            params.update(id=uid, total=str(size), offset=str(offset))
+        c = self._conn(30)
         try:
-            c.putrequest("POST", self._url("/api/upload", {"name": local.name}))
+            c.putrequest("POST", self._url("/api/upload", params))
             for k, v in self._headers({"Content-Type": "application/octet-stream",
-                                       "Content-Length": str(size)}).items():
+                                       "Content-Length": str(size - offset)}).items():
                 c.putheader(k, v)
             c.endheaders()
             with open(local, "rb") as f:
+                f.seek(offset)
                 while True:
                     chunk = f.read(256 * 1024)
                     if not chunk:
@@ -680,11 +736,34 @@ class PhoneClient:
             r = c.getresponse()
             raw = r.read()
             self._check(r, raw)
-            return json.loads(raw).get("name", local.name)
-        except OSError as e:
+            j = json.loads(raw)
+            if j.get("partial"):
+                raise PhoneError("Связь прервалась")
+            return j.get("name", local.name)
+        except (OSError, http.client.HTTPException) as e:
             raise PhoneError("Связь прервалась") from e
         finally:
             c.close()
+
+    # буфер обмена
+    def clip_get(self):
+        return self.json("GET", "/api/clip")
+
+    def clip_set(self, text: str):
+        return self.json("POST", "/api/clip", body={"text": text})
+
+    # экран телефона
+    def screen_request(self):
+        return self.json("POST", "/api/screen/request", body={})
+
+    def screen_state(self):
+        return self.json("GET", "/api/screen/state", timeout=5)
+
+    def screen_stop(self):
+        return self.json("POST", "/api/screen/stop", body={})
+
+    def input(self, event: dict):
+        return self.json("POST", "/api/input", body=event, timeout=5)
 
 
 # ---------------------------------------------------------------- фоновые задачи
@@ -720,6 +799,7 @@ def run_bg(fn, ok=None, fail=None):
 class Transfers(QObject):
     """Очередь передач: одна активная, остальные ждут."""
     started = Signal(str, str, int)        # направление ('in'/'out'), первый файл, количество
+    waiting = Signal(str)                  # связь прервалась — ждём Wi-Fi
     progress = Signal(int, int, float)     # передано, всего, скорость Б/с
     finished = Signal(str, list, str)      # направление, локальные пути, ошибка ('' — успех)
 
@@ -778,8 +858,29 @@ class Transfers(QObject):
                 last[0] = now
                 self.progress.emit(done, max(total, 1), done / max(now - t0, 0.001))
 
+        def retry(base, attempt_fn):
+            """Повторять при обрыве связи до ~3 минут; продолжать с того места, где оборвалось."""
+            nonlocal client
+            waits = [2, 3, 5, 5, 8, 10, 10, 15, 15, 20, 20, 30, 30, 30]
+            for k in range(len(waits) + 1):
+                try:
+                    return attempt_fn(lambda have: base + have)
+                except PhoneError as e:
+                    if e.status or k == len(waits):   # ошибка телефона (не обрыв) или кончилось терпение
+                        raise
+                    self.waiting.emit(f"Связь прервалась — жду Wi-Fi и продолжу с того же места (попытка {k + 1})…")
+                    end = time.time() + waits[k]
+                    while time.time() < end:
+                        if self.cancel_ev.is_set():
+                            raise Cancelled()
+                        time.sleep(0.2)
+                    c2 = self.app.client       # адрес телефона мог смениться
+                    if c2 is not None:
+                        client = c2
+
         try:
             for it in items:
+                base = done
                 if direction in ("in", "push"):
                     if dest_dir is None:
                         dest = cache_path(it)
@@ -789,15 +890,45 @@ class Transfers(QObject):
                             continue
                     else:
                         dest = unique_path(dest_dir, clean_name(it["name"]))
-                    client.download(it.get("path"), dest, step, log=True, outbox_id=it.get("outbox_id"))
+                    part = dest.with_name(dest.name + ".part")
+                    if part.exists():
+                        part.unlink()      # старый кусок от другого файла — не наш
+
+                    def attempt(at, it=it, dest=dest, part=part):
+                        nonlocal done
+                        done = at(part.stat().st_size if part.exists() else 0)
+                        client.download(it.get("path"), dest, step, log=True, outbox_id=it.get("outbox_id"),
+                                        size=int(it.get("size") or -1))
+
+                    retry(base, attempt)
                     if it.get("outbox_id"):
-                        client.outbox_done(it["outbox_id"])
+                        retry(done, lambda at, it=it: client.outbox_done(it["outbox_id"]))
                     results.append(dest)
                     self.app.config.add_history("in", it["name"], int(it.get("size") or 0), str(dest))
                 else:
-                    client.upload(it, step)
+                    st = it.stat()
+                    uid = hashlib.sha1(f"{it.name}|{st.st_size}|{st.st_mtime}|{socket.gethostname()}".encode()).hexdigest()[:24]
+                    try:
+                        client.upload_status(uid)
+                        resumable = True
+                    except PhoneError as e:
+                        if e.status != 404:
+                            raise
+                        resumable = False      # старая версия приложения на телефоне
+
+                    def attempt(at, it=it, uid=uid, resumable=resumable):
+                        nonlocal done
+                        if resumable:
+                            have = client.upload_status(uid)
+                            done = at(have)
+                            client.upload(it, step, uid, have)
+                        else:
+                            done = at(0)
+                            client.upload(it, step)
+
+                    retry(base, attempt)
                     results.append(it)
-                    self.app.config.add_history("out", it.name, it.stat().st_size, str(it))
+                    self.app.config.add_history("out", it.name, st.st_size, str(it))
             self.progress.emit(max(total, 1), max(total, 1), 0)
             self.finished.emit(direction, results, "")
         except Cancelled:
@@ -1273,7 +1404,7 @@ class Toast(QFrame):
         self.bar.setTextVisible(False)
         self.bar.setRange(0, 1000)
         lay.addWidget(self.bar)
-        self.sub = label("", "small")
+        self.sub = label("", "small", wrap=True)
         lay.addWidget(self.sub)
         brow = QHBoxLayout()
         self.b1 = button("", "tinted")
@@ -1311,6 +1442,9 @@ class Toast(QFrame):
         self._btn(self.b2, "", None)
         self.bx.hide()
         self.show()
+
+    def waiting(self, text):
+        self.sub.setText(text)
 
     def progress(self, done, total, speed):
         self.bar.setValue(int(done * 1000 / max(total, 1)))
@@ -1585,6 +1719,190 @@ class AlbumChips(QWidget):
             self.currentIndexChanged.emit(i)
 
 
+class ScreenStream(QObject):
+    """Читает поток кадров MJPEG с телефона в отдельном потоке."""
+    frame = Signal(QImage)
+    ended = Signal(str)
+
+    def __init__(self, client: "PhoneClient"):
+        super().__init__()
+        self.client = client
+        self._stop = threading.Event()
+        self._conn = None
+        self._sock = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self):
+        self._stop.set()
+        sk = self._sock
+        if sk is not None:
+            try:
+                sk.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _run(self):
+        err = ""
+        try:
+            c = self.client._conn(10)
+            self._conn = c
+            c.request("GET", "/api/screen/stream", headers=self.client._headers())
+            self._sock = c.sock              # после ответа http.client отдаёт сокет внутрь ответа
+            r = c.getresponse()
+            if r.status != 200:
+                self.client._check(r, r.read())
+            self._sock.settimeout(None)      # пока экран не меняется, кадров нет — ждём сколько угодно
+            fp = r.fp
+            while not self._stop.is_set():
+                line = fp.readline()
+                if not line:
+                    break
+                if not line.startswith(b"--"):
+                    continue
+                length = 0
+                while True:
+                    h = fp.readline()
+                    if not h or h in (b"\r\n", b"\n"):
+                        break
+                    if h.lower().startswith(b"content-length:"):
+                        length = int(h.split(b":", 1)[1].strip())
+                data = fp.read(length) if length else b""
+                img = QImage.fromData(data, "JPG")
+                if not img.isNull():
+                    self.frame.emit(img)
+        except Exception as e:  # noqa
+            err = "" if self._stop.is_set() else (str(e) or "Поток прервался")
+        finally:
+            try:
+                if self._conn:
+                    self._conn.close()
+            except Exception:
+                pass
+            self.ended.emit(err)
+
+
+class ScreenView(QWidget):
+    """Экран телефона: щелчок — нажатие, протянуть — свайп, удержать — долгое нажатие,
+    колесо — прокрутка, правая кнопка — «Назад», печать с клавиатуры — ввод текста."""
+
+    def __init__(self, app: "MainWindow"):
+        super().__init__()
+        self.app = app
+        self.img: QImage | None = None
+        self._press = None
+        self._wheel = 0
+        self._typed = ""
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumHeight(240)
+        self.setCursor(Qt.PointingHandCursor)
+        self._wheel_t = QTimer(self, singleShot=True, interval=120, timeout=self._flush_wheel)
+        self._type_t = QTimer(self, singleShot=True, interval=250, timeout=self._flush_text)
+
+    def set_frame(self, img: QImage):
+        self.img = img
+        self.update()
+
+    def _rect(self) -> QRectF:
+        if self.img is None:
+            return QRectF()
+        iw, ih = self.img.width(), self.img.height()
+        k = min(self.width() / iw, self.height() / ih)
+        w, h = iw * k, ih * k
+        return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        if self.img is None:
+            p.end()
+            return
+        r = self._rect()
+        path = QPainterPath()
+        path.addRoundedRect(r, 14, 14)
+        p.setClipPath(path)
+        p.drawImage(r, self.img)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(P["line"]), 1.5))
+        p.drawRoundedRect(r, 14, 14)
+        p.end()
+
+    def _frac(self, pos):
+        r = self._rect()
+        if r.isEmpty() or not r.contains(pos):
+            return None
+        return (pos.x() - r.left()) / r.width(), (pos.y() - r.top()) / r.height()
+
+    def mousePressEvent(self, e):
+        self.setFocus()
+        if e.button() == Qt.RightButton:
+            self.app.screen_key("back")
+            return
+        if e.button() == Qt.MiddleButton:
+            self.app.screen_key("home")
+            return
+        if e.button() == Qt.BackButton:
+            self.app.screen_key("back")
+            return
+        f = self._frac(e.position())
+        if f and e.button() == Qt.LeftButton:
+            self._press = (f, time.time(), e.position())
+
+    def mouseReleaseEvent(self, e):
+        if not self._press or e.button() != Qt.LeftButton:
+            return
+        (x1, y1), t0, p0 = self._press
+        self._press = None
+        r = self._rect()
+        x2 = min(max((e.position().x() - r.left()) / r.width(), 0), 1)
+        y2 = min(max((e.position().y() - r.top()) / r.height(), 0), 1)
+        moved = (e.position() - p0).manhattanLength() > 8
+        ms = int((time.time() - t0) * 1000)
+        if moved:
+            self.app.screen_input({"t": "swipe", "x": x1, "y": y1, "x2": x2, "y2": y2, "ms": max(80, min(ms, 1500))})
+        else:
+            self.app.screen_input({"t": "tap", "x": x1, "y": y1, "long": ms > 500})
+
+    def wheelEvent(self, e):
+        f = self._frac(e.position())
+        if not f:
+            return
+        self._wheel += e.angleDelta().y()
+        self._wheel_pos = f
+        self._wheel_t.start()
+
+    def _flush_wheel(self):
+        d, self._wheel = self._wheel, 0
+        if not d:
+            return
+        x, y = self._wheel_pos
+        dist = max(-0.45, min(0.45, d / 120 * 0.18))
+        y1 = min(max(y - dist / 2, 0.05), 0.95)
+        y2 = min(max(y + dist / 2, 0.05), 0.95)
+        self.app.screen_input({"t": "swipe", "x": x, "y": y1, "x2": x, "y2": y2, "ms": 160})
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k in (Qt.Key_Return, Qt.Key_Enter):
+            self._flush_text()
+            self.app.screen_input({"t": "enter"})
+        elif k == Qt.Key_Backspace:
+            self._flush_text()
+            self.app.screen_input({"t": "backspace"})
+        elif k == Qt.Key_Escape:
+            self.app.screen_key("back")
+        elif e.text() and e.text().isprintable():
+            self._typed += e.text()
+            self._type_t.start()
+        else:
+            super().keyPressEvent(e)
+
+    def _flush_text(self):
+        t, self._typed = self._typed, ""
+        if t:
+            self.app.screen_input({"t": "text", "text": t})
+
+
 QUICK = [("Загрузки", "down", "Download"), ("Камера", "cam", "DCIM/Camera"), ("Документы", "doc", "Documents"),
          ("Telegram", "send", "Download/Telegram"), ("WhatsApp", "chat", "Android/media/com.whatsapp/WhatsApp/Media"),
          ("Скриншоты", "shot", "DCIM/Screenshots")]
@@ -1603,6 +1921,8 @@ class MainWindow(QMainWindow):
         self._loaded_once = False
         self._outbox_busy = False
         self._zc = None
+        self._tls_tried = False
+        self._clip_last_phone = ""
         self.found: dict = {}
         self._polling = False
         self._fails = 0
@@ -1646,6 +1966,17 @@ class MainWindow(QMainWindow):
         h.addWidget(self.battery)
         h.addWidget(self.batt)
         h.addSpacing(4)
+        cb = button("", "icon", icon="clip", tip="Буфер обмена", color=P["muted"])
+        cm = QMenu(cb)
+        cm.addAction("Отправить буфер ПК на телефон", self.clip_to_phone)
+        self.clip_auto_act = cm.addAction("Отправлять скопированное на ПК автоматически")
+        self.clip_auto_act.setCheckable(True)
+        self.clip_auto_act.setChecked(bool(config["clip_auto"]))
+        self.clip_auto_act.toggled.connect(lambda on: config.__setitem__("clip_auto", on))
+        cm.addSeparator()
+        cm.addAction("С телефона на ПК: на телефоне кнопка «Буфер на ПК»").setEnabled(False)
+        cb.clicked.connect(lambda: cm.exec(cb.mapToGlobal(QPoint(cb.width() - cm.sizeHint().width(), cb.height()))))
+        h.addWidget(cb)
         h.addWidget(button("", "icon", icon="mini", tip="Мини-режим: капсула для файлов", fn=self.to_mini,
                            color=P["muted"]))
         gb = button("", "icon", icon="gear", tip="Настройки и «О программе»", color=P["muted"])
@@ -1667,7 +1998,7 @@ class MainWindow(QMainWindow):
         th.setContentsMargins(3, 3, 3, 3)
         th.setSpacing(3)
         self.tab_btns = []
-        for i, t in enumerate(["Файлы", "Галерея", "История"]):
+        for i, t in enumerate(["Файлы", "Галерея", "Экран", "История"]):
             b = button(t, "seg", fn=lambda _=False, i=i: self.switch_tab(i))
             b.setCheckable(True)
             th.addWidget(b, 1)
@@ -1683,7 +2014,9 @@ class MainWindow(QMainWindow):
         self.page_hist = self._build_history()
         self.page_offline = self._build_offline()
         self.page_pair = self._build_pair()
-        for w in (self.page_files, self.page_photos, self.page_hist, self.page_offline, self.page_pair):
+        self.page_screen = self._build_screen()
+        for w in (self.page_files, self.page_photos, self.page_hist, self.page_offline, self.page_pair,
+                  self.page_screen):
             self.pages.addWidget(w)
 
         self.toast = Toast(self)
@@ -1695,6 +2028,10 @@ class MainWindow(QMainWindow):
 
         self.transfers.started.connect(self.toast.transfer)
         self.transfers.progress.connect(self.toast.progress)
+        self.transfers.waiting.connect(self.toast.waiting)
+        self._clip_timer = QTimer(self, singleShot=True, interval=400,
+                                  timeout=lambda: self.clip_to_phone(QApplication.clipboard().text()))
+        QApplication.clipboard().dataChanged.connect(self._clip_changed)
         self.transfers.finished.connect(self._transfer_done)
         BRIDGE.found.connect(self._found)
         BRIDGE.show_window.connect(self.show_normal)
@@ -1705,7 +2042,8 @@ class MainWindow(QMainWindow):
 
         ph = config["phone"]
         if ph:
-            self.client = PhoneClient(ph["host"], ph.get("port", PHONE_PORT), ph["token"])
+            self.client = PhoneClient(ph["host"], ph.get("port", PHONE_PORT), ph["token"],
+                                      ph.get("tls_port", 0), ph.get("fp"))
             self.dev_name.setText(ph.get("name") or "Телефон")
             self.show_page("offline")
             self.poll()
@@ -1860,6 +2198,119 @@ class MainWindow(QMainWindow):
         lay.setStretchFactor(hc, 1)
         return w
 
+    def _build_screen(self):
+        w, lay = self._page()
+        sc, sl = card(lay, (12, 12, 12, 12), 8)
+        top = QHBoxLayout()
+        top.setContentsMargins(4, 0, 0, 0)
+        self.scr_title = label("Экран телефона", "h3")
+        top.addWidget(self.scr_title, 1)
+        self.scr_btn = button("Показать экран", "primary", fn=self.screen_toggle)
+        self.scr_btn.setMinimumHeight(40)
+        top.addWidget(self.scr_btn)
+        sl.addLayout(top)
+        self.scr_hint = label("", "muted", wrap=True)
+        self.scr_hint.setAlignment(Qt.AlignCenter)
+        sl.addWidget(self.scr_hint)
+        self.scr_view = ScreenView(self)
+        sl.addWidget(self.scr_view, 1)
+        keys = QHBoxLayout()
+        keys.setSpacing(6)
+        for ic, k, tip in [("back", "back", "Назад (правая кнопка мыши, Esc)"), ("home", "home", "Домой (колесо-кнопка)"),
+                           ("recents", "recents", "Недавние приложения"), ("bell", "notifications", "Шторка"),
+                           ("shot", "shot", "Снимок экрана телефона"), ("lock", "lock", "Заблокировать телефон")]:
+            b = button("", "tinted", icon=ic, tip=tip, fn=lambda _=False, k=k: self.screen_key(k))
+            b.setMinimumHeight(42)
+            keys.addWidget(b, 1)
+        sl.addLayout(keys)
+        lay.setStretchFactor(sc, 1)
+        self._scr_stream = None
+        self._scr_wait = QTimer(self, interval=1000, timeout=self._screen_poll)
+        self._scr_deadline = 0.0
+        self._screen_idle()
+        return w
+
+    def _screen_idle(self, text=None):
+        self.scr_btn.setText("Показать экран")
+        self.scr_hint.setText(text or "Нажмите «Показать экран», затем на телефоне — уведомление RafLink → «Начать».\n"
+                                      "Мышь: щелчок — нажатие, протянуть — свайп, колесо — прокрутка, "
+                                      "правая кнопка — «Назад». Печатать можно прямо с клавиатуры ПК.")
+        self.scr_hint.show()
+
+    def screen_toggle(self):
+        if self._scr_stream is not None or self._scr_wait.isActive():
+            self.screen_stop(stop_phone=True)
+            return
+        if self.client is None or not self.online:
+            return
+        self.scr_btn.setText("Отмена")
+        self.scr_hint.setText("Подтвердите на телефоне: уведомление RafLink «ПК просит показать экран» → «Начать».")
+        self._scr_deadline = time.time() + 90
+        run_bg(self.client.screen_request, self._screen_got_state, lambda e: self._screen_idle(str(e)))
+        self._scr_wait.start()
+
+    def _screen_poll(self):
+        if time.time() > self._scr_deadline:
+            self._scr_wait.stop()
+            self._screen_idle("Телефон не подтвердил показ экрана. Нажмите «Показать экран» ещё раз.")
+            return
+        if self.client is not None:
+            run_bg(self.client.screen_state, self._screen_got_state, lambda e: None)
+
+    def _screen_got_state(self, st):
+        if not self._scr_wait.isActive() and self._scr_stream is None:
+            return
+        self._scr_control = bool(st.get("control"))
+        if st.get("running") and self._scr_stream is None:
+            self._scr_wait.stop()
+            self._screen_start_stream()
+
+    def _screen_start_stream(self):
+        self._scr_stream = ScreenStream(self.client)
+        self._scr_stream.frame.connect(self._screen_frame)
+        self._scr_stream.ended.connect(self._screen_ended)
+        self.scr_btn.setText("Остановить")
+        if getattr(self, "_scr_control", False):
+            self.scr_hint.hide()
+        else:
+            self.scr_hint.setText("Управление мышкой выключено: на телефоне RafLink → «Управление с ПК (мышью)» → включить.")
+
+    def _screen_frame(self, img):
+        if self.scr_hint.isVisible() and getattr(self, "_scr_control", False):
+            self.scr_hint.hide()
+        self.scr_view.set_frame(img)
+
+    def _screen_ended(self, err):
+        self._scr_stream = None
+        if err:
+            self._screen_idle(f"Показ экрана прервался: {err}")
+        else:
+            self._screen_idle()
+
+    def screen_stop(self, stop_phone=False):
+        self._scr_wait.stop()
+        st, self._scr_stream = self._scr_stream, None
+        if st is not None:
+            st.ended.disconnect()
+            st.stop()
+        if stop_phone and self.client is not None:
+            run_bg(self.client.screen_stop, lambda r: None, lambda e: None)
+        self._screen_idle()
+
+    def screen_input(self, ev):
+        if self.client is None or self._scr_stream is None:
+            return
+
+        def fail(e):
+            if isinstance(e, PhoneError) and e.status == 409:
+                self.scr_hint.setText("Управление мышкой выключено: на телефоне RafLink → «Управление с ПК (мышью)» → включить.")
+                self.scr_hint.show()
+
+        run_bg(lambda: self.client.input(ev), lambda r: None, fail)
+
+    def screen_key(self, key):
+        self.screen_input({"t": "key", "key": key})
+
     def _build_offline(self):
         w, lay = self._page()
         lay.addStretch(1)
@@ -1944,6 +2395,11 @@ class MainWindow(QMainWindow):
     def _set_state(self, online: bool):
         c = P["ok"] if online else P["warn"]
         t = "Подключено" if online else "Нет связи"
+        secure = online and self.client is not None and self.client.secure
+        if secure:
+            t += " · 🔒"
+        self.dev_state.setToolTip("Соединение зашифровано (TLS), телефон проверен по отпечатку сертификата"
+                                  if secure else "")
         self.dev_state.setText(f'<span style="color:{c}; font-size:15px">●</span>&nbsp;&nbsp;'
                                f'<span style="color:{P["muted"]}; font-size:16px">{t}</span>')
 
@@ -1963,13 +2419,18 @@ class MainWindow(QMainWindow):
             else:
                 threading.Thread(target=lambda: zc.close(), daemon=True).start()
 
+    PAGES = {"files": 0, "photos": 1, "hist": 2, "offline": 3, "pair": 4, "screen": 5}
+    TABS = ["files", "photos", "screen", "hist"]
+
     def show_page(self, name):
-        idx = {"files": 0, "photos": 1, "hist": 2, "offline": 3, "pair": 4}[name]
+        idx = self.PAGES[name]
         self.discovery(name in ("offline", "pair"))
+        if name != "screen" and getattr(self, "_scr_stream", None) is not None:
+            self.screen_stop()            # поток кадров не нужен, пока вкладка закрыта
         self.pages.setCurrentIndex(idx)
-        self.tabbar.setVisible(idx < 3)
+        self.tabbar.setVisible(name in self.TABS)
         for i, b in enumerate(self.tab_btns):
-            b.setChecked(i == idx)
+            b.setChecked(self.TABS[i] == name)
         if name == "pair":
             self.pair_cancel.setVisible(self.config["phone"] is not None)
             self.pin.clear()
@@ -1977,12 +2438,17 @@ class MainWindow(QMainWindow):
         if name == "hist":
             self.fill_history()
 
+    def current_page(self) -> str:
+        i = self.pages.currentIndex()
+        return next(k for k, v in self.PAGES.items() if v == i)
+
     def switch_tab(self, i):
         if not self.online:
             self.show_page("offline")
             return
-        self.show_page(["files", "photos", "hist"][i])
-        if i == 1 and self.album_box.count() == 0:
+        name = self.TABS[i]
+        self.show_page(name)
+        if name == "photos" and self.album_box.count() == 0:
             self.load_albums()
 
     # ---------- сопряжение
@@ -2017,7 +2483,7 @@ class MainWindow(QMainWindow):
         if ph and not self.online and ph.get("model") and ph["model"] in name and ph["host"] != ip:
             ph["host"] = ip
             self.config["phone"] = ph
-            self.client = PhoneClient(ip, ph.get("port", PHONE_PORT), ph["token"])
+            self.client = PhoneClient(ip, ph.get("port", PHONE_PORT), ph["token"], ph.get("tls_port", 0), ph.get("fp"))
             self.poll()
 
     def _found_pick(self, row):
@@ -2061,7 +2527,16 @@ class MainWindow(QMainWindow):
             hello = c.hello()
             if hello.get("app") != "RafLink":
                 raise PhoneError("По этому адресу не RafLink")
-            return c.pair(pin)
+            if hello.get("tls_port") and hello.get("fp"):
+                tc = PhoneClient(host, tls_port=int(hello["tls_port"]), fp=hello["fp"])
+                try:
+                    r = tc.pair(pin)
+                    r["_tls"] = (int(hello["tls_port"]), hello["fp"])
+                    return r
+                except PhoneError as e:
+                    if e.status:            # неверный код и т.п. — показываем
+                        raise
+            return c.pair(pin)              # телефон без шифрования (старая версия)
 
         run_bg(work, lambda r: self._paired(host, r), self._pair_failed)
 
@@ -2074,9 +2549,10 @@ class MainWindow(QMainWindow):
         self.pair_btn.setEnabled(True)
         self.pair_btn.setText("Подключить")
         name = r.get("name") or "Телефон"
+        tls_port, fp = r.get("_tls") or (0, None)
         self.config["phone"] = {"host": host, "port": PHONE_PORT, "token": r["token"], "name": name,
-                                "model": r.get("model", "")}
-        self.client = PhoneClient(host, PHONE_PORT, r["token"])
+                                "model": r.get("model", ""), "tls_port": tls_port, "fp": fp}
+        self.client = PhoneClient(host, PHONE_PORT, r["token"], tls_port, fp)
         self.dev_name.setText(name)
         self.toast.result("Подключено", name, ok=True, hide_after=3500)
         self.online = False
@@ -2108,11 +2584,72 @@ class MainWindow(QMainWindow):
         self.banner.setVisible(not info.get("files_access", True))
         self.tray.setToolTip(f"RafLink — {self.dev_name.text()}, {info.get('battery', '?')}%")
         if not was:
-            if self.pages.currentIndex() in (3, 4):
+            if self.current_page() in ("offline", "pair"):
                 self.show_page("files")
             self.load(self.cur_path)
         if info.get("outbox") and not self._outbox_busy:
             self.fetch_outbox()
+        if not self.client.secure and not self._tls_tried:
+            self.upgrade_tls()
+        seq = int(info.get("clip_seq") or 0)
+        if self.config["clip_seq"] is None:
+            self.config["clip_seq"] = seq      # старый текст из телефона не вставляем
+        elif seq > self.config["clip_seq"]:
+            self.config["clip_seq"] = seq
+            run_bg(self.client.clip_get, self._clip_from_phone, lambda e: None)
+
+    def upgrade_tls(self):
+        """Телефон с шифрованием, а подключались без него — переходим на защищённый канал."""
+        self._tls_tried = True
+        c = self.client
+
+        def work():
+            hello = PhoneClient(c.host, c.port).hello()
+            if not (hello.get("tls_port") and hello.get("fp")):
+                return None
+            tc = PhoneClient(c.host, c.port, c.token, int(hello["tls_port"]), hello["fp"])
+            tc.info()
+            return tc
+
+        def ok(tc):
+            if tc is None or self.client is not c:
+                return
+            ph = self.config["phone"]
+            ph["tls_port"], ph["fp"] = tc.tls_port, tc.fp
+            self.config["phone"] = ph
+            self.client = tc
+            self._set_state(True)
+
+        run_bg(work, ok, lambda e: None)
+
+    def clip_to_phone(self, text=None):
+        text = text if text is not None else QApplication.clipboard().text()
+        if not text:
+            self.toast.message("Буфер ПК пуст — сначала скопируйте текст")
+            return
+        if not self.online:
+            return
+        run_bg(lambda: self.client.clip_set(text),
+               lambda r: self.toast.result("Текст в буфере телефона", text[:120], ok=True, hide_after=3500),
+               lambda e: self.toast.result("Буфер не отправлен", str(e), ok=False, hide_after=5000))
+
+    def _clip_changed(self):
+        if not self.config["clip_auto"] or not self.online:
+            return
+        text = QApplication.clipboard().text()
+        if text and text != self._clip_last_phone:
+            self._clip_timer.start()
+
+    def _clip_from_phone(self, r):
+        text = r.get("text") or ""
+        if not text:
+            return
+        self._clip_last_phone = text
+        QApplication.clipboard().setText(text)
+        short = text if len(text) <= 120 else text[:117] + "…"
+        self.toast.result("Текст с телефона в буфере ПК", short + "\nВставьте: Ctrl+V", ok=True, hide_after=6000)
+        if not self.isVisible():
+            self.tray.showMessage("Текст с телефона", short, QIcon(app_icon_pixmap()), 4000)
 
     def fetch_outbox(self):
         """Телефон положил файлы в очередь «на ПК» — забираем их во «Входящие»."""
@@ -2138,7 +2675,11 @@ class MainWindow(QMainWindow):
 
     def _poll_fail(self, e):
         self._polling = False
-        if isinstance(e, PhoneError) and e.status == 401:
+        if isinstance(e, PhoneError) and e.status == 403 and "tls" in str(e).lower():
+            self._tls_tried = False
+            self.upgrade_tls()
+            return
+        if isinstance(e, PhoneError) and e.status in (401, 495):
             self.online = False
             self.toast.result("Телефон забыл этот ПК", "Подключите его заново по коду.", ok=False)
             self.show_page("pair")
@@ -2152,7 +2693,7 @@ class MainWindow(QMainWindow):
         self._set_state(False)
         ph = self.config["phone"] or {}
         self.off_text.setText(f'Последний адрес телефона: {ph.get("host", "—")}. Жду, пока он появится в сети…')
-        if self.pages.currentIndex() < 3:
+        if self.current_page() not in ("offline", "pair"):
             self.show_page("offline")
 
     # ---------- папки
@@ -2200,7 +2741,7 @@ class MainWindow(QMainWindow):
         self.view.hide()
 
     def reload(self):
-        if self.pages.currentIndex() == 1:
+        if self.current_page() == "photos":
             self.load_albums()
         else:
             self.load(self.cur_path)
@@ -2406,7 +2947,7 @@ class MainWindow(QMainWindow):
             self.toast.result("Отправлено на телефон", text + " → Загрузки/RafLink", ok=True, hide_after=6000)
             if self.cur_path.endswith("/Download/RafLink"):
                 self.load(self.cur_path)
-        if self.pages.currentIndex() == 2:
+        if self.current_page() == "hist":
             self.fill_history()
 
     def _received_many(self, paths):
@@ -2418,7 +2959,7 @@ class MainWindow(QMainWindow):
                           b2=("Показать в папке", lambda: show_in_folder(last)), hide_after=12000)
         if not self.isVisible():
             self.tray.showMessage("Файл с телефона", text, QIcon(app_icon_pixmap()), 5000)
-        if self.pages.currentIndex() == 2:
+        if self.current_page() == "hist":
             self.fill_history()
 
     def fill_history(self):
@@ -2507,6 +3048,7 @@ class MainWindow(QMainWindow):
         m.addAction(f"О программе (версия {APP_VER})", lambda: (self.show_normal(), self.about()))
         m.addAction(f"Написать автору: {APP_EMAIL}", mail_author)
         m.addAction("Мини-режим", self.to_mini)
+        m.addAction("Буфер ПК → телефон", self.clip_to_phone)
         m.addAction("Папка «Входящие»", lambda: open_local(self.config.inbox()))
         m.addSeparator()
         m.addAction("Выход", self.quit)
@@ -2543,6 +3085,8 @@ class MainWindow(QMainWindow):
 
     def quit(self):
         self._quitting = True
+        if getattr(self, "_scr_stream", None) is not None:
+            self.screen_stop(stop_phone=True)
         self.tray.hide()
         self.capsule.hide()
         QApplication.quit()
