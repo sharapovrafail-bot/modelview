@@ -102,6 +102,25 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 3) {
 
     fun peer(id: String) = peers().firstOrNull { it.id == id }
 
+    /** Тот же человек с нового устройства: старые записи с тем же именем и отделом, которые не в сети,
+     *  склеиваем с новой (переписка переезжает). Возвращает id склеенных. */
+    @Synchronized
+    fun mergeDupes(pid: String): List<String> {
+        val me = peers().firstOrNull { it.id == pid } ?: return emptyList()
+        if (me.name.isBlank() || me.name == "?") return emptyList()
+        val out = ArrayList<String>()
+        for (p in peers()) {
+            if (p.id == pid || p.online) continue
+            if (p.name.trim().lowercase() != me.name.trim().lowercase() || p.dept.trim().lowercase() != me.dept.trim().lowercase()) continue
+            writableDatabase.execSQL("UPDATE messages SET chat=? WHERE chat=?", arrayOf(pid, p.id))
+            writableDatabase.execSQL("UPDATE OR IGNORE outbox SET peer=? WHERE peer=?", arrayOf(pid, p.id))
+            writableDatabase.execSQL("DELETE FROM outbox WHERE peer=?", arrayOf(p.id))
+            writableDatabase.execSQL("DELETE FROM peers WHERE id=?", arrayOf(p.id))
+            out.add(p.id)
+        }
+        return out
+    }
+
     @Synchronized
     fun setAvh(id: String, avh: String) =
         writableDatabase.execSQL("UPDATE peers SET avh=? WHERE id=?", arrayOf(avh, id))

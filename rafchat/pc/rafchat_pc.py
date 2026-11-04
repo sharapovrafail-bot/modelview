@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.3.2"
+APP_VER = "0.4.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -472,11 +472,36 @@ class Node(QObject):
                       d.get("dept", prev[2] if prev else "") or "", ip, int(d.get("port") or 47801),
                       d.get("plat", ""), time.time()))
         if not prev:
+            self._merge_dupes(d["id"])
             self._catch_up(d["id"])
         if not was_online:
             self._wake.set()                        # у нас может быть очередь для него
             self.peers_changed.emit()
         return bool(prev), was_online
+
+    def _merge_dupes(self, pid):
+        """Тот же человек с нового устройства (переустановил программу, новый телефон): старую запись
+        с тем же именем и отделом, которая не в сети, склеиваем с новой — переписка переезжает, двойника нет."""
+        me = self.store.q("SELECT name, dept FROM peers WHERE id=?", (pid,), one=True)
+        if not me or not (me[0] or "").strip() or me[0] == "?":
+            return
+        hidden = self.cfg.setdefault("hidden", {})
+        merged = False
+        for old, last, rseen in self.store.q(
+                "SELECT id, last_seen, relay_seen FROM peers WHERE id<>? AND lower(trim(name))=lower(trim(?)) "
+                "AND lower(trim(COALESCE(dept,'')))=lower(trim(?))", (pid, me[0], me[1] or "")):
+            if time.time() - (last or 0) < ONLINE_SEC or time.time() - (rseen or 0) < RELAY_ONLINE_SEC:
+                continue                                   # оба в сети — значит, это разные люди
+            self.store.q("UPDATE messages SET chat=? WHERE chat=?", (pid, old))
+            self.store.q("UPDATE OR IGNORE outbox SET peer=? WHERE peer=?", (pid, old))
+            self.store.q("DELETE FROM outbox WHERE peer=?", (old,))
+            self.store.q("DELETE FROM peers WHERE id=?", (old,))
+            (AVATAR_DIR / f"{old}.jpg").unlink(missing_ok=True)
+            hidden[old] = time.time()
+            merged = True
+        if merged:
+            save_cfg(self.cfg)
+            self.peers_changed.emit()
 
     def _catch_up(self, pid):
         """Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки."""
@@ -705,6 +730,8 @@ class Node(QObject):
             self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen,relay_seen) VALUES(?,?,?,?,?,?,0,?)",
                          (d["id"], d.get("name") or "?", d.get("dept") or "", "", int(d.get("port") or 47801),
                           d.get("plat", ""), seen))
+            if time.time() - seen < RELAY_ONLINE_SEC:
+                self._merge_dupes(d["id"])
             self._catch_up(d["id"])
         if not was and time.time() - seen < RELAY_ONLINE_SEC:
             self._wake.set()
@@ -1092,6 +1119,35 @@ class ChatRow(QWidget):
         self.online = online
 
 
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+
+
+def image_thumb(path: str, side: int) -> QPixmap | None:
+    """Миниатюра фото (длинная сторона ≤ side) со скруглёнными углами; поворот по EXIF учитывается."""
+    from PySide6.QtGui import QImageReader, QPainterPath
+    r = QImageReader(path)
+    r.setAutoTransform(True)
+    sz = r.size()
+    if sz.isValid() and sz.width() > 0 and sz.height() > 0:
+        k = min(1.0, side * 2 / max(sz.width(), sz.height()))
+        r.setScaledSize(QSize(max(1, int(sz.width() * k)), max(1, int(sz.height() * k))))
+    img = r.read()
+    if img.isNull():
+        return None
+    img = img.scaled(side * 2, side * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    pm = QPixmap(img.size())
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    path_ = QPainterPath()
+    path_.addRoundedRect(QRectF(0, 0, img.width(), img.height()), 20, 20)
+    p.setClipPath(path_)
+    p.drawImage(0, 0, img)
+    p.end()
+    pm.setDevicePixelRatio(2)
+    return pm
+
+
 class Bubble(QFrame):
     def __init__(self, win: "ChatWindow", m: dict, show_name: bool):
         super().__init__()
@@ -1109,8 +1165,21 @@ class Bubble(QFrame):
             n.setStyleSheet(f"color:{avatar_color(m['sender'])}; font-weight:700; font-size:13px")
             lay.addWidget(n)
         f = m["file"]
+        self.thumb = None
+        self._photo = False
+        if f and Path(f["name"]).suffix.lower() in IMAGE_EXT:
+            # фото показываем прямо в переписке (как в WhatsApp); щелчок — открыть крупно
+            self.thumb = QLabel()
+            self.thumb.setCursor(Qt.PointingHandCursor)
+            self.thumb.setToolTip("Открыть фото")
+            self.thumb.hide()
+            self.thumb.mousePressEvent = lambda e: self._file_action()
+            lay.addWidget(self.thumb)
         if f:
-            row = QHBoxLayout()
+            self.frow = QWidget()
+            self.frow.setStyleSheet("background: transparent")
+            row = QHBoxLayout(self.frow)
+            row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(10)
             ic = QLabel()
             ic.setPixmap(type_icon({"name": f["name"]}, 34))
@@ -1126,7 +1195,7 @@ class Bubble(QFrame):
             self.finfo.setObjectName("me_meta" if me else "them_meta")
             col.addWidget(self.finfo)
             row.addLayout(col, 1)
-            lay.addLayout(row)
+            lay.addWidget(self.frow)
             self.bar = QProgressBar()
             self.bar.setFixedHeight(5)
             self.bar.setTextVisible(False)
@@ -1180,7 +1249,16 @@ class Bubble(QFrame):
             local = Path(m["local"]) if m["local"] else None
             have = local is not None and local.exists()
             self.finfo.setText(human(f["size"]))
-            if m["mine"]:
+            if self.thumb is not None and have and not self._photo:
+                pm = image_thumb(str(local), 300)
+                if pm is not None:
+                    self.thumb.setPixmap(pm)
+                    self.thumb.show()
+                    self.frow.hide()                       # у фото — только картинка и время
+                    self._photo = True
+            if self._photo:
+                self.fbtn.hide()
+            elif m["mine"]:
                 self.fbtn.setText("Показать в папке" if have else "")
                 self.fbtn.setVisible(have)
             elif have:
@@ -1202,10 +1280,81 @@ class Bubble(QFrame):
     def _file_action(self):
         local = Path(self.m["local"]) if self.m["local"] else None
         if local and local.exists():
-            (show_in_folder if self.m["mine"] else open_local)(local)
+            if self.thumb is not None:
+                open_local(local)
+            else:
+                (show_in_folder if self.m["mine"] else open_local)(local)
         elif not self.m["mine"]:
             self.win.node.download(self.m["id"])
             self.fbtn.setText("Жду отправителя…")
+
+
+UPDATE_API = "https://api.github.com/repos/sharapovrafail-bot/modelview/releases/tags/rafchat-latest"
+
+
+def _ver(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except ValueError:
+        return (0,)
+
+
+class Updater(QObject):
+    """Автообновление: раз в 6 часов смотрит последнюю сборку на GitHub; есть новее — предлагает обновить."""
+    found = Signal(str, str)                 # версия, ссылка на установщик
+    progress = Signal(int, int)
+    done = Signal(str)                       # путь к скачанному установщику или "" при ошибке
+
+    def __init__(self):
+        super().__init__()
+        self.ver = ""
+        self.url = ""
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        time.sleep(20)
+        while True:
+            self.check()
+            time.sleep(6 * 3600)
+
+    def check(self):
+        import re
+        import urllib.request
+        try:
+            req = urllib.request.Request(UPDATE_API, headers={"User-Agent": f"RafChat/{APP_VER}",
+                                                              "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                rel = json.loads(r.read())
+        except Exception:
+            return
+        for a in rel.get("assets", []):
+            mt = re.fullmatch(r"RafChat-Setup-(\d+\.\d+\.\d+)\.exe", a.get("name", ""))
+            if mt and _ver(mt.group(1)) > _ver(APP_VER):
+                self.ver, self.url = mt.group(1), a["browser_download_url"]
+                self.found.emit(self.ver, self.url)
+
+    def download(self):
+        threading.Thread(target=self._download, daemon=True).start()
+
+    def _download(self):
+        import tempfile
+        import urllib.request
+        out = Path(tempfile.gettempdir()) / f"RafChat-Setup-{self.ver}.exe"
+        try:
+            req = urllib.request.Request(self.url, headers={"User-Agent": f"RafChat/{APP_VER}"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(out, "wb") as fh:
+                total = int(r.headers.get("Content-Length") or 0)
+                got = 0
+                while True:
+                    b = r.read(256 * 1024)
+                    if not b:
+                        break
+                    fh.write(b)
+                    got += len(b)
+                    self.progress.emit(got, total)
+            self.done.emit(str(out))
+        except Exception:
+            self.done.emit("")
 
 
 class ChatWindow(QMainWindow):
@@ -1264,6 +1413,18 @@ class ChatWindow(QMainWindow):
         self.net_lbl = label("", "small", wrap=True)
         self.net_lbl.setContentsMargins(16, 4, 12, 0)
         sl.addWidget(self.net_lbl)
+        self.upd_btn = button("", "primary", fn=self.do_update)
+        self.upd_btn.hide()
+        upw = QWidget()
+        upl = QHBoxLayout(upw)
+        upl.setContentsMargins(12, 8, 12, 4)
+        upl.addWidget(self.upd_btn)
+        sl.addWidget(upw)
+        self.updater = Updater()
+        self.updater.found.connect(self._update_found)
+        self.updater.progress.connect(lambda g, t: self.upd_btn.setText(
+            f"Скачиваю… {g * 100 // t if t else 0}%"))
+        self.updater.done.connect(self._update_ready)
         h.addWidget(side)
 
         # ---- справа: переписка
@@ -1392,6 +1553,43 @@ class ChatWindow(QMainWindow):
             q.drawEllipse(QRectF(33, 33, 10, 10))
             q.end()
         return pm
+
+    def _update_found(self, ver, _url):
+        if self.upd_btn.isVisible():
+            return
+        self.upd_btn.setText(f"Обновить до версии {ver}")
+        self.upd_btn.setEnabled(True)
+        self.upd_btn.show()
+        if getattr(self, "tray", None) is not None:
+            self.tray.showMessage("Доступна новая версия RafChat",
+                                  f"Версия {ver}. Нажмите «Обновить» внизу списка чатов.", self._tray_icon(), 8000)
+
+    def do_update(self):
+        if not (IS_WIN and getattr(sys, "frozen", False)):
+            QDesktopServices.openUrl(QUrl("https://github.com/sharapovrafail-bot/modelview/releases/tag/rafchat-latest"))
+            return
+        if QMessageBox.question(self, "RafChat", f"Обновить RafChat до версии {self.updater.ver}?\n\n"
+                                "Программа скачает установщик, закроется на несколько секунд и запустится снова. "
+                                "Переписка и настройки сохранятся.") != QMessageBox.Yes:
+            return
+        self.upd_btn.setEnabled(False)
+        self.upd_btn.setText("Скачиваю…")
+        self.updater.download()
+
+    def _update_ready(self, path):
+        if not path:
+            self.upd_btn.setEnabled(True)
+            self.upd_btn.setText(f"Обновить до версии {self.updater.ver}")
+            QMessageBox.warning(self, "RafChat", "Не удалось скачать обновление. Проверьте интернет и попробуйте ещё раз.")
+            return
+        import subprocess
+        try:
+            # установщик сам закроет RafChat, поставит новую версию и запустит её (Windows спросит разрешение)
+            subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
+        except OSError:
+            os.startfile(path)                                         # type: ignore[attr-defined]
+        self.node.stop()
+        QApplication.quit()
 
     def show_emoji(self):
         panel = EmojiPanel(self)

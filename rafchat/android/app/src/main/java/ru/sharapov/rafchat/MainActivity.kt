@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 class MainActivity : AppCompatActivity() {
     private lateinit var list: LinearLayout
     private lateinit var status: TextView
+    private lateinit var updBtn: TextView
     private val dp get() = { v: Float -> Ui.dpi(this, v) }
 
     private val askNotif = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -59,6 +60,13 @@ class MainActivity : AppCompatActivity() {
             background = Ui.roundBg(Ui.SURFACE, Ui.dp(this@MainActivity, 20f))
         }
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(16f), d(4f), d(16f), d(16f)) }
+        updBtn = TextView(this).apply {
+            textSize = 16f; setTypeface(typeface, Typeface.BOLD); setTextColor(0xFFFFFFFF.toInt()); gravity = Gravity.CENTER
+            background = Ui.roundBg(Ui.ACCENT, Ui.dp(this@MainActivity, 14f)); setPadding(d(12f), d(13f), d(12f), d(13f))
+            visibility = View.GONE
+            setOnClickListener { Updater.install(this@MainActivity) { t -> text = t } }
+        }
+        wrap.addView(updBtn, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(12f) })
         wrap.addView(list)
         status = TextView(this).apply { setTextColor(Ui.MUTED); textSize = 14f; setPadding(d(8f), d(14f), d(8f), 0) }
         wrap.addView(status)
@@ -80,6 +88,12 @@ class MainActivity : AppCompatActivity() {
         if (!::list.isInitialized) return
         ContextCompat.registerReceiver(this, changed, IntentFilter(Node.ACTION_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         refresh()
+        val showUpd = {
+            if (!Updater.busy) updBtn.text = "Обновить до версии ${Updater.newVer}"
+            updBtn.visibility = View.VISIBLE
+        }
+        if (Updater.newVer != null) showUpd()
+        Updater.check(this, showUpd)
     }
 
     override fun onPause() {

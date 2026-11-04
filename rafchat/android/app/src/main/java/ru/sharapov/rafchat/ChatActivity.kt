@@ -225,7 +225,21 @@ class ChatActivity : AppCompatActivity() {
             text = m.senderName; textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.color(m.sender))
         })
         val f = m.file
-        if (f != null) {
+        val photo = if (f != null && m.local != null && Ui.ext(f.name) in Ui.IMAGE_EXT)
+            Ui.thumb(this, m.local, d(260f) * 2) else null
+        if (f != null && photo != null) {
+            // фото — прямо в переписке, нажатие — открыть крупно
+            b.addView(ImageView(this).apply {
+                val dr = androidx.core.graphics.drawable.RoundedBitmapDrawableFactory.create(resources, photo)
+                dr.cornerRadius = Ui.dp(this@ChatActivity, 12f)
+                setImageDrawable(dr)
+                adjustViewBounds = true
+                maxWidth = d(240f); maxHeight = d(300f)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setOnClickListener { Ui.open(this@ChatActivity, m.local!!, f.name) }
+            }, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = d(4f) })
+            b.setPadding(d(5f), d(5f), d(5f), d(5f))
+        } else if (f != null) {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             row.addView(Ui.fileBadge(this, f.name), LinearLayout.LayoutParams(d(38f), d(44f)))
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(10f), 0, 0, 0) }
@@ -274,6 +288,7 @@ class ChatActivity : AppCompatActivity() {
         }
         b.addView(TextView(this).apply {
             text = Ui.time(m.ts) + st; textSize = 12f; setTextColor(meta); gravity = Gravity.END
+            if (photo != null) setPadding(0, 0, d(8f), d(2f))
         }, LinearLayout.LayoutParams(-1, -2))
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = if (me) Gravity.END else Gravity.START }
         wrap.addView(b, LinearLayout.LayoutParams(-2, -2).apply {

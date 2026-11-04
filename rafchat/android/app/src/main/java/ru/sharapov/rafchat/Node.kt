@@ -262,6 +262,12 @@ object Node {
         }
     }
 
+    private fun mergeDupes(pid: String) {
+        val gone = db.mergeDupes(pid)
+        for (old in gone) { avatarFile(old)?.delete(); Prefs.setHidden(ctx, old, true) }
+        if (gone.isNotEmpty()) changed()
+    }
+
     fun deleteChat(key: String) {
         db.deleteChat(key)
         if (key != ALL) { avatarFile(key)?.delete(); Prefs.setHidden(ctx, key, true) }
@@ -292,7 +298,7 @@ object Node {
             d.optString("plat", "").ifEmpty { prev?.plat ?: "" },
             System.currentTimeMillis()
         )
-        if (prev == null) catchUp(pid)
+        if (prev == null) { mergeDupes(pid); catchUp(pid) }
         checkAvatar(pid, d.optString("avh", ""), ip, d.optInt("port", TCP))
         if (!wasOnline) { kick(); changed() }
         return !wasOnline
@@ -626,7 +632,7 @@ object Node {
         val wasOnline = prev?.online == true
         val isNew = db.upsertRelay(pid, d.optString("name", "").ifEmpty { null },
             if (d.has("dept")) d.optString("dept") else null, d.optString("plat", ""), seen)
-        if (isNew) catchUp(pid)
+        if (isNew) { if (nowOnline) mergeDupes(pid); catchUp(pid) }
         checkAvatar(pid, d.optString("avh", ""), null, TCP)
         if (!wasOnline && System.currentTimeMillis() - seen < RELAY_ONLINE_MS) { kick(); changed() }
     }

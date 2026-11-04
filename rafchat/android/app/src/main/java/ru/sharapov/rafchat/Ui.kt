@@ -167,6 +167,33 @@ object Ui {
         dlg.show()
     }
 
+    val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic")
+    private val thumbs = android.util.LruCache<String, android.graphics.Bitmap>(40)
+
+    /** Миниатюра фото для переписки (длинная сторона ≤ maxPx), поворот по EXIF учитывается. */
+    fun thumb(ctx: Context, local: String, maxPx: Int): android.graphics.Bitmap? {
+        thumbs.get(local)?.let { return it }
+        val uri = if (local.startsWith("content://")) Uri.parse(local) else Uri.fromFile(File(local))
+        val b = try {
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(ctx.contentResolver, uri)) { dec, info, _ ->
+                    val s = info.size
+                    val k = maxOf(1, maxOf(s.width, s.height) / maxPx)
+                    if (k > 1) dec.setTargetSampleSize(k)
+                }
+            } else {
+                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                ctx.contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, o) }
+                val k = maxOf(1, maxOf(o.outWidth, o.outHeight) / maxPx)
+                ctx.contentResolver.openInputStream(uri)?.use {
+                    android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = k })
+                }
+            }
+        } catch (e: Exception) { null } ?: return null
+        thumbs.put(local, b)
+        return b
+    }
+
     fun ext(name: String) = name.substringAfterLast('.', "").lowercase()
 
     fun fileColor(name: String): Int = when (ext(name)) {

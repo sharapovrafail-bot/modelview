@@ -57,6 +57,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""RafChat"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RafChat"" dir=in action=allow program=""{app}\RafChat.exe"" enable=yes profile=any"; Flags: runhidden
 Filename: "{app}\RafChat.exe"; Description: "Запустить RafChat"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\RafChat.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM RafChat.exe"; Flags: runhidden; RunOnceId: "StopRafChat"
