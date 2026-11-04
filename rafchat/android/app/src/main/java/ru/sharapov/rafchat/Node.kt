@@ -264,7 +264,7 @@ object Node {
 
     fun deleteChat(key: String) {
         db.deleteChat(key)
-        if (key != ALL) avatarFile(key)?.delete()
+        if (key != ALL) { avatarFile(key)?.delete(); Prefs.setHidden(ctx, key, true) }
         changed()
     }
 
@@ -617,7 +617,13 @@ object Node {
 
     private fun upsertRelay(d: JSONObject, seen: Long) {
         val pid = d.getString("id")
-        val wasOnline = db.peer(pid)?.online == true
+        val prev = db.peer(pid)
+        val nowOnline = System.currentTimeMillis() - seen < RELAY_ONLINE_MS
+        // сервер помнит устройства 60 дней: старые установки и удалённые чаты не показываем, пока не выйдут на связь
+        if (prev == null && !nowOnline &&
+            (pid in Prefs.hidden(ctx) || System.currentTimeMillis() - seen > 3 * 86_400_000L)) return
+        if (nowOnline) Prefs.setHidden(ctx, pid, false)
+        val wasOnline = prev?.online == true
         val isNew = db.upsertRelay(pid, d.optString("name", "").ifEmpty { null },
             if (d.has("dept")) d.optString("dept") else null, d.optString("plat", ""), seen)
         if (isNew) catchUp(pid)

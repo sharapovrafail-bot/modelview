@@ -28,6 +28,12 @@ object Prefs {
     fun setAvh(ctx: Context, v: String) = sp(ctx).edit().putString("avh", v).putLong("avh_up", 0).apply()
     fun avhUp(ctx: Context) = sp(ctx).getLong("avh_up", 0)
     fun setAvhUp(ctx: Context, t: Long) = sp(ctx).edit().putLong("avh_up", t).apply()
+    /** Удалённые чаты: не возвращать их из списка сервера, пока устройство само не выйдет на связь. */
+    fun hidden(ctx: Context): Set<String> = sp(ctx).getStringSet("hidden", emptySet()) ?: emptySet()
+    fun setHidden(ctx: Context, id: String, on: Boolean) {
+        val s = HashSet(hidden(ctx))
+        if (if (on) s.add(id) else s.remove(id)) sp(ctx).edit().putStringSet("hidden", s).apply()
+    }
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

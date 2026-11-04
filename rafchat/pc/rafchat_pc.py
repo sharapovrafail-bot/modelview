@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.3.0"
+APP_VER = "0.3.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -452,6 +452,8 @@ class Node(QObject):
         if key != ALL:
             self.store.q("DELETE FROM outbox WHERE peer=?", (key,))
             self.store.q("DELETE FROM peers WHERE id=?", (key,))
+            self.cfg.setdefault("hidden", {})[key] = time.time()
+            save_cfg(self.cfg)
             (AVATAR_DIR / f"{key}.jpg").unlink(missing_ok=True)
         self.peers_changed.emit()
 
@@ -683,10 +685,19 @@ class Node(QObject):
             self._upsert_relay(d, time.time() - (now - p.get("last", 0)))
 
     def _upsert_relay(self, d, seen):
+        prev = self.store.q("SELECT relay_seen, last_seen FROM peers WHERE id=?", (d["id"],), one=True)
+        hidden = self.cfg.setdefault("hidden", {})
+        if not prev and time.time() - seen > RELAY_ONLINE_SEC:
+            # сервер помнит устройства 60 дней: старые установки и удалённые чаты не показываем,
+            # пока устройство само не выйдет на связь
+            if d["id"] in hidden or time.time() - seen > 3 * 86400:
+                return
+        if d["id"] in hidden:
+            hidden.pop(d["id"], None)
+            save_cfg(self.cfg)
+        was = bool(prev) and (time.time() - max(prev[0] or 0, prev[1] or 0) < RELAY_ONLINE_SEC)
         if d.get("avh"):
             self._check_avatar(d["id"], d["avh"])
-        prev = self.store.q("SELECT relay_seen, last_seen FROM peers WHERE id=?", (d["id"],), one=True)
-        was = bool(prev) and (time.time() - max(prev[0] or 0, prev[1] or 0) < RELAY_ONLINE_SEC)
         if prev:
             self.store.q("UPDATE peers SET name=COALESCE(?,name), dept=COALESCE(?,dept), relay_seen=MAX(relay_seen,?) "
                          "WHERE id=?", (d.get("name"), d.get("dept"), seen, d["id"]))
