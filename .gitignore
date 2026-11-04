@@ -17,3 +17,7 @@ rafchat/pc/version_info.txt
 rafchat/android/.gradle/
 rafchat/android/build/
 rafchat/android/app/build/
+rafchat/ios/RafChat.xcodeproj/
+rafchat/ios/build/
+rafchat/ios/Payload/
+rafchat/ios/RafChat/Info.plist

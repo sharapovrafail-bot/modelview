@@ -1,0 +1,36 @@
+# Проект Xcode для RafChat (iPhone). Генерируется на Mac командой: xcodegen generate
+name: RafChat
+options:
+  bundleIdPrefix: ru.sharapov
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  RafChat:
+    type: application
+    platform: iOS
+    sources: [RafChat]
+    info:
+      path: RafChat/Info.plist
+      properties:
+        CFBundleDisplayName: RafChat
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: "RafChat находит коллег в локальной сети организации и обменивается с ними сообщениями и файлами."
+        NSPhotoLibraryUsageDescription: "Чтобы отправить коллегам фото или видео."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.sharapov.rafchat
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_BITCODE: NO

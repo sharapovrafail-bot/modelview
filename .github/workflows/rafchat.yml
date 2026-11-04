@@ -85,8 +85,92 @@ jobs:
           name: rafchat-windows
           path: out/*
 
+  ios:
+    runs-on: macos-latest
+    env:
+      # Подпись включится сама, когда в Settings → Secrets репозитория появятся сертификат и профиль Apple
+      IOS_SIGN: ${{ secrets.IOS_CERT_P12_BASE64 != '' && secrets.IOS_PROFILE_BASE64 != '' }}
+      HAS_ASC: ${{ secrets.ASC_API_KEY_P8_BASE64 != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: XcodeGen
+        run: brew install xcodegen
+      - name: Проект Xcode
+        working-directory: rafchat/ios
+        run: xcodegen generate
+      - name: Сборка без подписи (для Sideloadly)
+        working-directory: rafchat/ios
+        run: |
+          xcodebuild -project RafChat.xcodeproj -scheme RafChat -configuration Release -sdk iphoneos \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
+            || { grep -E "error:|Error:" -A4 build.log | head -150; tail -20 build.log; exit 1; }
+          grep -c "warning:" build.log || true
+          test -d build/Build/Products/Release-iphoneos/RafChat.app
+          VER=$(grep -oE 'MARKETING_VERSION: "[^"]+"' project.yml | grep -oE '[0-9.]+')
+          mkdir -p Payload ../../out && cp -R build/Build/Products/Release-iphoneos/RafChat.app Payload/
+          zip -qry ../../out/RafChat-$VER-iOS-unsigned.ipa Payload
+          ls -la ../../out
+      - name: Подпись (если есть сертификат Apple)
+        if: env.IOS_SIGN == 'true'
+        working-directory: rafchat/ios
+        env:
+          CERT: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          CERT_PASS: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROFILE_BASE64 }}
+          TEAM: ${{ secrets.IOS_TEAM_ID }}
+          METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+        run: |
+          KC=$RUNNER_TEMP/build.keychain-db; KCP=$(uuidgen)
+          security create-keychain -p "$KCP" "$KC"; security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCP" "$KC"; security list-keychains -d user -s "$KC"
+          echo -n "$CERT" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 -k "$KC" -P "$CERT_PASS" -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KCP" "$KC"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo -n "$PROFILE" | base64 --decode > $RUNNER_TEMP/p.mobileprovision
+          security cms -D -i $RUNNER_TEMP/p.mobileprovision > $RUNNER_TEMP/p.plist
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' $RUNNER_TEMP/p.plist)
+          PNAME=$(/usr/libexec/PlistBuddy -c 'Print Name' $RUNNER_TEMP/p.plist)
+          cp $RUNNER_TEMP/p.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          METHOD=${METHOD:-app-store}
+          xcodebuild -project RafChat.xcodeproj -scheme RafChat -configuration Release -sdk iphoneos \
+            -archivePath $RUNNER_TEMP/RafChat.xcarchive archive CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$TEAM" \
+            CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PNAME" > archive.log 2>&1 \
+            || { grep -E "error:" -A4 archive.log | head -80; exit 1; }
+          cat > $RUNNER_TEMP/export.plist <<PL
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>$METHOD</string>
+            <key>teamID</key><string>$TEAM</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key><dict><key>ru.sharapov.rafchat</key><string>$PNAME</string></dict>
+          </dict></plist>
+          PL
+          xcodebuild -exportArchive -archivePath $RUNNER_TEMP/RafChat.xcarchive -exportPath $RUNNER_TEMP/export \
+            -exportOptionsPlist $RUNNER_TEMP/export.plist
+          VER=$(grep -oE 'MARKETING_VERSION: "[^"]+"' project.yml | grep -oE '[0-9.]+')
+          cp $RUNNER_TEMP/export/*.ipa ../../out/RafChat-$VER-iOS.ipa
+      - name: Отправка в TestFlight (если есть ключ App Store Connect)
+        if: env.IOS_SIGN == 'true' && env.HAS_ASC == 'true'
+        env:
+          ASC_KEY: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo -n "$ASC_KEY" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+          xcrun altool --upload-app -f out/RafChat-*-iOS.ipa -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-ios
+          path: out/*.ipa
+
   release:
-    needs: [android, windows]
+    needs: [android, windows, ios]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -98,8 +182,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete rafchat-latest --yes --cleanup-tag || true
-          gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe \
+          gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe out/rafchat-ios/*.ipa \
             --target "${{ github.sha }}" \
             --title "RafChat — чат и файлы по локальной сети (последняя сборка)" \
-            --notes "RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — приложение для Android. Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md." \
+            --notes "RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — приложение для Android. RafChat-*-iOS-unsigned.ipa — для iPhone (ставится через Sideloadly). Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md." \
             --prerelease
