@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.StatFs
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import android.util.Size
 import org.json.JSONArray
@@ -182,7 +183,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     private fun hello() = JSONObject()
         .put("app", "RafLink")
         .put("version", BuildConfigVersion.NAME)
-        .put("name", deviceName())
+        .put("name", deviceName(ctx))
         .put("model", Build.MODEL)
         .put("paired", Prefs.isPaired(ctx))
 
@@ -202,7 +203,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             Prefs.newPin(ctx)
             Prefs.addEvent(ctx, "Подключён ПК «$pcName»")
             onEvent()
-            json(out, 200, JSONObject().put("token", token).put("name", deviceName()).put("model", Build.MODEL))
+            json(out, 200, JSONObject().put("token", token).put("name", deviceName(ctx)).put("model", Build.MODEL))
         }
     }
 
@@ -210,7 +211,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val st = StatFs(root.path)
         return JSONObject()
-            .put("name", deviceName())
+            .put("name", deviceName(ctx))
             .put("model", Build.MODEL)
             .put("android", Build.VERSION.RELEASE)
             .put("battery", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY))
@@ -428,7 +429,12 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             return f
         }
 
-        fun deviceName(): String {
+        /** Имя телефона как в «Настройки → О телефоне» (у Xiaomi — «Xiaomi 11T Pro»). */
+        fun deviceName(ctx: Context): String {
+            try {
+                val n = Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME)
+                if (!n.isNullOrBlank()) return n
+            } catch (_: Exception) {}
             val m = Build.MODEL ?: "Android"
             val man = Build.MANUFACTURER ?: ""
             return if (m.startsWith(man, ignoreCase = true)) m else "${man.replaceFirstChar { it.uppercase() }} $m"
@@ -436,4 +442,4 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     }
 }
 
-object BuildConfigVersion { const val NAME = "0.2.0" }
+object BuildConfigVersion { const val NAME = "0.2.1" }

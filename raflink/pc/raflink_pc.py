@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QProgressBar, QPushButton, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.2.0"
+APP_VER = "0.2.1"
 PHONE_PORT = 47700
 IS_WIN = sys.platform == "win32"
 
@@ -1540,6 +1540,11 @@ class MainWindow(QMainWindow):
         self.info = info
         was = self.online
         self.online = True
+        ph = self.config["phone"] or {}
+        if info.get("name") and not ph.get("name_custom") and ph.get("name") != info["name"]:
+            ph["name"] = info["name"]
+            self.config["phone"] = ph
+            self.dev_name.setText(info["name"])
         ch = " ⚡" if info.get("charging") else ""
         self.batt.setText(f'{info.get("battery", "?")}%{ch}')
         self.batt.setToolTip(f'Свободно {human(info.get("free", 0))} из {human(info.get("total", 0))}')
@@ -1968,6 +1973,7 @@ class MainWindow(QMainWindow):
     def quit(self):
         self._quitting = True
         self.tray.hide()
+        self.capsule.hide()
         QApplication.quit()
 
     def settings(self):
@@ -2088,6 +2094,8 @@ class SettingsDialog(QDialog):
         c.data["inbox"] = self.inbox.text().strip() or default_inbox()
         ph = c["phone"]
         if ph and self.pname.text().strip():
+            if ph.get("name") != self.pname.text().strip():
+                ph["name_custom"] = True
             ph["name"] = self.pname.text().strip()
             c.data["phone"] = ph
             self.win.dev_name.setText(ph["name"])
@@ -2151,23 +2159,52 @@ def main():
     app.setFont(f)
 
     # только одна копия программы
-    sock = QLocalSocket()
-    sock.connectToServer("RafLink-single")
-    if sock.waitForConnected(300):
-        sock.write(b"show")
+    # только одна копия; если запущена другая версия — она закрывается и уступает место этой
+    for _ in range(20):
+        sock = QLocalSocket()
+        sock.connectToServer("RafLink-single")
+        if not sock.waitForConnected(300):
+            break
+        sock.write(f"show {APP_VER}".encode())
         sock.flush()
         sock.waitForBytesWritten(300)
-        return
+        sock.waitForReadyRead(1500)
+        answer = bytes(sock.readAll()).decode(errors="ignore")
+        sock.close()
+        if answer != "bye":
+            return  # та же версия уже работает — просто показали её окно
+        time.sleep(0.5)
     QLocalServer.removeServer("RafLink-single")
     single = QLocalServer()
     single.listen("RafLink-single")
 
     BRIDGE = Bridge()
-    single.newConnection.connect(lambda: (single.nextPendingConnection(), BRIDGE.show_window.emit()))
     config = Config()
     apply_theme(config["theme"] or "dark")
     zc = start_discovery()
     win = MainWindow(config)
+
+    def on_peer():
+        c = single.nextPendingConnection()
+        if c is None:
+            return
+
+        def got():
+            msg = bytes(c.readAll()).decode(errors="ignore")
+            ver = msg.split(" ", 1)[1] if " " in msg else ""
+            if ver and ver != APP_VER:
+                c.write(b"bye")
+                c.flush()
+                c.waitForBytesWritten(500)
+                win.quit()
+            else:
+                c.write(b"ok")
+                c.flush()
+                BRIDGE.show_window.emit()
+
+        c.readyRead.connect(got)
+
+    single.newConnection.connect(on_peer)
 
     if "--screenshot" in args:
         out = args[args.index("--screenshot") + 1]

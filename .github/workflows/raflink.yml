@@ -59,26 +59,44 @@ jobs:
           python raflink_pc.py --make-icon icon.png
           python -c "from PIL import Image; Image.open('icon.png').save('raflink.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 
-      - name: Сборка RafLink.exe
+      - name: Сборка RafLink (папка с программой)
         working-directory: raflink/pc
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RafLink --icon raflink.ico --collect-all zeroconf raflink_pc.py
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafLink --icon raflink.ico --collect-all zeroconf raflink_pc.py
 
       - name: Проверка запуском и снимок окна
         working-directory: raflink/pc
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath .\dist\RafLink.exe -ArgumentList '--screenshot', "$PWD\screenshot-win.png" -PassThru
+          $p = Start-Process -FilePath .\dist\RafLink\RafLink.exe -ArgumentList '--screenshot', "$PWD\screenshot-win.png" -PassThru
           if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "программа не закрылась" }
           if (-not (Test-Path screenshot-win.png)) { throw "окно не открылось" }
-          Copy-Item dist\RafLink.exe ..\..\RafLink.exe
-          Copy-Item screenshot-win.png ..\..\screenshot-win.png
+
+      - name: Установщик (Inno Setup)
+        working-directory: raflink/pc
+        shell: pwsh
+        run: |
+          $env:RAFLINK_VER = (Select-String -Path raflink_pc.py -Pattern 'APP_VER = "([^"]+)"').Matches[0].Groups[1].Value
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ошибка Inno Setup" }
+          Copy-Item screenshot-win.png ..\..\out\
+
+      - name: Проверка установщика (тихая установка и запуск)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem out\RafLink-Setup-*.exe | Select-Object -First 1
+          $p = Start-Process $setup.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\RafLink\RafLink.exe"
+          if (-not (Test-Path $exe)) { throw "программа не установилась" }
+          $r = Start-Process $exe -ArgumentList '--screenshot', "$PWD\out\screenshot-installed.png" -PassThru
+          if (-not $r.WaitForExit(90000)) { $r.Kill(); throw "установленная программа не закрылась" }
+          if (-not (Test-Path out\screenshot-installed.png)) { throw "установленная программа не открылась" }
 
       - uses: actions/upload-artifact@v4
         with:
           name: raflink-windows
-          path: |
-            RafLink.exe
-            screenshot-win.png
+          path: out/*
 
   release:
     needs: [android, windows]
@@ -93,8 +111,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete raflink-latest --yes --cleanup-tag || true
-          gh release create raflink-latest out/raflink-android/RafLink-*.apk out/raflink-windows/RafLink.exe \
+          gh release create raflink-latest out/raflink-android/RafLink-*.apk out/raflink-windows/RafLink-Setup-*.exe \
             --target "${{ github.sha }}" \
             --title "RafLink — телефон ↔ ПК (последняя сборка)" \
-            --notes "RafLink-*.apk — поставить на телефон Android. RafLink.exe — запустить на ПК с Windows 10/11. Инструкция — raflink/README.md." \
+            --notes "RafLink-*.apk — поставить на телефон Android (поверх старой версии). RafLink-Setup-*.exe — установщик для ПК с Windows 10/11, сам закрывает запущенную старую версию. Инструкция — raflink/README.md." \
             --prerelease
