@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 KEEP_SEC = 7 * 86400          # сколько хранить недоставленные сообщения
 FILE_KEEP_SEC = float(os.environ.get("RAFCHAT_FILE_DAYS", 3)) * 86400     # сколько хранить файлы
 MAX_STORE = int(float(os.environ.get("RAFCHAT_MAX_STORE_GB", 3)) * 1024 ** 3)  # предел всех файлов на диске
@@ -267,14 +267,27 @@ def make_handler(st: State):
 
 def main():
     ap = argparse.ArgumentParser(description="RafChat Relay")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("RAFCHAT_RELAY_PORT", 47888)))
+    ap.add_argument("--port", type=int, action="append",
+                    help="порт (можно несколько раз: основной 47888 и запасные 443/80/8080 для мобильного интернета)")
     ap.add_argument("--data", default=os.environ.get("RAFCHAT_RELAY_DATA", "/var/lib/rafchat"))
     a = ap.parse_args()
+    ports = a.port or [int(p) for p in os.environ.get("RAFCHAT_RELAY_PORT", "47888").replace(",", " ").split()]
     st = State(Path(a.data))
-    srv = ThreadingHTTPServer(("0.0.0.0", a.port), make_handler(st))
-    srv.daemon_threads = True
-    print(f"RafChat Relay {VERSION}: порт {a.port}, данные {a.data}", flush=True)
-    srv.serve_forever()
+    servers = []
+    for port in ports:
+        try:
+            srv = ThreadingHTTPServer(("0.0.0.0", port), make_handler(st))
+        except OSError as e:                     # порт занят (например, VPN на 443) — работаем на остальных
+            print(f"порт {port} недоступен: {e}", flush=True)
+            continue
+        srv.daemon_threads = True
+        servers.append((port, srv))
+    if not servers:
+        raise SystemExit("ни один порт не открылся")
+    print(f"RafChat Relay {VERSION}: порты {', '.join(str(p) for p, _ in servers)}, данные {a.data}", flush=True)
+    for _, srv in servers[1:]:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    servers[0][1].serve_forever()
 
 
 if __name__ == "__main__":

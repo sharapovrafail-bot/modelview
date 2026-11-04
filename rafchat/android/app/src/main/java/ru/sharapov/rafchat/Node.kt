@@ -534,7 +534,31 @@ object Node {
     fun serverAddr(): Pair<String, Int>? {
         val s = Prefs.server(ctx).trim().removePrefix("http://").trimEnd('/')
         if (s.isEmpty()) return null
-        return s.substringBefore(':') to (s.substringAfter(':', "").toIntOrNull() ?: 47888)
+        return s.substringBefore(':') to (altPort ?: s.substringAfter(':', "").toIntOrNull() ?: 47888)
+    }
+
+    @Volatile private var altPort: Int? = null
+    private var probeAt = 0L
+
+    /** Основной порт сервера не отвечает (мобильный интернет режет нестандартные порты) —
+     *  пробуем запасные «веб-порты» и запоминаем первый рабочий. */
+    private fun probePorts() {
+        if (System.currentTimeMillis() - probeAt < 30_000) return
+        probeAt = System.currentTimeMillis()
+        val s = Prefs.server(ctx).trim().removePrefix("http://").trimEnd('/')
+        if (s.isEmpty()) return
+        val host = s.substringBefore(':')
+        val main = s.substringAfter(':', "").toIntOrNull() ?: 47888
+        for (p in linkedSetOf(main, 443, 80, 8080)) {
+            val ok = try {
+                val c = URL("http://$host:$p/").openConnection() as HttpURLConnection
+                c.connectTimeout = 6000; c.readTimeout = 6000
+                val body = if (c.responseCode == 200) c.inputStream.bufferedReader().readText() else ""
+                c.disconnect()
+                body.contains("RafChat Relay")
+            } catch (e: Exception) { false }
+            if (ok) { altPort = if (p == main) null else p; return }
+        }
     }
 
     fun enc(data: ByteArray): ByteArray {
@@ -658,6 +682,7 @@ object Node {
                 if (acks.length() > 0) relayJson("POST", "/r/ack", JSONObject().put("qids", acks))
             } catch (e: Exception) {
                 if (relayOk != false) { relayOk = false; changed() }
+                probePorts()
                 if (running) Thread.sleep(5000)
             }
         }

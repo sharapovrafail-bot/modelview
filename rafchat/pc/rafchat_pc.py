@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.4.0"
+APP_VER = "0.4.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -641,7 +641,28 @@ class Node(QObject):
         if not s:
             return None
         host, _, port = s.partition(":")
-        return host, int(port or 47888)
+        return host, getattr(self, "_alt_port", None) or int(port or 47888)
+
+    def _probe_ports(self):
+        """Основной порт сервера не отвечает (мобильный интернет режет нестандартные порты) —
+        пробуем запасные «веб-порты» и запоминаем первый рабочий."""
+        if time.time() - getattr(self, "_probe_at", 0) < 30:
+            return
+        self._probe_at = time.time()
+        s = (self.cfg.get("server") or "").strip().replace("http://", "").rstrip("/")
+        host, _, port = s.partition(":")
+        main = int(port or 47888)
+        for p in dict.fromkeys([main, 443, 80, 8080]):
+            try:
+                c = http.client.HTTPConnection(host, p, timeout=6)
+                c.request("GET", "/")
+                ok = b"RafChat Relay" in c.getresponse().read()
+                c.close()
+            except (OSError, http.client.HTTPException):
+                ok = False
+            if ok:
+                self._alt_port = None if p == main else p
+                return
 
     def _relay_call(self, method, path, body=None, raw=None, timeout=15):
         host, port = self.server_addr()
@@ -771,6 +792,7 @@ class Node(QObject):
                 if self.relay_ok is not False:
                     self.relay_ok = False
                     self.peers_changed.emit()
+                self._probe_ports()
                 time.sleep(5)
 
     def _relay_item(self, m):

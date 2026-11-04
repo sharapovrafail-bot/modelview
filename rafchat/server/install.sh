@@ -6,6 +6,20 @@
 set -euo pipefail
 
 PORT="${RAFCHAT_RELAY_PORT:-47888}"
+# Запасные «веб-порты»: мобильные операторы часто режут нестандартные порты, а 443/80/8080 пропускают.
+# Берём только свободные (если 443 занят VPN — его не трогаем).
+EXTRA_PORTS=""
+for p in ${RAFCHAT_EXTRA_PORTS:-443 80 8080}; do
+  if ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}\$"; then
+    if ! systemctl is-active --quiet rafchat-relay || ! ss -tlnp 2>/dev/null | grep -E "[:.]${p} " | grep -q python3; then
+      echo "== порт ${p} занят другой программой — пропускаю"
+      continue
+    fi
+  fi
+  EXTRA_PORTS="${EXTRA_PORTS} ${p}"
+done
+PORT_ARGS="--port ${PORT}"
+for p in ${EXTRA_PORTS}; do PORT_ARGS="${PORT_ARGS} --port ${p}"; done
 BRANCH="${RAFCHAT_BRANCH:-claude/adoring-edison-95p0fr}"
 SRC="https://raw.githubusercontent.com/sharapovrafail-bot/modelview/${BRANCH}/rafchat/server/rafchat_relay.py"
 
@@ -36,7 +50,9 @@ Wants=network-online.target
 
 [Service]
 User=rafchat
-ExecStart=/usr/bin/env python3 /opt/rafchat/rafchat_relay.py --port ${PORT} --data /var/lib/rafchat
+ExecStart=/usr/bin/env python3 /opt/rafchat/rafchat_relay.py ${PORT_ARGS} --data /var/lib/rafchat
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -54,14 +70,16 @@ systemctl enable --now rafchat-relay
 systemctl restart rafchat-relay
 
 # брандмауэр: открыть порт, если включён ufw (iptables/облачный брандмауэр — см. подсказку ниже)
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  ufw allow "${PORT}/tcp" >/dev/null && echo "== ufw: порт ${PORT}/tcp открыт"
-fi
-if command -v iptables >/dev/null 2>&1; then
-  iptables -C INPUT -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null || \
-    { iptables -I INPUT -p tcp --dport "${PORT}" -j ACCEPT && echo "== iptables: порт ${PORT}/tcp открыт"; }
-  command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
-fi
+for P in ${PORT} ${EXTRA_PORTS}; do
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    ufw allow "${P}/tcp" >/dev/null && echo "== ufw: порт ${P}/tcp открыт"
+  fi
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -C INPUT -p tcp --dport "${P}" -j ACCEPT 2>/dev/null || \
+      { iptables -I INPUT -p tcp --dport "${P}" -j ACCEPT && echo "== iptables: порт ${P}/tcp открыт"; }
+  fi
+done
+command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
 
 sleep 1
 if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null; then
@@ -71,6 +89,8 @@ if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null; then
   echo "   В RafChat на каждом устройстве: ⚙ → «Профиль и сеть» → «Сервер (через интернет)»:"
   echo "       ${IP}:${PORT}"
   echo "RAFCHAT_ADDRESS=${IP}:${PORT}"
+  echo "   Запасные порты (для мобильного интернета):${EXTRA_PORTS:- нет}"
+  for P in ${EXTRA_PORTS}; do curl -fsS -m 3 "http://127.0.0.1:${P}/" >/dev/null && echo "   порт ${P}: работает"; done
   echo "   Если устройства не подключаются — откройте TCP-порт ${PORT} в панели хостинга (облачный брандмауэр)."
 else
   echo "!! Сервер не ответил. Журнал: journalctl -u rafchat-relay -n 50"
