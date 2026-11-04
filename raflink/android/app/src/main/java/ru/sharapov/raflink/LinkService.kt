@@ -85,7 +85,7 @@ class LinkService : Service() {
 
     private fun registerNsd() {
         val info = NsdServiceInfo().apply {
-            serviceName = "RafLink ${HttpServer.deviceName(this)}"
+            serviceName = "RafLink ${HttpServer.deviceName(this@LinkService)}"
             serviceType = "_raflink._tcp"
             port = PORT
         }
