@@ -29,6 +29,7 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var sub: TextView
     private lateinit var input: EditText
     private var shown = -1
+    private var shownSig = ""
     private val d = { v: Float -> Ui.dpi(this, v) }
 
     private val pick = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -63,7 +64,7 @@ class ChatActivity : AppCompatActivity() {
         head.addView(hc, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(head)
         root.addView(View(this).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(-1, 1))
-        scroll = ScrollView(this)
+        scroll = ScrollView(this).apply { descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS }
         msgs = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(12f), d(8f), d(12f), d(8f)) }
         scroll.addView(msgs)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -126,6 +127,12 @@ class ChatActivity : AppCompatActivity() {
             sub.text = if (p?.online == true) "в сети" else "не в сети — сообщения дойдут, когда появится"
         }
         val history = Node.db.history(chat)
+        // перерисовываем переписку, только если в ней что-то изменилось (иначе мешаем набору текста)
+        val sig = history.joinToString("|") { m ->
+            m.id + m.status + (m.local ?: "") + (Node.progress[m.id]?.first ?: "")
+        }
+        if (sig == shownSig) return
+        shownSig = sig
         val atBottom = scroll.getChildAt(0)?.let { scroll.scrollY + scroll.height >= it.height - d(40f) } ?: true
         msgs.removeAllViews()
         var lastDay = ""
@@ -141,7 +148,8 @@ class ChatActivity : AppCompatActivity() {
             }
             msgs.addView(bubble(m))
         }
-        if (atBottom || history.size != shown) scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+        // прокрутка вниз БЕЗ смены фокуса (fullScroll уводил фокус из поля ввода — курсор «вылетал»)
+        if (atBottom || history.size != shown) scroll.post { scroll.scrollTo(0, msgs.height) }
         shown = history.size
     }
 

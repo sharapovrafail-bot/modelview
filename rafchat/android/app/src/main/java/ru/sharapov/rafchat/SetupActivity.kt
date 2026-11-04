@@ -83,6 +83,8 @@ class SetupActivity : AppCompatActivity() {
             }
         })
         val appSettings = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        link("Уведомления: включите «Всплывающие» и «На экране блокировки»",
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName), appSettings)
         link("Работа в фоне без ограничений",
             Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")), appSettings)
         link("Автозапуск",

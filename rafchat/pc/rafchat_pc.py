@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.1.1"
+APP_VER = "0.1.2"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -886,6 +886,8 @@ class ChatWindow(QMainWindow):
         self._refresh_timer.start()
 
     def fill_chats(self):
+        if hasattr(self, "tray"):
+            self.tray.setIcon(self._tray_icon())
         cur = self.chat
         self.chats.blockSignals(True)
         self.chats.clear()
@@ -1021,8 +1023,9 @@ class ChatWindow(QMainWindow):
             if not (self.isActiveWindow() and m["chat"] == self.chat):
                 body = ("📎 " + m["file"]["name"]) if m["file"] and not m["text"] else m["text"]
                 where = "Общий чат · " if m["chat"] == ALL else ""
-                self.tray.showMessage(f"{where}{m['sender_name']}", body[:200], QIcon(C.app_icon_pixmap()), 5000)
-                QApplication.alert(self)
+                self._notify_chat = m["chat"]
+                self.tray.showMessage(f"{where}{m['sender_name']}", body[:200], self._tray_icon(), 6000)
+                QApplication.alert(self)             # мигает кнопка на панели задач
         self._refresh_timer.start()
 
     def _on_progress(self, mid, got, total):
@@ -1095,9 +1098,36 @@ class ChatWindow(QMainWindow):
         self.tray.setContextMenu(m)
         self.tray.activated.connect(lambda r: self.show_normal() if r in (QSystemTrayIcon.Trigger,
                                                                           QSystemTrayIcon.DoubleClick) else None)
-        self.tray.messageClicked.connect(self.show_normal)
+        self.tray.messageClicked.connect(self._open_notified)
         self.tray.setToolTip("RafChat")
         self.tray.show()
+
+    def _open_notified(self):
+        """Щелчок по уведомлению — открыть окно сразу в нужном чате (как в WhatsApp)."""
+        self.show_normal()
+        chat = getattr(self, "_notify_chat", None)
+        if chat:
+            self.open_chat(chat)
+
+    def _tray_icon(self) -> QIcon:
+        """Значок у часов с красным кружком непрочитанных."""
+        total = sum(self.node.last_and_unread(k)[1] for k in [ALL] + [p["id"] for p in self.node.peers()])
+        pm = C.app_icon_pixmap(64)
+        if total:
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#FF3B30"))
+            p.drawEllipse(QRectF(26, 0, 38, 38))
+            f = QFont()
+            f.setPixelSize(26 if total < 10 else 20)
+            f.setWeight(QFont.Bold)
+            p.setFont(f)
+            p.setPen(QColor("#FFFFFF"))
+            p.drawText(QRectF(26, 0, 38, 38), Qt.AlignCenter, str(total) if total < 100 else "99")
+            p.end()
+        self.tray.setToolTip(f"RafChat — непрочитанных: {total}" if total else "RafChat")
+        return QIcon(pm)
 
     def show_normal(self):
         self.show()
