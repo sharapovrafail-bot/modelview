@@ -169,7 +169,8 @@ jobs:
           path: out/*.ipa
 
   release:
-    needs: [android, windows, ios]
+    # iPhone не задерживает выкладку: Mac на GitHub бывает занят — .ipa добавится позже (job ios-release)
+    needs: [android, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -182,9 +183,24 @@ jobs:
         run: |
           for i in 1 2 3; do gh release delete rafchat-latest --yes --cleanup-tag && break || sleep 10; done
           gh release view rafchat-latest >/dev/null 2>&1 && { echo "старый релиз не удалился"; exit 1; } || true
-          for i in 1 2 3; do gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe out/rafchat-ios/*.ipa \
+          for i in 1 2 3; do gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe \
             --target "${{ github.sha }}" \
             --title "RafChat — чат и файлы по локальной сети (последняя сборка)" \
             --notes "RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — приложение для Android. RafChat-*-iOS-unsigned.ipa — для iPhone (ставится через Sideloadly). Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md." \
             --prerelease && break || sleep 15; done
           gh release view rafchat-latest >/dev/null
+
+  ios-release:
+    needs: [ios, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rafchat-ios
+          path: out
+      - name: Добавить .ipa в релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for i in 1 2 3; do gh release upload rafchat-latest out/*.ipa --clobber && break || sleep 15; done
