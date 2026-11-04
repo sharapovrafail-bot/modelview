@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 KEEP_SEC = 7 * 86400          # сколько хранить недоставленные сообщения
 FILE_KEEP_SEC = float(os.environ.get("RAFCHAT_FILE_DAYS", 3)) * 86400     # сколько хранить файлы
 MAX_STORE = int(float(os.environ.get("RAFCHAT_MAX_STORE_GB", 3)) * 1024 ** 3)  # предел всех файлов на диске
@@ -265,10 +265,29 @@ def make_handler(st: State):
     return H
 
 
+class TLSServer(ThreadingHTTPServer):
+    """Тот же сервер, но с шифрованием TLS (рукопожатие — в потоке клиента, чтобы медленный клиент
+    не задерживал остальных). Нужен для мобильного интернета: операторы вырезают незашифрованный HTTP."""
+    ctx = None
+
+    def finish_request(self, request, client_address):
+        request.settimeout(30)
+        try:
+            request = self.ctx.wrap_socket(request, server_side=True)
+        except (OSError, ValueError):
+            return
+        request.settimeout(None)
+        super().finish_request(request, client_address)
+
+
 def main():
     ap = argparse.ArgumentParser(description="RafChat Relay")
     ap.add_argument("--port", type=int, action="append",
                     help="порт (можно несколько раз: основной 47888 и запасные 443/80/8080 для мобильного интернета)")
+    ap.add_argument("--tls-port", type=int, action="append", default=[],
+                    help="порт с шифрованием TLS (для мобильного интернета)")
+    ap.add_argument("--cert", default="", help="сертификат TLS (PEM)")
+    ap.add_argument("--key", default="", help="ключ TLS (PEM)")
     ap.add_argument("--data", default=os.environ.get("RAFCHAT_RELAY_DATA", "/var/lib/rafchat"))
     a = ap.parse_args()
     ports = a.port or [int(p) for p in os.environ.get("RAFCHAT_RELAY_PORT", "47888").replace(",", " ").split()]
@@ -282,6 +301,19 @@ def main():
             continue
         srv.daemon_threads = True
         servers.append((port, srv))
+    if a.tls_port and a.cert and a.key:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(a.cert, a.key)
+        for port in a.tls_port:
+            try:
+                srv = TLSServer(("0.0.0.0", port), make_handler(st))
+            except OSError as e:
+                print(f"порт TLS {port} недоступен: {e}", flush=True)
+                continue
+            srv.ctx = ctx
+            srv.daemon_threads = True
+            servers.append((port, srv))
     if not servers:
         raise SystemExit("ни один порт не открылся")
     print(f"RafChat Relay {VERSION}: порты {', '.join(str(p) for p, _ in servers)}, данные {a.data}", flush=True)

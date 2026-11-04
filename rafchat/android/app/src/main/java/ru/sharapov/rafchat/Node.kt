@@ -547,6 +547,26 @@ object Node {
     }
 
     @Volatile private var altPort: Int? = null
+    @Volatile private var altTls = false
+
+    /** Соединение с сервером; по TLS — без проверки сертификата (он у сервера свой, самоподписанный;
+     *  переписка всё равно зашифрована ключом организации). */
+    private fun relayConn(host: String, port: Int, tls: Boolean, path: String): HttpURLConnection {
+        if (!tls) return URL("http://$host:$port$path").openConnection() as HttpURLConnection
+        val c = URL("https://$host:$port$path").openConnection() as javax.net.ssl.HttpsURLConnection
+        c.sslSocketFactory = trustAll
+        c.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
+        return c
+    }
+
+    private val trustAll: javax.net.ssl.SSLSocketFactory by lazy {
+        val tm = object : javax.net.ssl.X509TrustManager {
+            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+        }
+        javax.net.ssl.SSLContext.getInstance("TLS").apply { init(null, arrayOf(tm), java.security.SecureRandom()) }.socketFactory
+    }
     private var probeAt = 0L
 
     /** Основной порт сервера не отвечает (мобильный интернет режет нестандартные порты) —
@@ -558,15 +578,17 @@ object Node {
         if (s.isEmpty()) return
         val host = s.substringBefore(':')
         val main = s.substringAfter(':', "").toIntOrNull() ?: 47888
-        for (p in linkedSetOf(main, 443, 80, 8080)) {
+        // сначала основной, затем шифрованные (TLS) — их мобильные операторы не вырезают, затем веб-порты
+        val cand = listOf(main to false) + listOf(2053, 2083, 2087, 9443).map { it to true } + listOf(80 to false, 8080 to false)
+        for ((p, tls) in cand) {
             val ok = try {
-                val c = URL("http://$host:$p/").openConnection() as HttpURLConnection
+                val c = relayConn(host, p, tls, "/")
                 c.connectTimeout = 6000; c.readTimeout = 6000
                 val body = if (c.responseCode == 200) c.inputStream.bufferedReader().readText() else ""
                 c.disconnect()
                 body.contains("RafChat Relay")
             } catch (e: Exception) { false }
-            if (ok) { altPort = if (p == main) null else p; return }
+            if (ok) { altPort = if (p == main) null else p; altTls = tls && p != main; return }
         }
     }
 
@@ -589,7 +611,7 @@ object Node {
 
     private fun relayCall(method: String, path: String, body: ByteArray? = null, json: Boolean = true, timeout: Int = 15000): ByteArray {
         val (host, port) = serverAddr() ?: throw java.io.IOException("нет сервера")
-        val c = URL("http://$host:$port$path").openConnection() as HttpURLConnection
+        val c = relayConn(host, port, altTls && altPort != null, path)
         c.connectTimeout = 8000
         c.readTimeout = timeout
         c.requestMethod = method

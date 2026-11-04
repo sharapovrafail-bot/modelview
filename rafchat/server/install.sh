@@ -20,6 +20,15 @@ for p in ${RAFCHAT_EXTRA_PORTS:-443 80 8080}; do
 done
 PORT_ARGS="--port ${PORT}"
 for p in ${EXTRA_PORTS}; do PORT_ARGS="${PORT_ARGS} --port ${p}"; done
+# Порт с шифрованием TLS — мобильные операторы вырезают незашифрованный HTTP к зарубежным серверам.
+TLS_PORT=""
+for p in ${RAFCHAT_TLS_PORTS:-2053 2083 2087 9443}; do
+  if ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}\$"; then
+    if ss -tlnp 2>/dev/null | grep -E "[:.]${p} " | grep -q python3; then TLS_PORT="$p"; break; fi
+    continue
+  fi
+  TLS_PORT="$p"; break
+done
 BRANCH="${RAFCHAT_BRANCH:-claude/adoring-edison-95p0fr}"
 SRC="https://raw.githubusercontent.com/sharapovrafail-bot/modelview/${BRANCH}/rafchat/server/rafchat_relay.py"
 
@@ -40,6 +49,13 @@ if [ -n "${RAFCHAT_RELAY_SRC:-}" ] && [ -f "$RAFCHAT_RELAY_SRC" ]; then
 else
   curl -fsSL "$SRC" -o /opt/rafchat/rafchat_relay.py
 fi
+if [ -n "${TLS_PORT}" ] && [ ! -f /var/lib/rafchat/tls.crt ]; then
+  command -v openssl >/dev/null 2>&1 || (apt-get install -y -qq openssl) || (yum install -y openssl) || true
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=rafchat" \
+    -keyout /var/lib/rafchat/tls.key -out /var/lib/rafchat/tls.crt >/dev/null 2>&1 || TLS_PORT=""
+fi
+[ -f /var/lib/rafchat/tls.crt ] || TLS_PORT=""
+[ -n "${TLS_PORT}" ] && PORT_ARGS="${PORT_ARGS} --tls-port ${TLS_PORT} --cert /var/lib/rafchat/tls.crt --key /var/lib/rafchat/tls.key"
 chown -R rafchat:rafchat /var/lib/rafchat
 
 cat > /etc/systemd/system/rafchat-relay.service <<EOF
@@ -70,7 +86,7 @@ systemctl enable --now rafchat-relay
 systemctl restart rafchat-relay
 
 # брандмауэр: открыть порт, если включён ufw (iptables/облачный брандмауэр — см. подсказку ниже)
-for P in ${PORT} ${EXTRA_PORTS}; do
+for P in ${PORT} ${EXTRA_PORTS} ${TLS_PORT}; do
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     ufw allow "${P}/tcp" >/dev/null && echo "== ufw: порт ${P}/tcp открыт"
   fi
@@ -91,6 +107,7 @@ if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null; then
   echo "RAFCHAT_ADDRESS=${IP}:${PORT}"
   echo "   Запасные порты (для мобильного интернета):${EXTRA_PORTS:- нет}"
   for P in ${EXTRA_PORTS}; do curl -fsS -m 3 "http://127.0.0.1:${P}/" >/dev/null && echo "   порт ${P}: работает"; done
+  [ -n "${TLS_PORT}" ] && curl -fsSk -m 3 "https://127.0.0.1:${TLS_PORT}/" >/dev/null && echo "   шифрованный порт ${TLS_PORT} (TLS): работает"
   echo "   Если устройства не подключаются — откройте TCP-порт ${PORT} в панели хостинга (облачный брандмауэр)."
 else
   echo "!! Сервер не ответил. Журнал: journalctl -u rafchat-relay -n 50"

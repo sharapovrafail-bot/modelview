@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.4.2"
+APP_VER = "0.4.3"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -652,9 +652,10 @@ class Node(QObject):
         s = (self.cfg.get("server") or "").strip().replace("http://", "").rstrip("/")
         host, _, port = s.partition(":")
         main = int(port or 47888)
-        for p in dict.fromkeys([main, 443, 80, 8080]):
+        # сначала основной, затем шифрованные (TLS) — их мобильные операторы не вырезают, затем веб-порты
+        for p, tls in [(main, False)] + [(x, True) for x in RELAY_TLS_PORTS] + [(80, False), (8080, False)]:
             try:
-                c = http.client.HTTPConnection(host, p, timeout=6)
+                c = self._relay_conn(host, p, tls, 6)
                 c.request("GET", "/")
                 ok = b"RafChat Relay" in c.getresponse().read()
                 c.close()
@@ -662,11 +663,24 @@ class Node(QObject):
                 ok = False
             if ok:
                 self._alt_port = None if p == main else p
+                self._alt_tls = tls
                 return
+
+    @staticmethod
+    def _relay_conn(host, port, tls, timeout):
+        if tls:
+            import ssl
+            # сертификат сервера свой (самоподписанный); переписка всё равно зашифрована ключом организации
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)
+        return http.client.HTTPConnection(host, port, timeout=timeout)
 
     def _relay_call(self, method, path, body=None, raw=None, timeout=15):
         host, port = self.server_addr()
-        c = http.client.HTTPConnection(host, port, timeout=timeout)
+        c = self._relay_conn(host, port, getattr(self, "_alt_tls", False) and bool(getattr(self, "_alt_port", None)),
+                             timeout)
         h = {"X-Org": self.org_id, "X-Node": self.id}
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         if data is not None:
@@ -1315,6 +1329,7 @@ class Bubble(QFrame):
             self.fbtn.setText("Жду отправителя…")
 
 
+RELAY_TLS_PORTS = (2053, 2083, 2087, 9443)   # шифрованные порты сервера (см. server/install.sh)
 UPDATE_API = "https://api.github.com/repos/sharapovrafail-bot/modelview/releases/tags/rafchat-latest"
 
 
