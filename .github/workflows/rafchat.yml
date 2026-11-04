@@ -85,7 +85,7 @@ jobs:
           path: out/*
 
   ios:
-    runs-on: macos-latest
+    runs-on: macos-15-intel     # Mac на Apple M у GitHub часто заняты; для iPhone годится и Intel
     env:
       # Подпись включится сама, когда в Settings → Secrets репозитория появятся сертификат и профиль Apple
       IOS_SIGN: ${{ secrets.IOS_CERT_P12_BASE64 != '' && secrets.IOS_PROFILE_BASE64 != '' }}
@@ -174,8 +174,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-latest
-            arch: arm64
+          # Mac на Apple M у GitHub часто заняты (сборка отменяется «not acquired by Runner»).
+          # Сборка для Intel работает и на Apple M (через Rosetta 2), поэтому собираем её.
           - runner: macos-15-intel
             arch: x64
     runs-on: ${{ matrix.runner }}
