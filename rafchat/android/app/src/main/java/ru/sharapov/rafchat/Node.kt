@@ -614,7 +614,7 @@ object Node {
         val host = s.substringBefore(':')
         val main = s.substringAfter(':', "").toIntOrNull() ?: 47888
         // сначала основной, затем шифрованные (TLS) — их мобильные операторы не вырезают, затем веб-порты
-        val cand = listOf(main to false) + listOf(2053, 2083, 2087, 9443).map { it to true } + listOf(80 to false, 8080 to false)
+        val cand = listOf(main to false) + listOf(2053, 993, 465, 2083, 2087, 9443).map { it to true } + listOf(80 to false, 8080 to false)
         for ((p, tls) in cand) {
             val ok = try {
                 val c = relayConn(host, p, tls, "/")

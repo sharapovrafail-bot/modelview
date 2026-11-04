@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.5.1"
+APP_VER = "0.5.2"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -1580,7 +1580,7 @@ class Bubble(QFrame):
             self.fbtn.setText("Жду отправителя…")
 
 
-RELAY_TLS_PORTS = (2053, 2083, 2087, 9443)   # шифрованные порты сервера (см. server/install.sh)
+RELAY_TLS_PORTS = (2053, 993, 465, 2083, 2087, 9443)   # шифрованные порты сервера (см. server/install.sh)
 TASK_NEW, TASK_WORK, TASK_DONE, TASK_OK, TASK_REWORK = "Новое", "В работе", "Готово", "Принято ОТК", "Доработка"
 TASK_COLORS = {TASK_NEW: "#8E8E93", TASK_WORK: "#FF9500", TASK_DONE: "#007AFF", TASK_OK: "#34C759",
                TASK_REWORK: "#FF3B30"}
