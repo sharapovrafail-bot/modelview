@@ -57,13 +57,19 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""RafChat"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""RafChat"" dir=in action=allow program=""{app}\RafChat.exe"" enable=yes profile=any"; Flags: runhidden
 Filename: "{app}\RafChat.exe"; Description: "Запустить RafChat"; Flags: nowait postinstall skipifsilent runasoriginaluser
-Filename: "{app}\RafChat.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent
+Filename: "{app}\RafChat.exe"; Flags: nowait runasoriginaluser; Check: ShouldRelaunch
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM RafChat.exe"; Flags: runhidden; RunOnceId: "StopRafChat"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""RafChat"""; Flags: runhidden; RunOnceId: "FwRafChat"
 
 [Code]
+{ Перезапуск после тихой установки — только когда установщик вызван самой программой (кнопка «Обновить»). }
+function ShouldRelaunch: Boolean;
+begin
+  Result := WizardSilent and (Pos('/RELAUNCH', UpperCase(GetCmdTail)) > 0);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   R: Integer;

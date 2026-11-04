@@ -1585,7 +1585,7 @@ class ChatWindow(QMainWindow):
         import subprocess
         try:
             # установщик сам закроет RafChat, поставит новую версию и запустит её (Windows спросит разрешение)
-            subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
+            subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH"], close_fds=True)
         except OSError:
             os.startfile(path)                                         # type: ignore[attr-defined]
         self.node.stop()
