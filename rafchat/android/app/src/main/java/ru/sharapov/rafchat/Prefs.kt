@@ -22,7 +22,17 @@ object Prefs {
     /** Сервер для работы через интернет; если не задан — встроенный в установщик. */
     fun server(ctx: Context): String =
         sp(ctx).getString("server", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.DEFAULT_SERVER
-    fun setServer(ctx: Context, v: String) = sp(ctx).edit().putString("server", v).apply()
+    /** Сменить сервер вручную: запоминаем время, чтобы новый адрес разошёлся по всем устройствам. */
+    fun setServer(ctx: Context, v: String) {
+        if (v.trim() == server(ctx).trim()) return
+        sp(ctx).edit().putString("server", v.trim()).putLong("srvt", System.currentTimeMillis() / 1000)
+            .putInt("relay_alt_port", 0).putBoolean("relay_alt_tls", false).apply()
+    }
+    /** Принять адрес от коллеги (с его временем смены). */
+    fun adoptServer(ctx: Context, v: String, t: Long) =
+        sp(ctx).edit().putString("server", v.trim()).putLong("srvt", t)
+            .putInt("relay_alt_port", 0).putBoolean("relay_alt_tls", false).apply()
+    fun serverT(ctx: Context) = sp(ctx).getLong("srvt", 0)
     /** Хэш своего фото профиля (пусто — фото нет) и когда оно последний раз выложено на сервер. */
     fun avh(ctx: Context) = sp(ctx).getString("avh", "") ?: ""
     fun setAvh(ctx: Context, v: String) = sp(ctx).edit().putString("avh", v).putLong("avh_up", 0).apply()

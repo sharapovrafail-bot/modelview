@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.5.0"
+APP_VER = "0.5.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -341,7 +341,7 @@ class Node(QObject):
     # ---------- маяк «я здесь»
     def _beacon_payload(self, ask=False, bye=False) -> bytes:
         d = {"app": "RafChat", "v": 1, "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
-             "port": TCP_PORT, "plat": "pc", "ask": ask, "bye": bye, "srv": self.cfg.get("server", ""),
+             "port": TCP_PORT, "plat": "pc", "ask": ask, "bye": bye, "srv": self.cfg.get("server", ""), "srvt": self.cfg.get("srvt", 0),
              "avh": self.cfg.get("avh", "")}
         raw = json.dumps(d, ensure_ascii=False, sort_keys=True)
         return json.dumps({"d": raw, "s": self.sign(raw.encode())}, ensure_ascii=False).encode()
@@ -402,15 +402,35 @@ class Node(QObject):
 
     def profile(self):
         return {"app": "RafChat", "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
-                "port": TCP_PORT, "plat": "pc", "srv": self.cfg.get("server", ""), "avh": self.cfg.get("avh", "")}
+                "port": TCP_PORT, "plat": "pc", "srv": self.cfg.get("server", ""), "srvt": self.cfg.get("srvt", 0),
+                "avh": self.cfg.get("avh", "")}
 
-    def adopt_server(self, srv):
-        """Адрес сервера расходится сам: если у нас он не задан, а у коллеги из нашей организации есть — берём."""
+    def adopt_server(self, srv, srvt=0):
+        """Адрес сервера расходится сам: берём адрес коллеги, если у нас он не задан или у него новее
+        (сервер сменили — например, перенесли в Россию). srvt — когда адрес меняли вручную."""
         srv = (srv or "").strip()
-        if srv and not (self.cfg.get("server") or "").strip():
+        try:
+            srvt = float(srvt or 0)
+        except (TypeError, ValueError):
+            srvt = 0
+        mine = (self.cfg.get("server") or "").strip()
+        if srv and (not mine or (srv != mine and srvt > float(self.cfg.get("srvt") or 0))):
             self.cfg["server"] = srv
+            self.cfg["srvt"] = srvt
+            self.cfg["relay_alt"] = None
+            self._alt_port, self._alt_tls = None, False
             save_cfg(self.cfg)
             self.peers_changed.emit()
+
+    def set_server(self, addr):
+        """Сервер сменили вручную — запоминаем время, чтобы новый адрес разошёлся по всем устройствам."""
+        addr = (addr or "").strip()
+        if addr != (self.cfg.get("server") or "").strip():
+            self.cfg["server"] = addr
+            self.cfg["srvt"] = time.time()
+            self.cfg["relay_alt"] = None
+            self._alt_port, self._alt_tls = None, False
+            save_cfg(self.cfg)
 
     def _check_avatar(self, pid, avh, ip=None, port=None):
         """У коллеги новое фото — скачать (по сети напрямую или с сервера)."""
@@ -470,7 +490,7 @@ class Node(QObject):
 
     def _upsert(self, d, ip):
         """Запомнить участника (из маяка, сообщения или ответа на /ping). Возвращает (был ли известен, был ли в сети)."""
-        self.adopt_server(d.get("srv"))
+        self.adopt_server(d.get("srv"), d.get("srvt"))
         if d.get("avh"):
             self._check_avatar(d["id"], d["avh"], ip, int(d.get("port") or 47801))
         prev = self.store.q("SELECT last_seen, name, dept FROM peers WHERE id=?", (d["id"],), one=True)
@@ -790,6 +810,7 @@ class Node(QObject):
             self._upsert_relay(d, time.time() - (now - p.get("last", 0)))
 
     def _upsert_relay(self, d, seen):
+        self.adopt_server(d.get("srv"), d.get("srvt"))
         prev = self.store.q("SELECT relay_seen, last_seen FROM peers WHERE id=?", (d["id"],), one=True)
         hidden = self.cfg.setdefault("hidden", {})
         if not prev and time.time() - seen > RELAY_ONLINE_SEC:
@@ -1514,6 +1535,10 @@ class Bubble(QFrame):
             b = button(text, "tinted", fn=lambda _=False, n=nxt: self.win.node.task_update(self.m["id"], n))
             b.setStyleSheet("min-height:32px; font-size:14px; padding:2px 12px")
             self.task_btns.addWidget(b)
+        fb = button("📎 Файл", "tinted", tip="Прикрепить к заданию файл или фото (модель, УП, чертёж)",
+                    fn=lambda: self.win.attach_to_task(self.m))
+        fb.setStyleSheet("min-height:32px; font-size:14px; padding:2px 10px")
+        self.task_btns.addWidget(fb)
         self.task_btns.addStretch(1)
 
     def _menu(self, pos):
@@ -2065,7 +2090,7 @@ class ChatWindow(QMainWindow):
 
     # ---------- ответ на сообщение
     def start_reply(self, m):
-        self.reply_to = {"id": m["id"], "name": "Вы" if m["mine"] else m["sender_name"], "text": snippet(m)}
+        self.reply_to = {"id": m["id"], "name": self.cfg["name"] if m["mine"] else m["sender_name"], "text": snippet(m)}
         self.reply_name.setText("Ответ: " + self.reply_to["name"])
         self.reply_text.setText(self.reply_to["text"])
         self.reply_bar.show()
@@ -2085,7 +2110,25 @@ class ChatWindow(QMainWindow):
         d = TaskDialog(self.node.peers(), self)
         if d.exec() == QDialog.Accepted:
             t = d.value()
-            self.node.send(self.chat, task_fallback(t), task=t, reply=self._take_reply())
+            tid = self.node.send(self.chat, task_fallback(t), task=t, reply=self._take_reply())
+            self._send_task_files(tid, t, d.files)
+
+    def _send_task_files(self, tid, t, files):
+        """Файлы к заданию уходят следом, ответом на карточку."""
+        rp = {"id": tid, "name": self.cfg["name"], "text": "📋 " + t.get("title", "задание")}
+        for p in files:
+            if p.is_file():
+                self.node.send(self.chat, "", p, reply=rp)
+
+    def attach_to_task(self, m):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Файлы к заданию «%s»" % m["task"].get("title", ""),
+                                                str(Path.home()))
+        if paths:
+            if m["chat"] != self.chat:
+                self.open_chat(m["chat"])
+            rp = {"id": m["id"], "name": m["sender_name"], "text": "📋 " + m["task"].get("title", "задание")}
+            for p in paths:
+                self.node.send(m["chat"], "", Path(p), reply=rp)
 
     def show_tasks(self):
         self.search.blockSignals(True)
@@ -2259,6 +2302,8 @@ class ChatWindow(QMainWindow):
         d = ProfileDialog(self.cfg, first=False, parent=self)
         if d.exec():
             save_cfg(self.cfg)
+            if not self.cfg.get("relay_alt"):
+                self.node._alt_port, self.node._alt_tls = None, False
             QMessageBox.information(self, "RafChat", "Настройки сохранены. Имя и отдел увидят остальные через "
                                     "несколько секунд, сервер подключится сам; код организации применится "
                                     "после перезапуска.")
@@ -2280,8 +2325,7 @@ class ChatWindow(QMainWindow):
     def setup_server(self):
         d = ServerSetupDialog(self.cfg, self)
         if d.exec() and d.address:
-            self.cfg["server"] = d.address
-            save_cfg(self.cfg)
+            self.node.set_server(d.address)
             self._refresh_timer.start()
 
     def _me_text(self):
@@ -2527,7 +2571,12 @@ class TaskDialog(QDialog):
         self.note = row("Примечание", QPlainTextEdit())
         self.note.setPlaceholderText("допуски, квалитет, шероховатость, что важно…")
         self.note.setFixedHeight(70)
-        lay.addWidget(label("Файлы (модель, УП, чертёж) — отправьте следом ответом на карточку", "small"))
+        self.files: list = []
+        fr = QHBoxLayout()
+        fr.addWidget(button("📎 Прикрепить файлы / фото…", "tinted", fn=self._pick))
+        self.files_lbl = label("модель, УП, чертёж, фото — уйдут вместе с заданием", "small", wrap=True)
+        fr.addWidget(self.files_lbl, 1)
+        lay.addLayout(fr)
         self.err = label("", "err")
         lay.addWidget(self.err)
         bl = QHBoxLayout()
@@ -2535,6 +2584,15 @@ class TaskDialog(QDialog):
         bl.addWidget(button("Отмена", "tinted", fn=self.reject))
         bl.addWidget(button("Отправить задание", "primary", fn=self._ok))
         lay.addLayout(bl)
+
+    def _pick(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Файлы к заданию", str(Path.home()))
+        for p in paths:
+            if Path(p) not in self.files:
+                self.files.append(Path(p))
+        if self.files:
+            names = ", ".join(p.name for p in self.files[:4]) + (f" и ещё {len(self.files) - 4}" if len(self.files) > 4 else "")
+            self.files_lbl.setText(f"Прикреплено: {names}")
 
     def _ok(self):
         if len(self.title.text().strip()) < 2:
@@ -2614,7 +2672,11 @@ class ProfileDialog(QDialog):
         self.cfg.update(name=name[:60], dept=self.dept.text().strip()[:40], org=org)
         if hasattr(self, "extra"):
             self.cfg["extra"] = self.extra.text().strip()
-            self.cfg["server"] = self.server.text().strip()
+            new_srv = self.server.text().strip()
+            if new_srv != (self.cfg.get("server") or "").strip():
+                self.cfg["server"] = new_srv
+                self.cfg["srvt"] = time.time()           # новый адрес разойдётся по всем устройствам
+                self.cfg["relay_alt"] = None
         self.accept()
 
 

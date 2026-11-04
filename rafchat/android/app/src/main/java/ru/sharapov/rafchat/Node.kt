@@ -151,7 +151,7 @@ object Node {
         val raw = JSONObject()
             .put("app", "RafChat").put("v", 1).put("id", id).put("name", Prefs.name(ctx))
             .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android").put("ask", ask).put("bye", bye)
-            .put("srv", Prefs.server(ctx)).put("avh", Prefs.avh(ctx))
+            .put("srv", Prefs.server(ctx)).put("srvt", Prefs.serverT(ctx)).put("avh", Prefs.avh(ctx))
             .toString()
         return JSONObject().put("d", raw).put("s", sign(raw.toByteArray())).toString().toByteArray()
     }
@@ -218,7 +218,7 @@ object Node {
 
     fun profile(): JSONObject = JSONObject().put("app", "RafChat").put("id", id).put("name", Prefs.name(ctx))
         .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android").put("srv", Prefs.server(ctx))
-        .put("avh", Prefs.avh(ctx))
+        .put("srvt", Prefs.serverT(ctx)).put("avh", Prefs.avh(ctx))
 
     // ---------- фото профиля
     fun myAvatar() = File(ctx.filesDir, "avatar.jpg")
@@ -290,9 +290,11 @@ object Node {
     }
 
     /** Адрес сервера расходится сам: если у нас он не задан, а у коллеги из нашей организации есть — берём. */
-    private fun adoptServer(srv: String) {
-        if (srv.isNotBlank() && Prefs.server(ctx).isBlank()) {
-            Prefs.setServer(ctx, srv.trim())
+    private fun adoptServer(srv: String, srvt: Long) {
+        val mine = Prefs.server(ctx).trim()
+        if (srv.isNotBlank() && (mine.isEmpty() || (srv.trim() != mine && srvt > Prefs.serverT(ctx)))) {
+            Prefs.adoptServer(ctx, srv, srvt)          // сервер сменили (например, перенесли в Россию) — берём новый
+            altPort = null; altTls = false
             changed()
         }
     }
@@ -300,7 +302,7 @@ object Node {
     /** Запомнить участника (маяк, сообщение или ответ на /ping). Возвращает true, если он только что появился в сети. */
     @Synchronized
     private fun upsert(d: JSONObject, ip: String): Boolean {
-        adoptServer(d.optString("srv", ""))
+        adoptServer(d.optString("srv", ""), d.optDouble("srvt", 0.0).toLong())
         val pid = d.getString("id")
         val prev = db.peer(pid)
         val wasOnline = prev?.lan == true
@@ -714,6 +716,7 @@ object Node {
     }
 
     private fun upsertRelay(d: JSONObject, seen: Long) {
+        adoptServer(d.optString("srv", ""), d.optDouble("srvt", 0.0).toLong())
         val pid = d.getString("id")
         val prev = db.peer(pid)
         val nowOnline = System.currentTimeMillis() - seen < RELAY_ONLINE_MS

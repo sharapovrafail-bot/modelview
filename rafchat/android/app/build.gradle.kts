@@ -15,8 +15,8 @@ android {
         applicationId = "ru.sharapov.rafchat"
         minSdk = 26
         targetSdk = 34
-        versionCode = 15
-        versionName = "0.5.0"
+        versionCode = 16
+        versionName = "0.5.1"
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
     }
 

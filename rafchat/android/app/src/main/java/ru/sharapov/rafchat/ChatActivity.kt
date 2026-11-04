@@ -40,12 +40,25 @@ class ChatActivity : AppCompatActivity() {
 
     private val pick = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@registerForActivityResult
+        collect?.let { list ->                           // файлы для нового задания — пока только собираем
+            thread {
+                for (u in uris) Ui.importUri(this, u)?.let { list.add(it) }
+                runOnUiThread { onCollected?.invoke() }
+            }
+            return@registerForActivityResult
+        }
         Toast.makeText(this, "Отправляю файлов: ${uris.size}", Toast.LENGTH_SHORT).show()
-        var rp = takeReply()
+        var rp = pendingReply ?: takeReply()
+        pendingReply = null
         thread {
             for (u in uris) Ui.importUri(this, u)?.let { (f, name) -> Node.send(chat, "", f, name, rp); rp = null }
         }
     }
+
+    /** Файлы к заданию: collect — собираем для нового задания; pendingReply — отправить ответом на карточку. */
+    private var collect: MutableList<Pair<java.io.File, String>>? = null
+    private var onCollected: (() -> Unit)? = null
+    private var pendingReply: org.json.JSONObject? = null
 
     /** Камера: снимок → сжать (как в WhatsApp) → сразу в чат. */
     private var shot: java.io.File? = null
@@ -59,7 +72,9 @@ class ChatActivity : AppCompatActivity() {
             val jpg = Ui.jpeg(this, android.net.Uri.fromFile(f), 2048, false)
             if (jpg != null) out.writeBytes(jpg) else f.copyTo(out, true)
             f.delete()
-            Node.send(chat, "", out, name)
+            val list = collect
+            if (list != null) { list.add(out to name); runOnUiThread { onCollected?.invoke() } }
+            else { val rp = pendingReply; pendingReply = null; Node.send(chat, "", out, name, rp) }
         }
     }
 
@@ -202,7 +217,7 @@ class ChatActivity : AppCompatActivity() {
 
     // ---------- ответ на сообщение
     private fun startReply(m: Msg) {
-        replyTo = org.json.JSONObject().put("id", m.id).put("name", if (m.mine) "Вы" else m.senderName).put("text", Ui.snippet(m))
+        replyTo = org.json.JSONObject().put("id", m.id).put("name", m.senderName).put("text", Ui.snippet(m))
         replyName.text = "Ответ: " + replyTo!!.optString("name")
         replyText.text = replyTo!!.optString("text")
         replyBar.visibility = View.VISIBLE
@@ -275,13 +290,30 @@ class ChatActivity : AppCompatActivity() {
         col.addView(dueBtn)
         val who = field("Исполнитель", "кто делает", list = Node.db.peers().map { it.name }.distinct().sorted())
         val note = field("Примечание", "допуски, квалитет, шероховатость…")
-        col.addView(TextView(this).apply {
-            text = "Файлы (модель, УП, чертёж) отправьте следом ответом на карточку"; textSize = 12f; setTextColor(Ui.MUTED)
-            setPadding(0, d(10f), 0, 0)
-        })
+        val files = ArrayList<Pair<java.io.File, String>>()
+        collect = files
+        val filesLbl = TextView(this).apply {
+            text = "Модель, УП, чертёж, фото — уйдут вместе с заданием"; textSize = 13f; setTextColor(Ui.MUTED)
+            setPadding(0, d(6f), 0, 0)
+        }
+        onCollected = {
+            filesLbl.text = "Прикреплено: " + files.joinToString(", ") { it.second }.let { if (it.length > 120) it.take(119) + "…" else it }
+            filesLbl.setTextColor(Ui.TEXT)
+        }
+        val ab = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, d(12f), 0, 0) }
+        fun abtn(t: String, fn: () -> Unit) = ab.addView(TextView(this).apply {
+            text = t; textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.ACCENT); gravity = Gravity.CENTER
+            background = Ui.roundBg(0xFFE5F0FF.toInt(), Ui.dp(this@ChatActivity, 10f)); setPadding(d(12f), d(9f), d(12f), d(9f))
+            setOnClickListener { fn() }
+        }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(8f) })
+        abtn("📎 Файлы") { pick.launch(arrayOf("*/*")) }
+        abtn("📷 Фото чертежа") { takePhoto() }
+        col.addView(ab)
+        col.addView(filesLbl)
         val dlg = androidx.appcompat.app.AlertDialog.Builder(this).setTitle("📋 Новое задание")
             .setView(ScrollView(this).apply { addView(col) })
             .setPositiveButton("Отправить", null).setNegativeButton("Отмена", null).create()
+        dlg.setOnDismissListener { collect = null; onCollected = null }
         dlg.setOnShowListener {
             dlg.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val tt = title.text.toString().trim()
@@ -293,7 +325,12 @@ class ChatActivity : AppCompatActivity() {
                 due?.let { t.put("due", it) }
                 opt("who", who.text.toString().take(60)); opt("note", note.text.toString().take(600))
                 val rp = takeReply()
-                thread { Node.send(chat, Ui.taskFallback(t), reply = rp, task0 = t) }
+                val att = ArrayList(files)
+                thread {
+                    val tid = Node.send(chat, Ui.taskFallback(t), reply = rp, task0 = t)
+                    val tr = org.json.JSONObject().put("id", tid).put("name", Prefs.name(this)).put("text", "📋 $tt")
+                    for ((f, n) in att) Node.send(chat, "", f, n, tr)     // файлы — ответом на карточку
+                }
                 dlg.dismiss()
             }
         }
@@ -344,7 +381,19 @@ class ChatActivity : AppCompatActivity() {
             setPadding(d(12f), d(7f), d(12f), d(7f))
             setOnClickListener { thread { Node.taskUpdate(m.id, next) } }
         }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6f) })
-        if (btns.childCount > 0) b.addView(btns)
+        btns.addView(TextView(this).apply {
+            text = "📎 Файл"; textSize = 15f; setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
+            setTextColor(Ui.ACCENT); background = Ui.roundBg(if (me) 0xFFFFFFFF.toInt() else 0xFFE5F0FF.toInt(), Ui.dp(this@ChatActivity, 10f))
+            setPadding(d(12f), d(7f), d(12f), d(7f))
+            setOnClickListener {
+                pendingReply = org.json.JSONObject().put("id", m.id).put("name", m.senderName).put("text", "📋 " + t.optString("title"))
+                androidx.appcompat.app.AlertDialog.Builder(this@ChatActivity).setTitle("Прикрепить к заданию")
+                    .setItems(arrayOf("📎 Файл или фото из галереи", "📷 Сфотографировать")) { _, i ->
+                        if (i == 0) pick.launch(arrayOf("*/*")) else takePhoto()
+                    }.setOnCancelListener { pendingReply = null }.show()
+            }
+        })
+        b.addView(btns)
     }
 
     private fun refresh() {
