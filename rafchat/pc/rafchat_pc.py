@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.2.2"
+APP_VER = "0.3.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -72,13 +72,23 @@ def avatar_color(key: str) -> str:
     return AVATAR_COLORS[int(hashlib.md5(key.encode()).hexdigest(), 16) % len(AVATAR_COLORS)]
 
 
-def avatar(name: str, key: str, size=40, group=False) -> QPixmap:
+def avatar(name: str, key: str, size=40, group=False, photo: str | None = None) -> QPixmap:
     pm = QPixmap(size * 2, size * 2)
     pm.setDevicePixelRatio(2)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
     p.setPen(Qt.NoPen)
+    img = QPixmap(photo) if photo and Path(photo).is_file() else None
+    if img is not None and not img.isNull():
+        from PySide6.QtGui import QPainterPath
+        path = QPainterPath()
+        path.addEllipse(QRectF(0, 0, size, size))
+        p.setClipPath(path)
+        p.drawPixmap(QRectF(0, 0, size, size).toRect(), img)
+        p.end()
+        return pm
     p.setBrush(QColor(P["accent"] if group else avatar_color(key)))
     p.drawEllipse(QRectF(0, 0, size, size))
     if group:
@@ -93,6 +103,32 @@ def avatar(name: str, key: str, size=40, group=False) -> QPixmap:
         p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, initials(name))
     p.end()
     return pm
+
+
+AVATAR_DIR = DATA_DIR / "avatars"
+MY_AVATAR = DATA_DIR / "avatar.jpg"
+
+
+def peer_photo(pid: str) -> str | None:
+    f = AVATAR_DIR / f"{pid}.jpg"
+    return str(f) if f.is_file() else None
+
+
+def make_avatar_jpeg(src: str) -> bytes | None:
+    """Фото → квадрат по центру 256×256 → JPEG (~15–25 КБ)."""
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    from PySide6.QtGui import QImage
+    img = QImage(src)
+    if img.isNull():
+        return None
+    side = min(img.width(), img.height())
+    img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+    img = img.scaled(256, 256, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, "JPG", 85)
+    return bytes(ba)
 
 
 # ======================================================================= сеть (без интерфейса)
@@ -114,10 +150,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS outbox(peer TEXT, msg_id TEXT, payload TEXT, PRIMARY KEY(peer, msg_id));
             CREATE TABLE IF NOT EXISTS files(fid TEXT PRIMARY KEY, path TEXT);
             """)
-            try:
-                self.db.execute("ALTER TABLE peers ADD COLUMN relay_seen REAL DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
+            for col in ("relay_seen REAL DEFAULT 0", "avh TEXT"):
+                try:
+                    self.db.execute("ALTER TABLE peers ADD COLUMN " + col)
+                except sqlite3.OperationalError:
+                    pass
             self.db.commit()
 
     def q(self, sql, args=(), one=False):
@@ -144,6 +181,8 @@ class Node(QObject):
         self.ekey = hashlib.sha256(("RafChat-e2e:" + org).encode()).digest()
         self.org_id = hashlib.sha256(("RafChat-org:" + org).encode()).hexdigest()[:32]
         self.relay_ok = None                 # None — сервер не задан, True/False — есть ли связь
+        self._av_loading: set = set()
+        self._av_fail: dict = {}
         self._relay_uploaded: set = set()
         self.store = Store(DATA_DIR / "rafchat.db")
         self._downloading: set = set()
@@ -203,6 +242,16 @@ class Node(QObject):
                 q = {k: v[0] for k, v in parse_qs(u.query).items()}
                 if u.path == "/ping":
                     return self._reply(200, node.profile())
+                if u.path == "/avatar":
+                    if not MY_AVATAR.is_file():
+                        return self._reply(404, {"error": "not_found"})
+                    b = MY_AVATAR.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.end_headers()
+                    self.wfile.write(b)
+                    return
                 if u.path == "/file":
                     row = node.store.q("SELECT path FROM files WHERE fid=?", (q.get("fid", ""),), one=True)
                     f = Path(row[0]) if row else None
@@ -281,7 +330,8 @@ class Node(QObject):
     # ---------- маяк «я здесь»
     def _beacon_payload(self, ask=False, bye=False) -> bytes:
         d = {"app": "RafChat", "v": 1, "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
-             "port": TCP_PORT, "plat": "pc", "ask": ask, "bye": bye, "srv": self.cfg.get("server", "")}
+             "port": TCP_PORT, "plat": "pc", "ask": ask, "bye": bye, "srv": self.cfg.get("server", ""),
+             "avh": self.cfg.get("avh", "")}
         raw = json.dumps(d, ensure_ascii=False, sort_keys=True)
         return json.dumps({"d": raw, "s": self.sign(raw.encode())}, ensure_ascii=False).encode()
 
@@ -341,7 +391,7 @@ class Node(QObject):
 
     def profile(self):
         return {"app": "RafChat", "id": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
-                "port": TCP_PORT, "plat": "pc", "srv": self.cfg.get("server", "")}
+                "port": TCP_PORT, "plat": "pc", "srv": self.cfg.get("server", ""), "avh": self.cfg.get("avh", "")}
 
     def adopt_server(self, srv):
         """Адрес сервера расходится сам: если у нас он не задан, а у коллеги из нашей организации есть — берём."""
@@ -351,9 +401,65 @@ class Node(QObject):
             save_cfg(self.cfg)
             self.peers_changed.emit()
 
+    def _check_avatar(self, pid, avh, ip=None, port=None):
+        """У коллеги новое фото — скачать (по сети напрямую или с сервера)."""
+        if not avh or avh in self._av_loading or time.time() - self._av_fail.get(avh, 0) < 120:
+            return
+        row = self.store.q("SELECT avh FROM peers WHERE id=?", (pid,), one=True)
+        if row and row[0] == avh and peer_photo(pid):
+            return
+        self._av_loading.add(avh)
+
+        def work():
+            data = None
+            try:
+                if ip:
+                    c, r = self._request({"ip": ip, "port": port or 47801}, "GET", "/avatar", timeout=6)
+                    data = r.read() if r.status == 200 else None
+                    c.close()
+                if data is None and self.server_addr():
+                    data = self.dec(self._relay_call("GET", "/r/file?" + urlencode({"fid": avh}), timeout=20))
+            except Exception:
+                data = None
+            if data:
+                AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+                (AVATAR_DIR / f"{pid}.jpg").write_bytes(data)
+                self.store.q("UPDATE peers SET avh=? WHERE id=?", (avh, pid))
+                self.peers_changed.emit()
+            else:
+                self._av_fail[avh] = time.time()
+            self._av_loading.discard(avh)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_avatar(self, jpeg: bytes | None):
+        """Своё фото профиля (None — убрать)."""
+        if jpeg:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            MY_AVATAR.write_bytes(jpeg)
+            self.cfg["avh"] = hashlib.md5(jpeg).hexdigest()
+        else:
+            MY_AVATAR.unlink(missing_ok=True)
+            self.cfg["avh"] = ""
+        self.cfg["avh_up"] = 0
+        save_cfg(self.cfg)
+        self.beacon()
+        self.peers_changed.emit()
+
+    def delete_chat(self, key):
+        """Удалить чат: переписку и очередь; личный чат — вместе с участником (вернётся, если появится снова)."""
+        self.store.q("DELETE FROM messages WHERE chat=?", (key,))
+        if key != ALL:
+            self.store.q("DELETE FROM outbox WHERE peer=?", (key,))
+            self.store.q("DELETE FROM peers WHERE id=?", (key,))
+            (AVATAR_DIR / f"{key}.jpg").unlink(missing_ok=True)
+        self.peers_changed.emit()
+
     def _upsert(self, d, ip):
         """Запомнить участника (из маяка, сообщения или ответа на /ping). Возвращает (был ли известен, был ли в сети)."""
         self.adopt_server(d.get("srv"))
+        if d.get("avh"):
+            self._check_avatar(d["id"], d["avh"], ip, int(d.get("port") or 47801))
         prev = self.store.q("SELECT last_seen, name, dept FROM peers WHERE id=?", (d["id"],), one=True)
         was_online = bool(prev and time.time() - (prev[0] or 0) < ONLINE_SEC)
         self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen) VALUES(?,?,?,?,?,?,?) "
@@ -426,7 +532,8 @@ class Node(QObject):
             lan = bool(r[3]) and time.time() - (r[6] or 0) < ONLINE_SEC
             relay = time.time() - (r[7] or 0) < RELAY_ONLINE_SEC
             out.append(dict(id=r[0], name=r[1], dept=r[2], ip=r[3], port=r[4], plat=r[5], lan=lan, relay=relay,
-                            online=lan or relay, last_seen=max(r[6] or 0, r[7] or 0), lan_seen=r[6] or 0))
+                            online=lan or relay, last_seen=max(r[6] or 0, r[7] or 0), lan_seen=r[6] or 0,
+                            photo=peer_photo(r[0])))
         return out
 
     def peer(self, pid):
@@ -555,6 +662,14 @@ class Node(QObject):
         return self._relay_send(to, m)
 
     def _relay_hello(self):
+        avh = self.cfg.get("avh")
+        if avh and MY_AVATAR.is_file() and time.time() - float(self.cfg.get("avh_up") or 0) > 3 * 86400:
+            try:
+                self._relay_call("PUT", "/r/file?" + urlencode({"fid": avh}), raw=self.enc(MY_AVATAR.read_bytes()))
+                self.cfg["avh_up"] = time.time()
+                save_cfg(self.cfg)
+            except (OSError, http.client.HTTPException):
+                pass
         prof = base64.b64encode(self.enc(json.dumps(self.profile(), ensure_ascii=False).encode())).decode()
         r = self._relay_json("POST", "/r/hello", {"profile": prof})
         now = r.get("now", time.time())
@@ -568,6 +683,8 @@ class Node(QObject):
             self._upsert_relay(d, time.time() - (now - p.get("last", 0)))
 
     def _upsert_relay(self, d, seen):
+        if d.get("avh"):
+            self._check_avatar(d["id"], d["avh"])
         prev = self.store.q("SELECT relay_seen, last_seen FROM peers WHERE id=?", (d["id"],), one=True)
         was = bool(prev) and (time.time() - max(prev[0] or 0, prev[1] or 0) < RELAY_ONLINE_SEC)
         if prev:
@@ -788,7 +905,9 @@ def chat_qss() -> str:
     QFrame#sidebar {{ background: {P['surface']}; border-right: 1px solid {P['line']}; }}
     QFrame#chathead {{ background: {P['surface']}; border-bottom: 1px solid {P['line']}; }}
     QFrame#composer {{ background: {P['surface']}; border-top: 1px solid {P['line']}; }}
-    QWidget#msgs {{ background: {P['bg']}; }}
+    QWidget#msgs {{ background: transparent; }}
+    QFrame#bubble_jumbo {{ background: transparent; }}
+    QLabel#jumbo {{ font-size: 46px; }}
     QFrame#bubble_me {{ background: {P['accent']}; border-radius: 18px; }}
     QFrame#bubble_them {{ background: {P['surface']}; border-radius: 18px; }}
     QLabel#me_text {{ color: #FFFFFF; font-size: 15px; }}
@@ -811,6 +930,112 @@ def chat_qss() -> str:
 # ======================================================================= окно
 
 ROLE = Qt.UserRole + 1
+
+
+EMOJI = {
+    "😀": "😀😃😄😁😆😅🤣😂🙂😉😊😇🥰😍🤩😘😋😜🤪😎🤓🧐🤔🤨😐😑😶🙄😏😴🤤🥱😬🤐😷🤒🤕🤢🥵🥶🤯🥳🥺😢😭😤😠😡🤬"
+          "😱😨😰😓🤗🤭🫡🤫😈💀🤡👻👽🤖💩",
+    "👍": "👍👎👌🤌✌️🤞🤟🤘👊✊🤛🤜👏🙌🫶👐🙏🤝💪👋🤙👆👇👉👈☝️✋🖐️🫵",
+    "🔧": "🔧🔩⚙️🛠️⛏️🔨🪛🪚🧰📐📏🧲🔥⚡🏭🏗️🚧⚠️🦺🪖🧪🔬💡🔋🖥️💻🖨️⌨️🖱️📦🚚⏱️⏳📅📋📌📎✂️🗜️🛞",
+    "❤️": "❤️🧡💛💚💙💜🖤🤍💯✅❌❗❓💬🎉🎂🍕☕🍺🍻🎁🏆⭐🌟☀️🌧️❄️🌈🚀💰💵📞📷🎵😺🐶🐱🐻🦊",
+}
+
+
+def split_emoji(s: str) -> list:
+    """Разбить строку смайликов на отдельные (с вариантами ️ и склейками ‍)."""
+    out, cur = [], ""
+    for ch in s:
+        if cur and ch not in "\ufe0f\u200d" and not cur.endswith("\u200d") and not (0x1F3FB <= ord(ch) <= 0x1F3FF):
+            out.append(cur)
+            cur = ""
+        cur += ch
+    if cur:
+        out.append(cur)
+    return out
+
+
+def is_jumbo(text: str) -> bool:
+    """Сообщение только из 1–3 смайликов — показываем крупно, как в WhatsApp."""
+    t = text.strip()
+    if not t or len(t) > 24:
+        return False
+    if any(ch.isalnum() or ch in ".,!?:;()-_\"'" for ch in t if ord(ch) < 0x2000):
+        return False
+    return all(ord(ch) >= 0x2190 or ch in " \ufe0f\u200d" for ch in t) and len(split_emoji(t.replace(" ", ""))) <= 3
+
+
+class EmojiPanel(QFrame):
+    """Панель смайликов (раздел — вкладка сверху)."""
+    picked = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setObjectName("card")
+        self.setFixedSize(400, 320)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        tabs = QHBoxLayout()
+        self.grid_host = QScrollArea()
+        self.grid_host.setWidgetResizable(True)
+        self.grid_host.setFrameShape(QFrame.NoFrame)
+        self.grid_host.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        for k in EMOJI:
+            b = button(k, "icon", fn=lambda _=False, k=k: self.show_cat(k))
+            b.setStyleSheet("font-size:20px")
+            tabs.addWidget(b)
+        tabs.addStretch(1)
+        lay.addLayout(tabs)
+        lay.addWidget(self.grid_host, 1)
+        self.show_cat("😀")
+
+    def show_cat(self, k):
+        from PySide6.QtWidgets import QGridLayout
+        w = QWidget()
+        g = QGridLayout(w)
+        g.setSpacing(2)
+        g.setContentsMargins(0, 0, 0, 0)
+        f = QFont("Segoe UI Emoji" if IS_WIN else "Noto Color Emoji")
+        f.setPixelSize(24)
+        for i, e in enumerate(split_emoji(EMOJI[k])):
+            b = button(e, "icon", fn=lambda _=False, e=e: self.picked.emit(e))
+            b.setFont(f)
+            b.setStyleSheet("font-size:26px; padding:0; border-radius:8px")
+            b.setFixedSize(42, 42)
+            g.addWidget(b, i // 8, i % 8)
+        self.grid_host.setWidget(w)
+
+
+class MsgsArea(QWidget):
+    """Фон переписки — узор из чертёжных мотивов (шестерни, гайки, штангенциркуль), как обои в WhatsApp."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("msgs")
+        self.tile = None
+
+    def _tile(self):
+        if self.tile is None:
+            from PySide6.QtCore import QByteArray
+            from PySide6.QtSvg import QSvgRenderer
+            base = Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "frozen", False) \
+                else Path(__file__).resolve().parent.parent / "assets"
+            f = base / "chat_pattern.svg"
+            pm = QPixmap(480 * 2, 480 * 2)
+            pm.setDevicePixelRatio(2)
+            pm.fill(Qt.transparent)
+            if f.is_file():
+                p = QPainter(pm)
+                p.setOpacity(0.42)
+                QSvgRenderer(QByteArray(f.read_bytes())).render(p, QRectF(0, 0, 480, 480))
+                p.end()
+            self.tile = pm
+        return self.tile
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#ECEEF2"))
+        p.drawTiledPixmap(self.rect(), self._tile())
+        p.end()
 
 
 class ChatRow(QWidget):
@@ -862,7 +1087,8 @@ class Bubble(QFrame):
         self.win = win
         self.m = m
         me = m["mine"]
-        self.setObjectName("bubble_me" if me else "bubble_them")
+        jumbo = bool(m["text"]) and not m["file"] and is_jumbo(m["text"])
+        self.setObjectName("bubble_jumbo" if jumbo else ("bubble_me" if me else "bubble_them"))
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 8, 14, 7)
@@ -899,7 +1125,14 @@ class Bubble(QFrame):
             self.fbtn.setStyleSheet(f"color:{'#FFFFFF' if me else P['accent']}; text-align:left; padding:0")
             self.fbtn.clicked.connect(self._file_action)
             lay.addWidget(self.fbtn)
-        if m["text"]:
+        if m["text"] and jumbo:
+            t = QLabel(m["text"].strip())
+            t.setObjectName("jumbo")
+            f = QFont("Segoe UI Emoji" if IS_WIN else "Noto Color Emoji")
+            f.setPixelSize(46)
+            t.setFont(f)
+            lay.addWidget(t)
+        elif m["text"]:
             t = QLabel(m["text"])
             t.setObjectName("me_text" if me else "them_text")
             t.setWordWrap(True)
@@ -910,7 +1143,7 @@ class Bubble(QFrame):
             t.setMaximumWidth(460)
             lay.addWidget(t)
         self.meta = QLabel()
-        self.meta.setObjectName("me_meta" if me else "them_meta")
+        self.meta.setObjectName("them_meta" if jumbo else ("me_meta" if me else "them_meta"))
         self.meta.setAlignment(Qt.AlignRight)
         lay.addWidget(self.meta)
         self.refresh(m)
@@ -999,6 +1232,7 @@ class ChatWindow(QMainWindow):
         gm = QMenu(gb)
         gm.addAction("Профиль и сеть…", self.settings)
         gm.addAction("Установить сервер на VPS…", self.setup_server)
+        gm.addAction("Фото профиля…", self.choose_photo)
         gm.addAction("Папка с файлами", lambda: open_local(self._downloads()))
         gm.addSeparator()
         gm.addAction(f"О программе RafChat {APP_VER}", self.about)
@@ -1013,6 +1247,8 @@ class ChatWindow(QMainWindow):
         self.chats = QListWidget()
         self.chats.setObjectName("chats")
         self.chats.currentItemChanged.connect(self._pick)
+        self.chats.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.chats.customContextMenuRequested.connect(self._chat_menu)
         sl.addWidget(self.chats, 1)
         self.net_lbl = label("", "small", wrap=True)
         self.net_lbl.setContentsMargins(16, 4, 12, 0)
@@ -1042,8 +1278,7 @@ class ChatWindow(QMainWindow):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
-        self.msgs = QWidget()
-        self.msgs.setObjectName("msgs")
+        self.msgs = MsgsArea()
         self.ml = QVBoxLayout(self.msgs)
         self.ml.setContentsMargins(16, 12, 16, 12)
         self.ml.setSpacing(6)
@@ -1060,6 +1295,10 @@ class ChatWindow(QMainWindow):
                      fn=self.pick_files)
         att.setIconSize(QSize(24, 24))
         cl.addWidget(att, 0, Qt.AlignBottom)
+        emo = button("🙂", "icon", tip="Смайлики", fn=self.show_emoji)
+        emo.setStyleSheet("font-size:22px")
+        cl.addWidget(emo, 0, Qt.AlignBottom)
+        self._emo_btn = emo
         self.input = QPlainTextEdit()
         self.input.setObjectName("input")
         self.input.setPlaceholderText("Сообщение…   (Enter — отправить, Shift+Enter — новая строка)")
@@ -1131,7 +1370,7 @@ class ChatWindow(QMainWindow):
         self._update_head()
 
     def _peer_avatar(self, p):
-        pm = avatar(p["name"], p["id"], 44)
+        pm = avatar(p["name"], p["id"], 44, photo=p.get("photo"))
         if p["online"]:
             q = QPainter(pm)
             q.setRenderHint(QPainter.Antialiasing)
@@ -1142,6 +1381,32 @@ class ChatWindow(QMainWindow):
             q.drawEllipse(QRectF(33, 33, 10, 10))
             q.end()
         return pm
+
+    def show_emoji(self):
+        panel = EmojiPanel(self)
+        panel.picked.connect(lambda e: (self.input.insertPlainText(e), self.input.setFocus()))
+        b = self._emo_btn
+        panel.move(b.mapToGlobal(QPoint(0, -panel.height() - 6)))
+        panel.show()
+
+    def _chat_menu(self, pos):
+        it = self.chats.itemAt(pos)
+        if it is None:
+            return
+        key = it.data(ROLE)
+        m = QMenu(self)
+        if key == ALL:
+            act = m.addAction("Очистить историю общего чата")
+        else:
+            act = m.addAction("Удалить чат")
+        if m.exec(self.chats.viewport().mapToGlobal(pos)) is act:
+            what = "Очистить историю «Общего чата» на этом ПК?" if key == ALL else \
+                "Удалить этот чат и переписку на этом ПК?\n(Если человек снова появится в сети, чат вернётся.)"
+            if QMessageBox.question(self, "RafChat", what) == QMessageBox.Yes:
+                self.node.delete_chat(key)
+                if self.chat == key:
+                    self.open_chat(ALL)
+                self.fill_chats()
 
     def _pick(self, it, _prev=None):
         if it is not None:
@@ -1175,7 +1440,7 @@ class ChatWindow(QMainWindow):
             p = self.node.peer(self.chat)
             if not p:
                 return
-            self.head_av.setPixmap(avatar(p["name"], p["id"], 38))
+            self.head_av.setPixmap(avatar(p["name"], p["id"], 38, photo=p.get("photo")))
             self.head_title.setText(p["name"] + (f" · {p['dept']}" if p["dept"] else ""))
             if p["online"]:
                 kind = {"android": " · телефон", "ios": " · iPhone"}.get(p["plat"], "")
@@ -1372,6 +1637,19 @@ class ChatWindow(QMainWindow):
                                     "несколько секунд, сервер подключится сам; код организации применится "
                                     "после перезапуска.")
             self.me_lbl.setText(self._me_text())
+
+    def choose_photo(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Фото профиля", str(Path.home() / "Pictures"),
+                                           "Изображения (*.jpg *.jpeg *.png *.webp *.bmp)")
+        if not f:
+            return
+        jpeg = make_avatar_jpeg(f)
+        if not jpeg:
+            QMessageBox.warning(self, "RafChat", "Не удалось открыть это изображение.")
+            return
+        self.node.set_avatar(jpeg)
+        self.me_lbl.setText(self._me_text())
+        QMessageBox.information(self, "RafChat", "Фото профиля обновлено — коллеги увидят его через несколько секунд.")
 
     def setup_server(self):
         d = ServerSetupDialog(self.cfg, self)

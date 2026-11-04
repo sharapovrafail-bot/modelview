@@ -8,7 +8,7 @@ import org.json.JSONObject
 
 data class Peer(
     val id: String, val name: String, val dept: String, val ip: String, val port: Int,
-    val plat: String, val lastSeen: Long, val relaySeen: Long = 0,
+    val plat: String, val lastSeen: Long, val relaySeen: Long = 0, val avh: String = "",
 ) {
     /** в одной сети (напрямую) */
     val lan get() = ip.isNotEmpty() && System.currentTimeMillis() - lastSeen < Node.ONLINE_MS
@@ -37,9 +37,9 @@ data class Msg(
 )
 
 /** Переписка и участники — та же схема, что в программе для ПК. */
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 2) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE peers(id TEXT PRIMARY KEY, name TEXT, dept TEXT, ip TEXT, port INT, plat TEXT, last_seen INT, relay_seen INT DEFAULT 0)")
+        db.execSQL("CREATE TABLE peers(id TEXT PRIMARY KEY, name TEXT, dept TEXT, ip TEXT, port INT, plat TEXT, last_seen INT, relay_seen INT DEFAULT 0, avh TEXT)")
         db.execSQL("CREATE TABLE messages(id TEXT PRIMARY KEY, chat TEXT, sender TEXT, sender_name TEXT, ts INT, " +
             "text TEXT, file TEXT, mine INT, status TEXT, local TEXT, unread INT DEFAULT 0)")
         db.execSQL("CREATE INDEX msg_chat ON messages(chat, ts)")
@@ -49,6 +49,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 2) {
 
     override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
         if (o < 2) db.execSQL("ALTER TABLE peers ADD COLUMN relay_seen INT DEFAULT 0")
+        if (o < 3) db.execSQL("ALTER TABLE peers ADD COLUMN avh TEXT")
     }
 
     @Synchronized
@@ -90,16 +91,30 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 2) {
     @Synchronized
     fun peers(): List<Peer> {
         val out = ArrayList<Peer>()
-        readableDatabase.rawQuery("SELECT id,name,dept,ip,port,plat,last_seen,relay_seen FROM peers", null).use { c ->
+        readableDatabase.rawQuery("SELECT id,name,dept,ip,port,plat,last_seen,relay_seen,avh FROM peers", null).use { c ->
             while (c.moveToNext()) out.add(
                 Peer(c.getString(0), c.getString(1) ?: "?", c.getString(2) ?: "", c.getString(3) ?: "",
-                    c.getInt(4), c.getString(5) ?: "", c.getLong(6), c.getLong(7))
+                    c.getInt(4), c.getString(5) ?: "", c.getLong(6), c.getLong(7), c.getString(8) ?: "")
             )
         }
         return out
     }
 
     fun peer(id: String) = peers().firstOrNull { it.id == id }
+
+    @Synchronized
+    fun setAvh(id: String, avh: String) =
+        writableDatabase.execSQL("UPDATE peers SET avh=? WHERE id=?", arrayOf(avh, id))
+
+    /** Удалить чат: переписку и очередь; личный — вместе с участником (вернётся, если снова появится в сети). */
+    @Synchronized
+    fun deleteChat(key: String) {
+        writableDatabase.execSQL("DELETE FROM messages WHERE chat=?", arrayOf(key))
+        if (key != Node.ALL) {
+            writableDatabase.execSQL("DELETE FROM outbox WHERE peer=?", arrayOf(key))
+            writableDatabase.execSQL("DELETE FROM peers WHERE id=?", arrayOf(key))
+        }
+    }
 
     @Synchronized
     fun hasMsg(id: String): Boolean =

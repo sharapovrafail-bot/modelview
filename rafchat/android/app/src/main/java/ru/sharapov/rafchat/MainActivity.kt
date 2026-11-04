@@ -87,6 +87,18 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
+    /** Долгое нажатие на чат: удалить (или очистить «Общий чат»). */
+    private fun askDelete(key: String, title: String) {
+        val all = key == Node.ALL
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(if (all) "Очистить «Общий чат»?" else "Удалить чат «$title»?")
+            .setMessage(if (all) "История общего чата удалится на этом телефоне."
+                else "Переписка удалится на этом телефоне. Если человек снова появится в сети, чат вернётся.")
+            .setPositiveButton(if (all) "Очистить" else "Удалить") { _, _ -> if (Node.running) Node.deleteChat(key); refresh() }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
     private fun refresh() {
         if (!Node.running || !::list.isInitialized) {
             if (::status.isInitialized) status.text = "Подключаюсь к сети…"
@@ -105,7 +117,9 @@ class MainActivity : AppCompatActivity() {
                 setBackgroundResource(android.R.drawable.list_selector_background)
                 setOnClickListener { startActivity(Intent(this@MainActivity, ChatActivity::class.java).putExtra("chat", key)) }
             }
-            row.addView(Ui.avatar(this, title, key, 48f, online && key != Node.ALL, key == Node.ALL))
+            row.setOnLongClickListener { askDelete(key, title); true }
+            row.addView(Ui.avatar(this, title, key, 48f, online && key != Node.ALL, key == Node.ALL,
+                if (key == Node.ALL) null else Node.avatarFile(key)))
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             val last = Node.db.last(key)
             val unread = Node.db.unread(key)

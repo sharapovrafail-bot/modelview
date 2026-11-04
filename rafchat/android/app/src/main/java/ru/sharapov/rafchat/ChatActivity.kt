@@ -40,6 +40,39 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    /** Камера: снимок → сжать (как в WhatsApp) → сразу в чат. */
+    private var shot: java.io.File? = null
+    private val camera = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val f = shot ?: return@registerForActivityResult
+        if (!ok || !f.isFile || f.length() == 0L) { f.delete(); return@registerForActivityResult }
+        thread {
+            val name = "Фото_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".jpg"
+            val dir = java.io.File(filesDir, "sent").apply { mkdirs() }
+            val out = java.io.File(dir, java.util.UUID.randomUUID().toString().take(8) + "_" + name)
+            val jpg = Ui.jpeg(this, android.net.Uri.fromFile(f), 2048, false)
+            if (jpg != null) out.writeBytes(jpg) else f.copyTo(out, true)
+            f.delete()
+            Node.send(chat, "", out, name)
+        }
+    }
+
+    private fun takePhoto() {
+        if (!Node.running) { Toast.makeText(this, "RafChat ещё не в сети", Toast.LENGTH_SHORT).show(); return }
+        val dir = java.io.File(cacheDir, "camera").apply { mkdirs() }
+        val f = java.io.File(dir, "shot_${System.currentTimeMillis()}.jpg")
+        shot = f
+        try {
+            camera.launch(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", f))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Не удалось открыть камеру", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onSaveInstanceState(out: Bundle) {
+        super.onSaveInstanceState(out)
+        shot?.let { out.putString("shot", it.path) }
+    }
+
     private val changed = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = refresh()
     }
@@ -47,6 +80,7 @@ class ChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chat = intent.getStringExtra("chat") ?: Node.ALL
+        savedInstanceState?.getString("shot")?.let { shot = java.io.File(it) }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFFF2F2F7.toInt()) }
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -56,7 +90,8 @@ class ChatActivity : AppCompatActivity() {
             setImageResource(R.drawable.ic_back); setPadding(d(12f), d(12f), d(12f), d(12f)); setOnClickListener { finish() }
         }, LinearLayout.LayoutParams(d(48f), d(48f)))
         val peer = if (chat == Node.ALL) null else Node.db.peer(chat)
-        head.addView(Ui.avatar(this, peer?.name ?: "", chat, 40f, false, chat == Node.ALL))
+        head.addView(Ui.avatar(this, peer?.name ?: "", chat, 40f, false, chat == Node.ALL,
+            if (chat == Node.ALL) null else Node.avatarFile(chat)))
         val hc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(12f), 0, 0, 0) }
         title = TextView(this).apply { textSize = 17f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.TEXT); maxLines = 1 }
         sub = TextView(this).apply { textSize = 13f; setTextColor(Ui.MUTED); maxLines = 1 }
@@ -64,7 +99,10 @@ class ChatActivity : AppCompatActivity() {
         head.addView(hc, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(head)
         root.addView(View(this).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(-1, 1))
-        scroll = ScrollView(this).apply { descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS }
+        scroll = ScrollView(this).apply {
+            descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            background = Ui.chatBackground(this@ChatActivity)
+        }
         msgs = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(12f), d(8f), d(12f), d(8f)) }
         scroll.addView(msgs)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -77,12 +115,26 @@ class ChatActivity : AppCompatActivity() {
             setImageResource(R.drawable.ic_attach); setPadding(d(10f), d(10f), d(10f), d(10f))
             setOnClickListener { pick.launch(arrayOf("*/*")) }
         }, LinearLayout.LayoutParams(d(46f), d(46f)))
+        bar.addView(TextView(this).apply {
+            text = "🙂"; textSize = 23f; gravity = Gravity.CENTER
+            setOnClickListener {
+                Ui.emojiDialog(this@ChatActivity) { e ->
+                    val s = maxOf(input.selectionStart, 0); val en = maxOf(input.selectionEnd, 0)
+                    input.text.replace(minOf(s, en), maxOf(s, en), e)
+                }
+            }
+        }, LinearLayout.LayoutParams(d(42f), d(46f)))
         input = EditText(this).apply {
             hint = "Сообщение"; textSize = 16f; background = getDrawable(R.drawable.bg_input)
             setPadding(d(14f), d(10f), d(14f), d(10f)); maxLines = 6
             imeOptions = EditorInfo.IME_FLAG_NO_ENTER_ACTION
         }
-        bar.addView(input, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = d(2f); marginEnd = d(8f) })
+        bar.addView(input, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = d(2f); marginEnd = d(4f) })
+        bar.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_camera); setPadding(d(9f), d(9f), d(9f), d(9f))
+            contentDescription = "Сфотографировать и отправить"
+            setOnClickListener { takePhoto() }
+        }, LinearLayout.LayoutParams(d(44f), d(46f)).apply { marginEnd = d(4f) })
         bar.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_send); setBackgroundResource(R.drawable.bg_round_accent)
             setPadding(d(9f), d(9f), d(9f), d(9f)); setOnClickListener { sendText() }
@@ -160,11 +212,14 @@ class ChatActivity : AppCompatActivity() {
     private fun bubble(m: Msg): View {
         val me = m.mine
         val fg = if (me) 0xFFFFFFFF.toInt() else Ui.TEXT
-        val meta = if (me) 0xBFFFFFFF.toInt() else Ui.MUTED
+        val jumbo = m.file == null && Ui.isJumbo(m.text)
+        val meta = if (jumbo) Ui.MUTED else if (me) 0xBFFFFFFF.toInt() else Ui.MUTED
         val b = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = Ui.roundBg(if (me) Ui.ACCENT else Ui.SURFACE, Ui.dp(this@ChatActivity, 18f))
-            setPadding(d(14f), d(8f), d(14f), d(7f))
+            if (!jumbo) {
+                background = Ui.roundBg(if (me) Ui.ACCENT else Ui.SURFACE, Ui.dp(this@ChatActivity, 18f))
+                setPadding(d(14f), d(8f), d(14f), d(7f))
+            } else setPadding(d(4f), d(2f), d(4f), d(2f))
         }
         if (!me && chat == Node.ALL) b.addView(TextView(this).apply {
             text = m.senderName; textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.color(m.sender))
@@ -200,7 +255,8 @@ class ChatActivity : AppCompatActivity() {
             }
             b.addView(action)
         }
-        if (m.text.isNotEmpty()) b.addView(TextView(this).apply {
+        if (jumbo) b.addView(TextView(this).apply { text = m.text.trim(); textSize = 46f })
+        else if (m.text.isNotEmpty()) b.addView(TextView(this).apply {
             text = m.text; textSize = 16f; setTextColor(fg); setTextIsSelectable(true)
             android.text.util.Linkify.addLinks(this, android.text.util.Linkify.WEB_URLS)
             if (me) setLinkTextColor(0xFFFFFFFF.toInt())

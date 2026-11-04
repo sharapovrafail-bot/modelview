@@ -47,9 +47,19 @@ object Ui {
     fun roundBg(color: Int, radius: Float) = GradientDrawable().apply { setColor(color); cornerRadius = radius }
 
     /** Круглый аватар с инициалами и зелёной точкой «в сети». */
-    fun avatar(ctx: Context, name: String, key: String, sizeDp: Float, online: Boolean, group: Boolean = false): FrameLayout {
+    fun avatar(ctx: Context, name: String, key: String, sizeDp: Float, online: Boolean, group: Boolean = false,
+               photo: File? = null): FrameLayout {
         val size = dpi(ctx, sizeDp)
         val f = FrameLayout(ctx)
+        val bmp = photo?.takeIf { it.isFile }?.let { try { android.graphics.BitmapFactory.decodeFile(it.path) } catch (_: Exception) { null } }
+        if (bmp != null) {
+            val img = android.widget.ImageView(ctx).apply {
+                setImageDrawable(androidx.core.graphics.drawable.RoundedBitmapDrawableFactory.create(ctx.resources, bmp)
+                    .apply { isCircular = true; setAntiAlias(true) })
+                scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            }
+            f.addView(img, FrameLayout.LayoutParams(size, size))
+        } else {
         val t = TextView(ctx).apply {
             text = if (group) "👥" else initials(name)
             gravity = Gravity.CENTER
@@ -61,6 +71,7 @@ object Ui {
             }
         }
         f.addView(t, FrameLayout.LayoutParams(size, size))
+        }
         if (online) {
             val d = dpi(ctx, sizeDp * 0.3f)
             val dot = android.view.View(ctx).apply {
@@ -71,6 +82,89 @@ object Ui {
             f.addView(dot, FrameLayout.LayoutParams(d, d).apply { gravity = Gravity.BOTTOM or Gravity.END })
         }
         return f
+    }
+
+    /** Узор фона переписки (шестерни, гайки, штангенциркуль…), как обои в WhatsApp. */
+    fun chatBackground(ctx: Context): android.graphics.drawable.Drawable {
+        val src = android.graphics.BitmapFactory.decodeResource(ctx.resources, R.drawable.chat_pattern)
+        val side = dpi(ctx, 300f)
+        val tile = android.graphics.drawable.BitmapDrawable(ctx.resources, android.graphics.Bitmap.createScaledBitmap(src, side, side, true))
+        tile.setTileModeXY(android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT)
+        return android.graphics.drawable.LayerDrawable(arrayOf(android.graphics.drawable.ColorDrawable(0xFFECEEF2.toInt()), tile))
+    }
+
+    /** Картинка → JPEG: поворот по EXIF учитывается, длинная сторона не больше maxSide, square — квадрат по центру. */
+    fun jpeg(ctx: Context, uri: Uri, maxSide: Int, square: Boolean, quality: Int = 85): ByteArray? = try {
+        var b: android.graphics.Bitmap = if (android.os.Build.VERSION.SDK_INT >= 28) {
+            android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(ctx.contentResolver, uri)) { dec, info, _ ->
+                val s = info.size
+                val k = maxOf(1, minOf(s.width, s.height) / (maxSide * 2))
+                if (k > 1) dec.setTargetSampleSize(k)
+                dec.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } else ctx.contentResolver.openInputStream(uri)!!.use { android.graphics.BitmapFactory.decodeStream(it) }
+        if (square) {
+            val side = minOf(b.width, b.height)
+            b = android.graphics.Bitmap.createBitmap(b, (b.width - side) / 2, (b.height - side) / 2, side, side)
+        }
+        val k = maxSide.toFloat() / maxOf(b.width, b.height)
+        if (k < 1f) b = android.graphics.Bitmap.createScaledBitmap(b, (b.width * k).toInt(), (b.height * k).toInt(), true)
+        java.io.ByteArrayOutputStream().also { b.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, it) }.toByteArray()
+    } catch (e: Exception) { null }
+
+    /** Разбить строку смайликов на отдельные (учитывая ️, ‍ и оттенки кожи). */
+    fun splitEmoji(s: String): List<String> {
+        val out = ArrayList<String>()
+        val it = java.text.BreakIterator.getCharacterInstance()
+        it.setText(s)
+        var start = it.first()
+        var end = it.next()
+        while (end != java.text.BreakIterator.DONE) {
+            out.add(s.substring(start, end)); start = end; end = it.next()
+        }
+        return out
+    }
+
+    /** Только 1–3 смайлика — показываем крупно, без облачка (как в WhatsApp). */
+    fun isJumbo(text: String): Boolean {
+        val t = text.replace(" ", "")
+        if (t.isEmpty() || t.length > 24) return false
+        if (t.any { it.code < 0x2000 && (it.isLetterOrDigit() || it in ".,!?:;()-_\"'") }) return false
+        if (!t.all { it.code >= 0x2190 || it == '\uFE0F' || it == '\u200D' }) return false
+        return splitEmoji(t).size <= 3
+    }
+
+    val EMOJI = linkedMapOf(
+        "😀" to "😀😃😄😁😆😅🤣😂🙂😉😊😇🥰😍🤩😘😋😜🤪😎🤓🧐🤔🤨😐😑😶🙄😏😴🤤🥱😬🤐😷🤒🤕🤢🥵🥶🤯🥳🥺😢😭😤😠😡🤬" +
+            "😱😨😰😓🤗🤭🫡🤫😈💀🤡👻👽🤖💩",
+        "👍" to "👍👎👌🤌✌️🤞🤟🤘👊✊🤛🤜👏🙌🫶👐🙏🤝💪👋🤙👆👇👉👈☝️✋🖐️🫵",
+        "🔧" to "🔧🔩⚙️🛠️⛏️🔨🪛🪚🧰📐📏🧲🔥⚡🏭🏗️🚧⚠️🦺🪖🧪🔬💡🔋🖥️💻🖨️⌨️🖱️📦🚚⏱️⏳📅📋📌📎✂️🗜️🛞",
+        "❤️" to "❤️🧡💛💚💙💜🖤🤍💯✅❌❗❓💬🎉🎂🍕☕🍺🍻🎁🏆⭐🌟☀️🌧️❄️🌈🚀💰💵📞📷🎵😺🐶🐱🐻🦊",
+    )
+
+    /** Панель смайликов (снизу экрана): разделы сверху, сетка ниже. */
+    fun emojiDialog(ctx: Context, onPick: (String) -> Unit) {
+        val dlg = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
+        val col = android.widget.LinearLayout(ctx).apply { orientation = android.widget.LinearLayout.VERTICAL; setPadding(dpi(ctx, 8f), dpi(ctx, 8f), dpi(ctx, 8f), dpi(ctx, 8f)) }
+        val tabs = android.widget.LinearLayout(ctx).apply { orientation = android.widget.LinearLayout.HORIZONTAL }
+        val grid = android.widget.GridLayout(ctx).apply { columnCount = 8 }
+        val cell = (ctx.resources.displayMetrics.widthPixels - dpi(ctx, 16f)) / 8
+        fun show(k: String) {
+            grid.removeAllViews()
+            for (e in splitEmoji(EMOJI[k]!!)) grid.addView(TextView(ctx).apply {
+                text = e; textSize = 26f; gravity = Gravity.CENTER
+                setOnClickListener { onPick(e) }
+            }, android.widget.GridLayout.LayoutParams().apply { width = cell; height = cell })
+        }
+        for (k in EMOJI.keys) tabs.addView(TextView(ctx).apply {
+            text = k; textSize = 22f; gravity = Gravity.CENTER; setPadding(0, dpi(ctx, 6f), 0, dpi(ctx, 6f))
+            setOnClickListener { show(k) }
+        }, android.widget.LinearLayout.LayoutParams(0, -2, 1f))
+        col.addView(tabs)
+        col.addView(android.widget.ScrollView(ctx).apply { addView(grid) }, android.widget.LinearLayout.LayoutParams(-1, dpi(ctx, 300f)))
+        show("😀")
+        dlg.setContentView(col)
+        dlg.show()
     }
 
     fun ext(name: String) = name.substringAfterLast('.', "").lowercase()

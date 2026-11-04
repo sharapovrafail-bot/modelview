@@ -13,11 +13,27 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 
 /** Профиль: имя, отдел, код организации (одинаковый у всех), запасные адреса; настройка Xiaomi. */
 class SetupActivity : AppCompatActivity() {
     private val d = { v: Float -> Ui.dpi(this, v) }
+    private var avRedraw: (() -> Unit)? = null
+    private val pickPhoto = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        kotlin.concurrent.thread {
+            val jpg = Ui.jpeg(this, uri, 256, true)
+            runOnUiThread {
+                if (jpg == null) { android.widget.Toast.makeText(this, "Не удалось открыть фото", android.widget.Toast.LENGTH_SHORT).show(); return@runOnUiThread }
+                if (Node.running) Node.setAvatar(jpg) else {
+                    java.io.File(filesDir, "avatar.jpg").writeBytes(jpg)
+                    Prefs.setAvh(this, java.security.MessageDigest.getInstance("MD5").digest(jpg).joinToString("") { "%02x".format(it) })
+                }
+                avRedraw?.invoke()
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,6 +60,22 @@ class SetupActivity : AppCompatActivity() {
             card.addView(e)
             return e
         }
+        // фото профиля: нажмите на кружок
+        val avWrap = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, d(4f), 0, d(6f)) }
+        fun drawAv() {
+            avWrap.removeAllViews()
+            val f = java.io.File(filesDir, "avatar.jpg")
+            avWrap.addView(Ui.avatar(this, Prefs.name(this).ifEmpty { "?" }, Prefs.id(this), 64f, false, false, f.takeIf { it.isFile }))
+            avWrap.addView(TextView(this).apply {
+                text = if (f.isFile) "Сменить фото профиля" else "Поставить фото профиля"
+                textSize = 17f; setTextColor(Ui.ACCENT); setPadding(d(14f), 0, 0, 0)
+            })
+        }
+        avRedraw = ::drawAv
+        drawAv()
+        avWrap.setOnClickListener { pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(
+            ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+        card.addView(avWrap)
         val name = field("Ваше имя (как вас увидят коллеги)", Prefs.name(this), "например: Иван Петров")
         val dept = field("Отдел или участок (необязательно)", Prefs.dept(this), "например: Цех ЧПУ")
         val org = field("Код организации — одинаковый у всех", Prefs.org(this), "узнайте у коллег")

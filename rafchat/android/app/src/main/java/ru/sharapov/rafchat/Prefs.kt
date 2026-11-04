@@ -23,6 +23,11 @@ object Prefs {
     fun server(ctx: Context): String =
         sp(ctx).getString("server", null)?.takeIf { it.isNotBlank() } ?: BuildConfig.DEFAULT_SERVER
     fun setServer(ctx: Context, v: String) = sp(ctx).edit().putString("server", v).apply()
+    /** Хэш своего фото профиля (пусто — фото нет) и когда оно последний раз выложено на сервер. */
+    fun avh(ctx: Context) = sp(ctx).getString("avh", "") ?: ""
+    fun setAvh(ctx: Context, v: String) = sp(ctx).edit().putString("avh", v).putLong("avh_up", 0).apply()
+    fun avhUp(ctx: Context) = sp(ctx).getLong("avh_up", 0)
+    fun setAvhUp(ctx: Context, t: Long) = sp(ctx).edit().putLong("avh_up", t).apply()
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

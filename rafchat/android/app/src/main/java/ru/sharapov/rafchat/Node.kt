@@ -144,7 +144,7 @@ object Node {
         val raw = JSONObject()
             .put("app", "RafChat").put("v", 1).put("id", id).put("name", Prefs.name(ctx))
             .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android").put("ask", ask).put("bye", bye)
-            .put("srv", Prefs.server(ctx))
+            .put("srv", Prefs.server(ctx)).put("avh", Prefs.avh(ctx))
             .toString()
         return JSONObject().put("d", raw).put("s", sign(raw.toByteArray())).toString().toByteArray()
     }
@@ -211,6 +211,62 @@ object Node {
 
     fun profile(): JSONObject = JSONObject().put("app", "RafChat").put("id", id).put("name", Prefs.name(ctx))
         .put("dept", Prefs.dept(ctx)).put("port", TCP).put("plat", "android").put("srv", Prefs.server(ctx))
+        .put("avh", Prefs.avh(ctx))
+
+    // ---------- фото профиля
+    fun myAvatar() = File(ctx.filesDir, "avatar.jpg")
+    fun avatarFile(pid: String): File? = File(ctx.filesDir, "avatars/$pid.jpg").takeIf { it.isFile }
+    private val avLoading = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val avFail = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Своё фото (null — убрать). */
+    fun setAvatar(jpeg: ByteArray?) {
+        if (jpeg != null) {
+            myAvatar().writeBytes(jpeg)
+            val h = java.security.MessageDigest.getInstance("MD5").digest(jpeg).joinToString("") { "%02x".format(it) }
+            Prefs.setAvh(ctx, h)
+        } else {
+            myAvatar().delete()
+            Prefs.setAvh(ctx, "")
+        }
+        if (running) thread(isDaemon = true) { beacon() }
+        changed()
+    }
+
+    /** У коллеги новое фото — скачать (напрямую по сети или с сервера). */
+    private fun checkAvatar(pid: String, avh: String, ip: String?, port: Int) {
+        if (avh.isEmpty() || avLoading.contains(avh) || System.currentTimeMillis() - (avFail[avh] ?: 0L) < 120_000) return
+        if (db.peer(pid)?.avh == avh && avatarFile(pid) != null) return
+        avLoading.add(avh)
+        thread(isDaemon = true) {
+            var data: ByteArray? = null
+            try {
+                if (!ip.isNullOrEmpty()) {
+                    val c = URL("http://$ip:$port/avatar").openConnection() as HttpURLConnection
+                    c.connectTimeout = 4000; c.readTimeout = 6000
+                    c.setRequestProperty("X-Auth", authHeader("GET", "/avatar"))
+                    if (c.responseCode == 200) data = c.inputStream.use { it.readBytes() }
+                    c.disconnect()
+                }
+            } catch (_: Exception) {}
+            if (data == null && serverAddr() != null) data = try {
+                dec(relayCall("GET", "/r/file?fid=$avh", null, false, 20_000))
+            } catch (_: Exception) { null }
+            if (data != null) {
+                File(ctx.filesDir, "avatars").mkdirs()
+                File(ctx.filesDir, "avatars/$pid.jpg").writeBytes(data)
+                db.setAvh(pid, avh)
+                changed()
+            } else avFail[avh] = System.currentTimeMillis()
+            avLoading.remove(avh)
+        }
+    }
+
+    fun deleteChat(key: String) {
+        db.deleteChat(key)
+        if (key != ALL) avatarFile(key)?.delete()
+        changed()
+    }
 
     /** Адрес сервера расходится сам: если у нас он не задан, а у коллеги из нашей организации есть — берём. */
     private fun adoptServer(srv: String) {
@@ -237,6 +293,7 @@ object Node {
             System.currentTimeMillis()
         )
         if (prev == null) catchUp(pid)
+        checkAvatar(pid, d.optString("avh", ""), ip, d.optInt("port", TCP))
         if (!wasOnline) { kick(); changed() }
         return !wasOnline
     }
@@ -356,6 +413,11 @@ object Node {
                     .associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
                 when {
                     method == "GET" && path == "/ping" -> json(out, 200, profile())
+                    method == "GET" && path == "/avatar" -> {
+                        val f = myAvatar()
+                        if (!f.isFile) json(out, 404, JSONObject().put("error", "not_found"))
+                        else { val b = f.readBytes(); head(out, 200, "image/jpeg", b.size.toLong()); out.write(b) }
+                    }
                     method == "POST" && path == "/msg" -> {
                         receive(JSONObject(String(body, Charsets.UTF_8)), s.inetAddress.hostAddress ?: "")
                         json(out, 200, JSONObject().put("ok", true))
@@ -534,6 +596,13 @@ object Node {
     }
 
     private fun relayHello() {
+        val avh = Prefs.avh(ctx)
+        if (avh.isNotEmpty() && myAvatar().isFile && System.currentTimeMillis() - Prefs.avhUp(ctx) > 3 * 86_400_000L) {
+            try {   // сервер хранит файлы 7 дней — обновляем фото раз в 3 дня
+                relayCall("PUT", "/r/file?fid=$avh", enc(myAvatar().readBytes()), false, 60_000)
+                Prefs.setAvhUp(ctx, System.currentTimeMillis())
+            } catch (_: Exception) {}
+        }
         val r = relayJson("POST", "/r/hello", JSONObject().put("profile", b64(enc(profile().toString().toByteArray()))))
         val now = r.optDouble("now", System.currentTimeMillis() / 1000.0)
         val arr = r.optJSONArray("peers") ?: return
@@ -552,6 +621,7 @@ object Node {
         val isNew = db.upsertRelay(pid, d.optString("name", "").ifEmpty { null },
             if (d.has("dept")) d.optString("dept") else null, d.optString("plat", ""), seen)
         if (isNew) catchUp(pid)
+        checkAvatar(pid, d.optString("avh", ""), null, TCP)
         if (!wasOnline && System.currentTimeMillis() - seen < RELAY_ONLINE_MS) { kick(); changed() }
     }
 
