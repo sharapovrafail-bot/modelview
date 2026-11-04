@@ -690,7 +690,7 @@ class Node(QObject):
 
     def _relay_hello(self):
         avh = self.cfg.get("avh")
-        if avh and MY_AVATAR.is_file() and time.time() - float(self.cfg.get("avh_up") or 0) > 3 * 86400:
+        if avh and MY_AVATAR.is_file() and time.time() - float(self.cfg.get("avh_up") or 0) > 86400:
             try:
                 self._relay_call("PUT", "/r/file?" + urlencode({"fid": avh}), raw=self.enc(MY_AVATAR.read_bytes()))
                 self.cfg["avh_up"] = time.time()

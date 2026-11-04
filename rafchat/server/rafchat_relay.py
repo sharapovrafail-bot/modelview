@@ -13,6 +13,8 @@ API (все запросы с заголовками X-Org: <хэш органи
   POST /r/ack    {"qids": [...]}         → удалить доставленное
   POST /r/send   {"to": id, "blob": ...} → положить в ящик получателя
   PUT  /r/file?fid=…  (тело — зашифрованный файл, до 60 МБ);  GET /r/file?fid=…
+Файлы хранятся 3 дня (RAFCHAT_FILE_DAYS), всего не больше 3 ГБ (RAFCHAT_MAX_STORE_GB); на диске всегда
+остаётся ≥ 1 ГБ свободного места — при нехватке первыми удаляются самые старые файлы.
 """
 from __future__ import annotations
 
@@ -27,8 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.1.0"
-KEEP_SEC = 7 * 86400          # сколько хранить недоставленное и файлы
+VERSION = "0.2.0"
+KEEP_SEC = 7 * 86400          # сколько хранить недоставленные сообщения
+FILE_KEEP_SEC = float(os.environ.get("RAFCHAT_FILE_DAYS", 3)) * 86400     # сколько хранить файлы
+MAX_STORE = int(float(os.environ.get("RAFCHAT_MAX_STORE_GB", 3)) * 1024 ** 3)  # предел всех файлов на диске
+MIN_FREE = 1024 ** 3          # на диске VPS всегда остаётся не меньше 1 ГБ свободного места (для VPN и системы)
 MAX_FILE = 60 * 1024 * 1024
 MAX_JSON = 2 * 1024 * 1024
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -69,7 +74,7 @@ class State:
 
     def _cleaner(self):
         while True:
-            time.sleep(3600)
+            time.sleep(600)
             now = time.time()
             with self.lock:
                 for o in self.orgs.values():
@@ -81,9 +86,36 @@ class State:
                         if now - o["nodes"][nid].get("last", 0) > 60 * 86400:
                             del o["nodes"][nid]
                 self.touch()
-            for f in self.files.glob("*"):
-                if now - f.stat().st_mtime > KEEP_SEC:
-                    f.unlink(missing_ok=True)
+            self.trim_files()
+
+    def trim_files(self, need: int = 0) -> bool:
+        """Удалить устаревшие файлы, а если места мало — самые старые, пока не освободится need байт.
+        Возвращает False, если места так и не хватает."""
+        import shutil
+        now = time.time()
+        items = []
+        for f in self.files.glob("*"):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if now - st.st_mtime > FILE_KEEP_SEC or (f.name.startswith(".") and now - st.st_mtime > 3600):
+                f.unlink(missing_ok=True)
+                continue
+            items.append((st.st_mtime, st.st_size, f))
+        items.sort()
+        total = sum(sz for _, sz, _ in items)
+
+        def free():
+            try:
+                return shutil.disk_usage(self.files).free
+            except OSError:
+                return MIN_FREE + need
+        while items and (total + need > MAX_STORE or free() - need < MIN_FREE):
+            _, sz, f = items.pop(0)
+            f.unlink(missing_ok=True)
+            total -= sz
+        return total + need <= MAX_STORE and free() - need >= MIN_FREE
 
 
 def make_handler(st: State):
@@ -168,6 +200,8 @@ def make_handler(st: State):
             n = int(self.headers.get("Content-Length") or 0)
             if n > MAX_FILE:
                 return self._reply(413, {"error": "too_big"})
+            if not st.trim_files(n):
+                return self._reply(507, {"error": "no_space"})
             tmp = st.files / f".{oid}_{fid}.{uuid.uuid4().hex[:6]}"
             left = n
             with open(tmp, "wb") as fh:

@@ -603,8 +603,8 @@ object Node {
 
     private fun relayHello() {
         val avh = Prefs.avh(ctx)
-        if (avh.isNotEmpty() && myAvatar().isFile && System.currentTimeMillis() - Prefs.avhUp(ctx) > 3 * 86_400_000L) {
-            try {   // сервер хранит файлы 7 дней — обновляем фото раз в 3 дня
+        if (avh.isNotEmpty() && myAvatar().isFile && System.currentTimeMillis() - Prefs.avhUp(ctx) > 86_400_000L) {
+            try {   // сервер хранит файлы 3 дня — обновляем фото раз в сутки
                 relayCall("PUT", "/r/file?fid=$avh", enc(myAvatar().readBytes()), false, 60_000)
                 Prefs.setAvhUp(ctx, System.currentTimeMillis())
             } catch (_: Exception) {}
