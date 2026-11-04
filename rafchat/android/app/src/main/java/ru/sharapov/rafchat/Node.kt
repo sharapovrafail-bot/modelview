@@ -94,6 +94,7 @@ object Node {
         thread(name = "rc-beacon", isDaemon = true) { beaconLoop() }
         thread(name = "rc-outbox", isDaemon = true) { outboxLoop() }
         thread(name = "rc-ping", isDaemon = true) { pingLoop() }
+        try { dropSelfGhosts() } catch (_: Exception) {}
         thread(name = "rc-relay", isDaemon = true) { relayLoop() }
     }
 
@@ -266,6 +267,14 @@ object Node {
         val gone = db.mergeDupes(pid)
         for (old in gone) { avatarFile(old)?.delete(); Prefs.setHidden(ctx, old, true) }
         if (gone.isNotEmpty()) changed()
+    }
+
+    /** Убрать уже сохранённые прежние установки себя (то же имя и отдел, не в сети). */
+    fun dropSelfGhosts() {
+        val me = Prefs.name(ctx).trim(); val dep = Prefs.dept(ctx).trim()
+        for (p in db.peers()) if (!p.online && p.name.trim().equals(me, true) && p.dept.trim().equals(dep, true)) {
+            db.deleteChat(p.id); Prefs.setHidden(ctx, p.id, true)
+        }
     }
 
     fun deleteChat(key: String) {
@@ -652,6 +661,10 @@ object Node {
         // сервер помнит устройства 60 дней: старые установки и удалённые чаты не показываем, пока не выйдут на связь
         if (prev == null && !nowOnline &&
             (pid in Prefs.hidden(ctx) || System.currentTimeMillis() - seen > 3 * 86_400_000L)) return
+        // прежняя установка этого же телефона (то же имя и отдел, что у меня) — не показываем
+        if (prev == null && !nowOnline &&
+            d.optString("name").trim().equals(Prefs.name(ctx).trim(), true) &&
+            d.optString("dept").trim().equals(Prefs.dept(ctx).trim(), true)) return
         if (nowOnline) Prefs.setHidden(ctx, pid, false)
         val wasOnline = prev?.online == true
         val isNew = db.upsertRelay(pid, d.optString("name", "").ifEmpty { null },

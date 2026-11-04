@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame, QHBox
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.4.1"
+APP_VER = "0.4.2"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -737,6 +737,10 @@ class Node(QObject):
             # сервер помнит устройства 60 дней: старые установки и удалённые чаты не показываем,
             # пока устройство само не выйдет на связь
             if d["id"] in hidden or time.time() - seen > 3 * 86400:
+                return
+            # прежняя установка этого же устройства (то же имя и отдел, что у меня) — не показываем
+            if (d.get("name") or "").strip().lower() == (self.cfg.get("name") or "").strip().lower() and \
+                    (d.get("dept") or "").strip().lower() == (self.cfg.get("dept") or "").strip().lower():
                 return
         if d["id"] in hidden:
             hidden.pop(d["id"], None)
