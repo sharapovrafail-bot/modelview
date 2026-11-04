@@ -122,11 +122,7 @@ class MainActivity : AppCompatActivity() {
     private fun send(uris: List<Uri>) {
         Toast.makeText(this, "Отправляю на ПК: ${uris.size} шт.…", Toast.LENGTH_SHORT).show()
         Sender.sendAll(this, uris) { r ->
-            val msg = when {
-                r.failed == 0 -> "Готово — на ПК отправлено: ${r.ok} шт."
-                r.ok == 0 -> "Не отправлено: ${r.error}"
-                else -> "Отправлено ${r.ok}, ошибок ${r.failed}: ${r.error}"
-            }
+            val msg = Sender.message(r)
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             refresh()
         }
@@ -147,7 +143,9 @@ class MainActivity : AppCompatActivity() {
         }
         statusDot.backgroundTintList = ColorStateList.valueOf(color(dot))
         statusText.text = title
-        statusSub.text = if (ip != null) "Телефон в сети: $ip" else "Подключитесь к той же сети Wi-Fi, что и компьютер"
+        val queued = Outbox.count(this)
+        statusSub.text = (if (ip != null) "Телефон в сети: $ip" else "Подключитесь к той же сети Wi-Fi, что и компьютер") +
+            (if (queued > 0) "\nЖдут отправки на ПК: $queued" else "")
         pinText.text = Prefs.pin(this).chunked(3).joinToString(" ")
 
         fun mark(b: MaterialButton, ok: Boolean, text: String) {

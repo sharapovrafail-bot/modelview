@@ -29,11 +29,7 @@ class ShareActivity : Activity() {
         }
         Toast.makeText(this, "Отправляю на ПК: ${uris.size} шт.…", Toast.LENGTH_SHORT).show()
         Sender.sendAll(this, uris) { r ->
-            val msg = when {
-                r.failed == 0 -> "Отправлено на ПК: ${r.ok} шт."
-                r.ok == 0 -> "Не отправлено: ${r.error}"
-                else -> "Отправлено ${r.ok}, ошибок ${r.failed}: ${r.error}"
-            }
+            val msg = Sender.message(r)
             Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
             finish()
         }

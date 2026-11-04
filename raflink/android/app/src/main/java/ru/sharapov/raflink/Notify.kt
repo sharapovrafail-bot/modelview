@@ -28,17 +28,21 @@ object Notify {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
 
-    fun received(ctx: Context, name: String) {
+    fun delivered(ctx: Context, name: String) = show(ctx, "Получено на ПК", name)
+
+    fun received(ctx: Context, name: String) = show(ctx, "Файл с ПК", "$name — в «Загрузки/RafLink»")
+
+    private fun show(ctx: Context, title: String, text: String) {
         if (!Perms.hasNotifications(ctx)) return
         val n = NotificationCompat.Builder(ctx, CH_FILES)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("Файл с ПК")
-            .setContentText("$name — в «Загрузки/RafLink»")
+            .setContentTitle(title)
+            .setContentText(text)
             .setContentIntent(openApp(ctx))
             .setAutoCancel(true)
             .build()
         try {
-            NotificationManagerCompat.from(ctx).notify(name.hashCode(), n)
+            NotificationManagerCompat.from(ctx).notify(text.hashCode(), n)
         } catch (_: SecurityException) {}
     }
 }

@@ -2,7 +2,7 @@
 
 Телефон (приложение RafLink на Android) держит HTTP-сервер на порту 47700.
 ПК подключается к нему по 6-значному коду, смотрит папки, скачивает и отправляет файлы.
-Сам ПК слушает порт 47701 — туда телефон шлёт файлы через «Поделиться → На ПК».
+Файлы «с телефона на ПК» телефон ставит в очередь, а ПК забирает их при опросе (брандмауэр не мешает).
 """
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ import sys
 import threading
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote_plus, urlencode, urlparse
+from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import (QByteArray, QEventLoop, QMimeData, QObject, QPoint,
                             QRectF, QSize, Qt, QTimer, QUrl, Signal)
@@ -33,9 +32,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QProgressBar, QPushButton, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-APP_VER = "0.1.0"
+APP_VER = "0.2.0"
 PHONE_PORT = 47700
-PC_PORT = 47701
 IS_WIN = sys.platform == "win32"
 
 CONFIG_DIR = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "RafLink"
@@ -78,6 +76,8 @@ PATHS = {
     "mini": "M4 14h6v6 M20 10h-6V4 M14 10l7-7 M3 21l7-7",
     "doc": "M6 2h12v20H6z M9 7h6 M9 11h6 M9 15h4",
     "shot": "M3 7V3h4 M17 3h4v4 M21 17v4h-4 M7 21H3v-4",
+    "back": "M19 12H5 M12 19l-7-7 7-7",
+    "gallery": "M3 3h18v18H3z M3 16l5-5 4 4 3-3 6 6 M15.5 8.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0",
 }
 
 _glyph_cache: dict = {}
@@ -229,6 +229,27 @@ NC_EXT = {"nc", "tap", "cnc", "ngc", "gcode", "mpf", "eia", "h"}
 IMG_EXT = {"jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "gif"}
 VID_EXT = {"mp4", "mov", "3gp", "mkv", "webm"}
 ARC_EXT = {"zip", "rar", "7z", "tar", "gz"}
+
+
+# Как папки и альбомы называются на телефоне Xiaomi (Проводник / Галерея).
+FOLDER_RU = {
+    "Download": "Загрузки", "Documents": "Документы", "Pictures": "Изображения", "Music": "Музыка",
+    "Movies": "Видео", "DCIM": "Фото с камеры (DCIM)", "Camera": "Камера", "Screenshots": "Скриншоты",
+    "Ringtones": "Рингтоны", "Notifications": "Звуки уведомлений", "Alarms": "Будильники",
+    "Podcasts": "Подкасты", "Audiobooks": "Аудиокниги", "Recordings": "Записи", "Recorder": "Диктофон",
+    "ScreenRecorder": "Записи экрана", "Screen recordings": "Записи экрана", "Bluetooth": "Bluetooth",
+    "Android": "Android (системная)", "MIUI": "MIUI (системная)", "WhatsApp Images": "WhatsApp",
+    "WhatsApp Video": "WhatsApp видео", "Telegram Images": "Telegram", "Telegram Video": "Telegram видео",
+    "Telegram": "Telegram", "Restored": "Восстановленные", "Edited": "Изменённые",
+}
+
+
+def ru_name(name: str) -> str:
+    return FOLDER_RU.get(name, name)
+
+
+def disp_name(e: dict) -> str:
+    return ru_name(e["name"]) if e.get("dir") else e["name"]
 
 
 def ext_of(name: str) -> str:
@@ -411,14 +432,25 @@ class PhoneClient:
         return self.json("GET", "/api/hello", timeout=3)
 
     def pair(self, pin: str):
-        return self.json("POST", "/api/pair", body={"pin": pin, "pc_name": socket.gethostname(),
-                                                     "pc_port": PC_PORT})
+        return self.json("POST", "/api/pair", body={"pin": pin, "pc_name": socket.gethostname()})
 
     def info(self):
         return self.json("GET", "/api/info", timeout=4)
 
     def list(self, path: str):
         return self.json("GET", "/api/list", {"path": path}, timeout=15)
+
+    def albums(self):
+        return self.json("GET", "/api/albums", timeout=30)
+
+    def media(self, album: str):
+        return self.json("GET", "/api/media", {"album": album}, timeout=30)
+
+    def outbox(self):
+        return self.json("GET", "/api/outbox", timeout=8)
+
+    def outbox_done(self, oid: str):
+        return self.json("POST", "/api/outbox/done", {"id": oid}, body={}, timeout=8)
 
     def thumb(self, path: str, size=256) -> bytes:
         c, r = self._open("GET", "/api/thumb", {"path": path, "size": size}, timeout=15)
@@ -429,8 +461,11 @@ class PhoneClient:
         self._check(r, raw)
         return raw
 
-    def download(self, path: str, dest: Path, step, log=True):
-        c, r = self._open("GET", "/api/file", {"path": path, "log": "1" if log else "0"}, timeout=30)
+    def download(self, path: str, dest: Path, step, log=True, outbox_id=None):
+        if outbox_id:
+            c, r = self._open("GET", "/api/outbox/file", {"id": outbox_id}, timeout=30)
+        else:
+            c, r = self._open("GET", "/api/file", {"path": path, "log": "1" if log else "0"}, timeout=30)
         tmp = dest.with_name(dest.name + ".part")
         try:
             if r.status != 200:
@@ -485,7 +520,6 @@ class Bridge(QObject):
     """Передаёт результаты из потоков в окно (сигналы Qt безопасны между потоками)."""
     done = Signal(object, object)       # callback, result
     failed = Signal(object, object)     # callback, exception
-    received = Signal(str, str, int)    # путь, от кого, размер
     found = Signal(str, str, int)       # имя, ip, порт
     show_window = Signal()
 
@@ -529,8 +563,8 @@ class Transfers(QObject):
         self.cancel_ev.set()
         self.queue.clear()
 
-    def download(self, entries: list, dest_dir: Path | None, then=None):
-        self.queue.append(("in", entries, dest_dir, then))
+    def download(self, entries: list, dest_dir: Path | None, then=None, kind="in"):
+        self.queue.append((kind, entries, dest_dir, then))
         self._next()
 
     def upload(self, paths: list, then=None):
@@ -548,7 +582,7 @@ class Transfers(QObject):
         self.busy = True
         self._then = then
         self.cancel_ev.clear()
-        if direction == "in":
+        if direction in ("in", "push"):
             first, total = items[0]["name"], sum(int(e.get("size") or 0) for e in items)
         else:
             first, total = items[0].name, sum(p.stat().st_size for p in items)
@@ -573,7 +607,7 @@ class Transfers(QObject):
 
         try:
             for it in items:
-                if direction == "in":
+                if direction in ("in", "push"):
                     if dest_dir is None:
                         dest = cache_path(it)
                         if dest.exists() and dest.stat().st_size == int(it.get("size") or -1):
@@ -582,7 +616,9 @@ class Transfers(QObject):
                             continue
                     else:
                         dest = unique_path(dest_dir, clean_name(it["name"]))
-                    client.download(it["path"], dest, step, log=True)
+                    client.download(it.get("path"), dest, step, log=True, outbox_id=it.get("outbox_id"))
+                    if it.get("outbox_id"):
+                        client.outbox_done(it["outbox_id"])
                     results.append(dest)
                     self.app.config.add_history("in", it["name"], int(it.get("size") or 0), str(dest))
                 else:
@@ -607,94 +643,6 @@ class Transfers(QObject):
 def cache_path(e: dict) -> Path:
     h = hashlib.md5(f'{e["path"]}|{e.get("size")}|{e.get("mtime")}'.encode()).hexdigest()[:12]
     return CACHE_DIR / h / clean_name(e["name"])
-
-
-# ---------------------------------------------------------------- приём файлов от телефона (порт 47701)
-
-class PushHandler(BaseHTTPRequestHandler):
-    config: Config = None
-
-    def log_message(self, *a):
-        pass
-
-    def _reply(self, code, obj):
-        b = json.dumps(obj).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(b)))
-        self.end_headers()
-        self.wfile.write(b)
-
-    def _authorized(self):
-        ph = self.config["phone"] or {}
-        return ph.get("token") and self.headers.get("X-Token") == ph.get("token")
-
-    def do_GET(self):
-        if urlparse(self.path).path == "/api/ping":
-            return self._reply(200, {"app": "RafLink PC", "version": APP_VER, "name": socket.gethostname()})
-        self._reply(404, {"error": "not_found"})
-
-    def do_POST(self):
-        u = urlparse(self.path)
-        if u.path != "/api/push":
-            return self._reply(404, {"error": "not_found"})
-        if not self._authorized():
-            return self._reply(401, {"error": "not_paired"})
-        name = clean_name(unquote_plus(parse_qs(u.query).get("name", ["file"])[0]))
-        inbox = self.config.inbox()
-        dest = unique_path(inbox, name)
-        tmp = dest.with_name(dest.name + ".part")
-        length = self.headers.get("Content-Length")
-        chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
-        size = 0
-        try:
-            with open(tmp, "wb") as f:
-                if chunked:
-                    while True:
-                        n = int(self.rfile.readline().strip().split(b";")[0] or b"0", 16)
-                        if n == 0:
-                            self.rfile.readline()
-                            break
-                        left = n
-                        while left:
-                            b = self.rfile.read(min(left, 256 * 1024))
-                            if not b:
-                                raise IOError("обрыв")
-                            f.write(b)
-                            left -= len(b)
-                        size += n
-                        self.rfile.readline()
-                else:
-                    left = int(length or 0)
-                    while left:
-                        b = self.rfile.read(min(left, 256 * 1024))
-                        if not b:
-                            raise IOError("обрыв")
-                        f.write(b)
-                        left -= len(b)
-                        size += len(b)
-            tmp.replace(dest)
-        except Exception:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            return self._reply(400, {"error": "incomplete"})
-        sender = self.headers.get("X-From") or "Телефон"
-        self.config.add_history("in", dest.name, size, str(dest))
-        BRIDGE.received.emit(str(dest), sender, size)
-        self._reply(200, {"ok": True, "name": dest.name})
-
-
-def start_push_server(config: Config):
-    PushHandler.config = config
-    try:
-        srv = ThreadingHTTPServer(("0.0.0.0", PC_PORT), PushHandler)
-    except OSError:
-        return None
-    srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
 
 
 def start_discovery():
@@ -801,7 +749,7 @@ class FileDelegate(QStyledItemDelegate):
             tx = QRectF(r.left() + 8, box.bottom() + 6, r.width() - 16, 20)
             p.setFont(name_font)
             p.drawText(tx, Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetrics(name_font).elidedText(e["name"], Qt.ElideMiddle, int(tx.width())))
+                       QFontMetrics(name_font).elidedText(disp_name(e), Qt.ElideMiddle, int(tx.width())))
             p.setFont(small)
             p.setPen(QColor(P["muted"]))
             p.drawText(QRectF(tx.left(), tx.bottom(), tx.width(), 18), Qt.AlignLeft | Qt.AlignVCenter,
@@ -810,7 +758,7 @@ class FileDelegate(QStyledItemDelegate):
             tx = QRectF(box.right() + 12, r.top() + 9, r.width() - box.width() - 30, 21)
             p.setFont(name_font)
             p.drawText(tx, Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetrics(name_font).elidedText(e["name"], Qt.ElideMiddle, int(tx.width())))
+                       QFontMetrics(name_font).elidedText(disp_name(e), Qt.ElideMiddle, int(tx.width())))
             p.setFont(small)
             p.setPen(QColor(P["muted"]))
             p.drawText(QRectF(tx.left(), tx.bottom() + 1, tx.width(), 19), Qt.AlignLeft | Qt.AlignVCenter, meta)
@@ -863,7 +811,7 @@ class FileView(QListWidget):
 
     def meta_text(self, e):
         if e.get("dir"):
-            return "Папка"
+            return "Папка" + (f' · {e["name"]}' if ru_name(e["name"]) != e["name"] else "")
         x = ext_of(e["name"]).upper() or "Файл"
         return f'{x} · {human(e.get("size") or 0)} · {datetime.fromtimestamp(e.get("mtime") or 0):%d.%m.%y %H:%M}'
 
@@ -915,9 +863,15 @@ class FileView(QListWidget):
         else:
             self.app.open_entries([e])
 
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.BackButton:
+            self.app.go_back()
+            return
+        super().mousePressEvent(ev)
+
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Backspace:
-            self.app.go_up()
+            self.app.go_back()
             return
         super().keyPressEvent(ev)
 
@@ -1043,7 +997,7 @@ class Toast(QFrame):
     def transfer(self, direction, first, count):
         self._timer.stop()
         self.title.setStyleSheet("font-size:15px")
-        self.title.setText("Телефон → ПК" if direction == "in" else "ПК → Телефон")
+        self.title.setText({"in": "Телефон → ПК", "push": "Принимаю с телефона", "out": "ПК → Телефон"}[direction])
         self.name.setText(first + (f"  +{count - 1}" if count > 1 else ""))
         self.name.show()
         self.bar.setValue(0)
@@ -1205,6 +1159,9 @@ class MainWindow(QMainWindow):
         self.info: dict = {}
         self.cur_path = PHONE_ROOT + "/Download"
         self.raw_entries: list = []
+        self.back_stack: list = []
+        self._loaded_once = False
+        self._outbox_busy = False
         self.found: dict = {}
         self._polling = False
         self._fails = 0
@@ -1250,7 +1207,7 @@ class MainWindow(QMainWindow):
         th.setContentsMargins(12, 0, 12, 0)
         th.setSpacing(2)
         self.tab_btns = []
-        for i, t in enumerate(["Файлы", "Фото", "История"]):
+        for i, t in enumerate(["Файлы", "Галерея", "История"]):
             b = button(t, "tab", fn=lambda _=False, i=i: self.switch_tab(i))
             b.setCheckable(True)
             th.addWidget(b, 1)
@@ -1283,7 +1240,6 @@ class MainWindow(QMainWindow):
         self.transfers.started.connect(self.toast.transfer)
         self.transfers.progress.connect(self.toast.progress)
         self.transfers.finished.connect(self._transfer_done)
-        BRIDGE.received.connect(self._received)
         BRIDGE.found.connect(self._found)
         BRIDGE.show_window.connect(self.show_normal)
 
@@ -1333,6 +1289,9 @@ class MainWindow(QMainWindow):
 
         self.crumbs = QHBoxLayout()
         self.crumbs.setSpacing(0)
+        self.crumbs.setContentsMargins(0, 0, 0, 0)
+        self.back_btn = button("", "icon", icon="back", tip="Назад (Alt+←, Backspace)", fn=self.go_back)
+        self.up_btn = button("", "icon", icon="up", tip="На уровень выше", fn=self.go_up)
         cw = QWidget()
         cw.setLayout(self.crumbs)
         lay.addWidget(cw)
@@ -1369,7 +1328,8 @@ class MainWindow(QMainWindow):
         self.btn_save = button("На ПК", "pill", icon="down",
                                tip="Сохранить выбранные в папку «Входящие»",
                                fn=lambda: self.save_entries(self._sel_files()))
-        self.btn_send = button("", icon="up", tip="Отправить файлы с ПК на телефон", fn=self.pick_upload)
+        self.btn_send = button("На телефон", icon="send", tip="Выбрать файлы на ПК и отправить на телефон",
+                               fn=self.pick_upload)
         foot.addWidget(self.btn_open)
         foot.addWidget(self.btn_save)
         foot.addWidget(self.btn_send)
@@ -1381,25 +1341,25 @@ class MainWindow(QMainWindow):
     def _build_photos(self):
         w, lay = self._page()
         top = QHBoxLayout()
-        top.addWidget(label("Фото", "h2"), 1)
-        self.photo_src = QComboBox()
-        self.photo_src.addItems(["Камера", "Скриншоты", "Telegram", "Загрузки"])
-        self.photo_src.currentIndexChanged.connect(self.load_photos)
-        top.addWidget(self.photo_src)
-        top.addWidget(button("", icon="refresh", tip="Обновить", fn=self.load_photos))
+        top.addWidget(label("Галерея", "h2"), 1)
+        top.addWidget(button("", icon="refresh", tip="Обновить", fn=self.load_albums))
         lay.addLayout(top)
+        self.album_box = QComboBox()
+        self.album_box.currentIndexChanged.connect(self.load_photos)
+        lay.addWidget(self.album_box)
         self.photos = FileView(self)
         self.photos.set_tiles(True)
         self.photos.itemSelectionChanged.connect(self._photo_sel)
         lay.addWidget(self.photos, 1)
         self.photo_empty = label("", "muted")
         self.photo_empty.setAlignment(Qt.AlignCenter)
+        self.photo_empty.setWordWrap(True)
         self.photo_empty.hide()
         lay.addWidget(self.photo_empty, 1)
         foot = QHBoxLayout()
         self.photo_count = label("", "small")
         foot.addWidget(self.photo_count, 1)
-        foot.addWidget(button("Отправить выбранные на ПК", "pill", icon="down",
+        foot.addWidget(button("Сохранить выбранные на ПК", "pill", icon="down",
                               fn=lambda: self.save_entries(self.photos.entries())))
         lay.addLayout(foot)
         return w
@@ -1434,8 +1394,7 @@ class MainWindow(QMainWindow):
         nl = QVBoxLayout(note)
         for s in ["1. Телефон и ПК подключены к одной сети Wi-Fi.",
                   "2. На телефоне открыто приложение RafLink (в шторке — «На связи…»).",
-                  "3. Xiaomi: RafLink → «Работа в фоне без ограничений» и «Автозапуск».",
-                  "4. Брандмауэр Windows разрешил RafLink для частной сети."]:
+                  "3. Xiaomi: RafLink → «Работа в фоне без ограничений» и «Автозапуск»."]:
             nl.addWidget(label(s, wrap=True))
         lay.addWidget(note)
         row = QHBoxLayout()
@@ -1505,8 +1464,8 @@ class MainWindow(QMainWindow):
             self.show_page("offline")
             return
         self.show_page(["files", "photos", "hist"][i])
-        if i == 1 and self.photos.count() == 0:
-            self.load_photos()
+        if i == 1 and self.album_box.count() == 0:
+            self.load_albums()
 
     # ---------- сопряжение
 
@@ -1593,6 +1552,30 @@ class MainWindow(QMainWindow):
             if self.pages.currentIndex() in (3, 4):
                 self.show_page("files")
             self.load(self.cur_path)
+        if info.get("outbox") and not self._outbox_busy:
+            self.fetch_outbox()
+
+    def fetch_outbox(self):
+        """Телефон положил файлы в очередь «на ПК» — забираем их во «Входящие»."""
+        self._outbox_busy = True
+
+        def ok(r):
+            items = [dict(it, outbox_id=it["id"], path=None) for it in r.get("items", [])]
+            if not items:
+                self._outbox_busy = False
+                return
+
+            def then(res, err):
+                self._outbox_busy = False
+                if not err and res:
+                    self._received_many(res)
+
+            self.transfers.download(items, self.config.inbox(), then, kind="push")
+
+        def fail(e):
+            self._outbox_busy = False
+
+        run_bg(self.client.outbox, ok, fail)
 
     def _poll_fail(self, e):
         self._polling = False
@@ -1615,10 +1598,15 @@ class MainWindow(QMainWindow):
 
     # ---------- папки
 
-    def load(self, path):
+    def load(self, path, remember=True):
         if self.client is None:
             return
-        self.cur_path = path.rstrip("/") or PHONE_ROOT
+        path = path.rstrip("/") or PHONE_ROOT
+        if remember and path != self.cur_path and self.raw_entries is not None and self._loaded_once:
+            self.back_stack.append(self.cur_path)
+            del self.back_stack[:-50]
+        self._loaded_once = True
+        self.cur_path = path
         self._crumbs()
         for b, p in self.quick_btns:
             b.setChecked(p == self.cur_path)
@@ -1646,7 +1634,7 @@ class MainWindow(QMainWindow):
         self.raw_entries = []
         self.view.clear()
         if isinstance(e, PhoneError) and e.status == 404 and want != PHONE_ROOT:
-            self.empty.setText("Такой папки на телефоне нет.\nОткройте «Память» вверху, чтобы выбрать другую.")
+            self.empty.setText("Такой папки на телефоне нет.\nОткройте «Память телефона» вверху, чтобы выбрать другую.")
         else:
             self.empty.setText(str(e))
         self.empty.show()
@@ -1654,7 +1642,7 @@ class MainWindow(QMainWindow):
 
     def reload(self):
         if self.pages.currentIndex() == 1:
-            self.load_photos()
+            self.load_albums()
         else:
             self.load(self.cur_path)
 
@@ -1662,18 +1650,29 @@ class MainWindow(QMainWindow):
         if self.cur_path != PHONE_ROOT:
             self.load(self.cur_path.rsplit("/", 1)[0])
 
+    def go_back(self):
+        if self.back_stack:
+            self.load(self.back_stack.pop(), remember=False)
+        else:
+            self.go_up()
+
     def _crumbs(self):
         while self.crumbs.count():
             it = self.crumbs.takeAt(0)
-            if it.widget():
-                it.widget().hide()
-                it.widget().deleteLater()
+            wd = it.widget()
+            if wd and wd not in (self.back_btn, self.up_btn):
+                wd.hide()
+                wd.deleteLater()
+        self.crumbs.addWidget(self.back_btn)
+        self.crumbs.addWidget(self.up_btn)
+        self.back_btn.setEnabled(bool(self.back_stack))
+        self.up_btn.setEnabled(self.cur_path != PHONE_ROOT)
         rel = self.cur_path[len(PHONE_ROOT):].strip("/")
-        parts = [("Память", PHONE_ROOT)]
+        parts = [("Память телефона", PHONE_ROOT)]
         acc = PHONE_ROOT
         for s in [x for x in rel.split("/") if x]:
             acc += "/" + s
-            parts.append((s, acc))
+            parts.append((ru_name(s), acc))
         if len(parts) > 4:
             parts = parts[:1] + [("…", parts[-4][1])] + parts[-3:]
         for i, (t, p) in enumerate(parts):
@@ -1687,12 +1686,12 @@ class MainWindow(QMainWindow):
 
     def refilter(self):
         q = self.search.text().strip().lower()
-        items = [e for e in self.raw_entries if q in e["name"].lower()]
+        items = [e for e in self.raw_entries if q in e["name"].lower() or q in disp_name(e).lower()]
         mode = self.sort.currentIndex()
         if mode == 0:
             items.sort(key=lambda e: -(e.get("mtime") or 0))
         elif mode == 1:
-            items.sort(key=lambda e: e["name"].lower())
+            items.sort(key=lambda e: disp_name(e).lower())
         else:
             items.sort(key=lambda e: -(e.get("size") or 0))
         items.sort(key=lambda e: not e.get("dir"))
@@ -1718,35 +1717,61 @@ class MainWindow(QMainWindow):
         self.btn_open.setEnabled(len(files) >= 1)
         self.btn_save.setEnabled(len(files) >= 1)
 
+    def load_albums(self):
+        if self.client is None:
+            return
+        self.photo_empty.setText("Загружаю альбомы…")
+        self.photo_empty.show()
+        self.photos.hide()
+
+        def ok(r):
+            cur = self.album_box.currentData()
+            self.album_box.blockSignals(True)
+            self.album_box.clear()
+            self.album_box.addItem(QIcon(glyph("gallery", P["accent"])), f'Все фото и видео  ·  {r.get("total", 0)}', "all")
+            for a in r.get("albums", []):
+                ic = "cam" if a["name"] == "Camera" else "shot" if "Screenshot" in a["name"] else "folder"
+                self.album_box.addItem(QIcon(glyph(ic, P["accent"])), f'{ru_name(a["name"])}  ·  {a["count"]}', a["id"])
+            i = self.album_box.findData(cur)
+            self.album_box.setCurrentIndex(i if i >= 0 else 0)
+            self.album_box.blockSignals(False)
+            self.load_photos()
+
+        def fail(e):
+            self.photo_empty.setText(str(e))
+
+        run_bg(self.client.albums, ok, fail)
+
     def load_photos(self):
         if self.client is None:
             return
-        sub = ["DCIM/Camera", "DCIM/Screenshots", "Download/Telegram", "Download"][self.photo_src.currentIndex()]
-        path = PHONE_ROOT + "/" + sub
+        if self.album_box.count() == 0:
+            self.load_albums()
+            return
+        album = self.album_box.currentData() or "all"
         self.photos.clear()
         self.photo_empty.setText("Загружаю фото…")
         self.photo_empty.show()
         self.photos.hide()
 
         def ok(r):
-            items = [dict(it, path=path + "/" + it["name"]) for it in r.get("items", [])
-                     if not it.get("dir") and ext_of(it["name"]) in IMG_EXT | VID_EXT]
-            items.sort(key=lambda e: -(e.get("mtime") or 0))
+            if (self.album_box.currentData() or "all") != album:
+                return
+            items = r.get("items", [])
             self.photos.set_entries(items)
             self.photos.setVisible(bool(items))
             self.photo_empty.setVisible(not items)
-            self.photo_empty.setText("Здесь нет фото")
-            self.photo_count.setText(f"Фото: {len(items)}")
+            self.photo_empty.setText("В этом альбоме пусто")
+            self.photo_count.setText(f"Фото и видео: {len(items)}")
 
         def fail(e):
-            self.photo_empty.setText(str(e) if not (isinstance(e, PhoneError) and e.status == 404)
-                                     else "Такой папки на телефоне нет")
+            self.photo_empty.setText(str(e))
 
-        run_bg(lambda: self.client.list(path), ok, fail)
+        run_bg(lambda: self.client.media(album), ok, fail)
 
     def _photo_sel(self):
         n = len(self.photos.selectedItems())
-        self.photo_count.setText(f"Выбрано: {n}" if n else f"Фото: {self.photos.count()}")
+        self.photo_count.setText(f"Выбрано: {n}" if n else f"Фото и видео: {self.photos.count()}")
 
     # ---------- передачи
 
@@ -1802,6 +1827,8 @@ class MainWindow(QMainWindow):
         if not results:
             self.toast.hide()
             return
+        if direction == "push":
+            return  # итог покажет _received_many
         if direction == "in":
             last = results[-1]
             in_cache = CACHE_DIR in last.parents
@@ -1820,14 +1847,15 @@ class MainWindow(QMainWindow):
         if self.pages.currentIndex() == 2:
             self.fill_history()
 
-    def _received(self, path, sender, size):
-        p = Path(path)
-        if not self.transfers.busy:
-            self.toast.result("Получено с телефона", p.name, ok=True,
-                              b1=("Открыть", lambda: open_local(p)),
-                              b2=("Показать в папке", lambda: show_in_folder(p)), hide_after=10000)
-        self._last_received = p
-        self.tray.showMessage("Файл с телефона", f"{p.name} · {human(size)}", QIcon(app_icon_pixmap()), 5000)
+    def _received_many(self, paths):
+        last = paths[-1]
+        text = last.name + (f" и ещё {len(paths) - 1}" if len(paths) > 1 else "")
+        self._last_received = last
+        self.toast.result("Получено с телефона", text, ok=True,
+                          b1=("Открыть", lambda: open_local(last)),
+                          b2=("Показать в папке", lambda: show_in_folder(last)), hide_after=12000)
+        if not self.isVisible():
+            self.tray.showMessage("Файл с телефона", text, QIcon(app_icon_pixmap()), 5000)
         if self.pages.currentIndex() == 2:
             self.fill_history()
 
@@ -1885,7 +1913,16 @@ class MainWindow(QMainWindow):
         if ev.key() == Qt.Key_F5:
             self.reload()
             return
+        if ev.key() == Qt.Key_Left and ev.modifiers() & Qt.AltModifier:
+            self.go_back()
+            return
         super().keyPressEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.BackButton:
+            self.go_back()
+            return
+        super().mousePressEvent(ev)
 
     # ---------- трей, мини-режим, настройки
 
@@ -2019,7 +2056,7 @@ class SettingsDialog(QDialog):
         nl.addLayout(r2)
         lay.addWidget(note)
 
-        lay.addWidget(label(f"RafLink {APP_VER} · Рафаил Шарапов · Порт приёма файлов {PC_PORT}", "small"))
+        lay.addWidget(label(f"RafLink {APP_VER} · Рафаил Шарапов", "small"))
         row = QHBoxLayout()
         row.addStretch(1)
         row.addWidget(button("Отмена", fn=self.reject))
@@ -2129,11 +2166,8 @@ def main():
     single.newConnection.connect(lambda: (single.nextPendingConnection(), BRIDGE.show_window.emit()))
     config = Config()
     apply_theme(config["theme"] or "dark")
-    srv = start_push_server(config)
     zc = start_discovery()
     win = MainWindow(config)
-    if srv is None:
-        win.toast.result("Порт 47701 занят", "Приём файлов с телефона не работает.", ok=False)
 
     if "--screenshot" in args:
         out = args[args.index("--screenshot") + 1]

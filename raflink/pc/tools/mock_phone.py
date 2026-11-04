@@ -43,6 +43,11 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         return u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
 
+    def _outbox(self):
+        d = self.root.parent / "outbox"
+        d.mkdir(exist_ok=True)
+        return sorted(f for f in d.iterdir() if "__" in f.name)
+
     def _auth(self):
         if H.token and self.headers.get("X-Token") == H.token:
             return True
@@ -59,7 +64,36 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/info":
             return self._json(200, {"name": "Xiaomi 11T Pro", "battery": 86, "charging": False,
                                     "free": 61 * 2**30, "total": 128 * 2**30, "files_access": True,
-                                    "root": ROOT_NAME})
+                                    "root": ROOT_NAME, "outbox": len(self._outbox())})
+        if path in ("/api/albums", "/api/media"):
+            media = sorted((f for f in self.root.rglob("*")
+                            if f.suffix.lower() in (".jpg", ".png", ".mp4") and "outbox" not in f.parts),
+                           key=lambda f: -f.stat().st_mtime)
+            def item(f):
+                return {"path": ROOT_NAME + "/" + str(f.relative_to(self.root)), "name": f.name,
+                        "size": f.stat().st_size, "mtime": int(f.stat().st_mtime), "dir": False}
+            if path == "/api/media":
+                alb = q.get("album", "all")
+                return self._json(200, {"items": [item(f) for f in media if alb == "all" or f.parent.name == alb]})
+            albums = {}
+            for f in media:
+                a = albums.setdefault(f.parent.name, {"id": f.parent.name, "name": f.parent.name, "count": 0,
+                                                      "cover": item(f)["path"], "mtime": 0})
+                a["count"] += 1
+            return self._json(200, {"total": len(media), "albums": list(albums.values())})
+        if path == "/api/outbox":
+            return self._json(200, {"items": [{"id": f.name.split("__")[0], "name": f.name.split("__", 1)[1],
+                                               "size": f.stat().st_size} for f in self._outbox()]})
+        if path == "/api/outbox/file":
+            f = next((f for f in self._outbox() if f.name.startswith(q.get("id", "?") + "__")), None)
+            if not f:
+                return self._json(404, {"error": "not_found"})
+            data = f.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         f = self._local(q.get("path"))
         if f is None:
             return self._json(403, {"error": "outside"})
@@ -93,6 +127,12 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, {"token": H.token, "name": "Xiaomi 11T Pro (имитатор)", "model": "2107113SG"})
         if not self._auth():
             return
+        if path == "/api/outbox/done":
+            for f in self._outbox():
+                if f.name.startswith(q.get("id", "?") + "__"):
+                    f.unlink()
+                    print("ПК забрал", f.name)
+            return self._json(200, {"ok": True})
         if path == "/api/upload":
             d = self.root / "Download" / "RafLink"
             d.mkdir(parents=True, exist_ok=True)

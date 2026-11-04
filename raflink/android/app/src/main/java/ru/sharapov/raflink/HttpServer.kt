@@ -9,6 +9,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
 import org.json.JSONArray
@@ -169,6 +170,11 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             "/api/file" -> file(r, out)
             "/api/thumb" -> thumb(r, out)
             "/api/upload" -> upload(r, out)
+            "/api/albums" -> albums(out)
+            "/api/media" -> media(r, out)
+            "/api/outbox" -> outboxList(out)
+            "/api/outbox/file" -> outboxFile(r, out)
+            "/api/outbox/done" -> outboxDone(r, out)
             else -> err(out, 404, "not_found")
         }
     }
@@ -213,6 +219,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             .put("total", st.totalBytes)
             .put("files_access", Perms.hasAllFiles())
             .put("root", root.path)
+            .put("outbox", Outbox.count(ctx))
     }
 
     /** Путь внутри памяти телефона; null — если выходит за её пределы. */
@@ -313,6 +320,84 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         json(out, 200, JSONObject().put("path", dst.path).put("name", dst.name))
     }
 
+    // ---------- галерея (как в приложении «Галерея») ----------
+
+    private val filesUri = MediaStore.Files.getContentUri("external")
+    private val mediaSel = "media_type IN (1,3)"
+
+    private fun albums(out: OutputStream) {
+        if (!Perms.hasAllFiles()) return err(out, 403, "no_permission")
+        data class A(val id: String, val name: String, var count: Int, val cover: String, val mtime: Long, val dir: String)
+        val map = LinkedHashMap<String, A>()
+        var total = 0
+        ctx.contentResolver.query(
+            filesUri, arrayOf("bucket_id", "bucket_display_name", "_data", "date_modified"),
+            mediaSel, null, "date_modified DESC"
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getString(0) ?: continue
+                val path = c.getString(2) ?: continue
+                total++
+                val a = map[id]
+                if (a != null) a.count++
+                else map[id] = A(id, c.getString(1) ?: "Без названия", 1, path, c.getLong(3),
+                    path.substringBeforeLast('/'))
+            }
+        }
+        val arr = JSONArray()
+        map.values.forEach {
+            arr.put(JSONObject().put("id", it.id).put("name", it.name).put("count", it.count)
+                .put("cover", it.cover).put("mtime", it.mtime).put("dir", it.dir))
+        }
+        json(out, 200, JSONObject().put("total", total).put("albums", arr))
+    }
+
+    private fun media(r: Req, out: OutputStream) {
+        if (!Perms.hasAllFiles()) return err(out, 403, "no_permission")
+        val bucket = r.query["album"]
+        val limit = (r.query["limit"]?.toIntOrNull() ?: 3000).coerceIn(1, 20000)
+        val sel = if (bucket.isNullOrEmpty() || bucket == "all") mediaSel else "$mediaSel AND bucket_id=?"
+        val args = if (bucket.isNullOrEmpty() || bucket == "all") null else arrayOf(bucket)
+        val arr = JSONArray()
+        ctx.contentResolver.query(
+            filesUri, arrayOf("_data", "_display_name", "_size", "date_modified"), sel, args, "date_modified DESC"
+        )?.use { c ->
+            while (c.moveToNext() && arr.length() < limit) {
+                val path = c.getString(0) ?: continue
+                arr.put(JSONObject().put("path", path)
+                    .put("name", c.getString(1) ?: path.substringAfterLast('/'))
+                    .put("size", c.getLong(2)).put("mtime", c.getLong(3)).put("dir", false))
+            }
+        }
+        json(out, 200, JSONObject().put("items", arr))
+    }
+
+    // ---------- очередь «телефон → ПК» ----------
+
+    private fun outboxList(out: OutputStream) {
+        val arr = JSONArray()
+        Outbox.items(ctx).forEach {
+            arr.put(JSONObject().put("id", it.id).put("name", it.name).put("size", it.file.length())
+                .put("mtime", it.file.lastModified() / 1000))
+        }
+        json(out, 200, JSONObject().put("items", arr))
+    }
+
+    private fun outboxFile(r: Req, out: OutputStream) {
+        val it = Outbox.find(ctx, r.query["id"] ?: "") ?: return err(out, 404, "not_found")
+        head(out, 200, "application/octet-stream", it.file.length())
+        FileInputStream(it.file).use { f -> f.copyTo(out, 65536) }
+    }
+
+    private fun outboxDone(r: Req, out: OutputStream) {
+        val it = Outbox.find(ctx, r.query["id"] ?: "") ?: return json(out, 200, JSONObject().put("ok", true))
+        it.file.delete()
+        Prefs.addEvent(ctx, "→ ПК: ${it.name}")
+        Notify.delivered(ctx, it.name)
+        onEvent()
+        json(out, 200, JSONObject().put("ok", true))
+    }
+
     private fun readBody(r: Req, max: Int): String? {
         val len = r.length
         if (len < 0 || len > max) return null
@@ -351,4 +436,4 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     }
 }
 
-object BuildConfigVersion { const val NAME = "0.1.0" }
+object BuildConfigVersion { const val NAME = "0.2.0" }
