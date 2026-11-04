@@ -47,6 +47,11 @@ object Node {
     const val RELAY_ONLINE_MS = 75_000L
     const val RELAY_FILE_MAX = 50L * 1024 * 1024
     const val AUTO = 50L * 1024 * 1024
+    const val TASK_NEW = "Новое"
+    const val TASK_WORK = "В работе"
+    const val TASK_DONE = "Готово"
+    const val TASK_OK = "Принято ОТК"
+    const val TASK_REWORK = "Доработка"
     const val ACTION_CHANGED = "ru.sharapov.rafchat.CHANGED"
 
     lateinit var ctx: Context
@@ -321,6 +326,8 @@ object Node {
             if (!m.mine || m.ts < since) continue
             val payload = JSONObject().put("id", m.id).put("from", id).put("name", Prefs.name(ctx)).put("to", ALL)
                 .put("ts", m.ts).put("text", m.text).put("file", m.file?.json() ?: JSONObject.NULL).put("port", TCP)
+            m.replyObj?.let { payload.put("reply", it) }
+            m.taskObj?.let { payload.put("task", it) }
             db.addOutbox(pid, m.id, payload.toString())
             if (m.status.contains('/')) {
                 val b = m.status.substringAfter('/').toIntOrNull() ?: 0
@@ -476,7 +483,8 @@ object Node {
 
     // ---------- отправка
     /** Отправить текст и/или файл (файл уже лежит в памяти приложения). */
-    fun send(chat: String, text: String, file: File? = null, fileName: String? = null): String {
+    fun send(chat: String, text: String, file: File? = null, fileName: String? = null,
+             reply: JSONObject? = null, task0: JSONObject? = null): String {
         val mid = UUID.randomUUID().toString().replace("-", "")
         var meta: FileMeta? = null
         if (file != null) {
@@ -487,13 +495,37 @@ object Node {
         val ts = System.currentTimeMillis()
         val targets = if (chat == ALL) db.peers().map { it.id } else listOf(chat)
         val status = if (chat == ALL) "0/${targets.size}" else "queued"
-        db.insertMsg(Msg(mid, chat, id, Prefs.name(ctx), ts, text, meta, true, status, file?.path), false)
-        val payload = JSONObject().put("id", mid).put("from", id).put("name", Prefs.name(ctx)).put("to", chat)
-            .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).put("port", TCP).toString()
+        val task = task0?.let { JSONObject(it.toString()).put("status", it.optString("status").ifEmpty { TASK_NEW })
+            .put("by", Prefs.name(ctx)).put("at", ts) }
+        db.insertMsg(Msg(mid, chat, id, Prefs.name(ctx), ts, text, meta, true, status, file?.path,
+            reply?.toString(), task?.toString()), false)
+        val pj = JSONObject().put("id", mid).put("from", id).put("name", Prefs.name(ctx)).put("to", chat)
+            .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).put("port", TCP)
+        if (reply != null) pj.put("reply", reply)
+        if (task != null) pj.put("task", task)
+        val payload = pj.toString()
         for (t in targets) db.addOutbox(t, mid, payload)
         changed()
         kick()
         return mid
+    }
+
+    /** Сменить статус задания — у себя и у всех, кому оно было отправлено. */
+    fun taskUpdate(mid: String, st: String) {
+        val m = db.msg(mid) ?: return
+        val t = m.taskObj ?: return
+        val ts = System.currentTimeMillis()
+        t.put("status", st).put("by", Prefs.name(ctx)).put("at", ts)
+        db.setTask(mid, t.toString())
+        changed()
+        val uid = UUID.randomUUID().toString().replace("-", "")
+        // старые версии и iPhone увидят это как обычное сообщение
+        val upd = JSONObject().put("id", uid).put("from", id).put("name", Prefs.name(ctx)).put("to", m.chat).put("ts", ts)
+            .put("type", "task").put("task_id", mid).put("status", st).put("port", TCP).put("file", JSONObject.NULL)
+            .put("text", "📋 «${t.optString("title")}» — $st").toString()
+        val targets = if (m.chat == ALL) db.peers().map { it.id } else listOf(m.chat)
+        for (x in targets) db.addOutbox(x, uid, upd)
+        kick()
     }
 
     private fun outboxLoop() {
@@ -759,11 +791,24 @@ object Node {
             // пришло сообщение — значит, отправитель на связи (по сети или через сервер)
             if (ip.isNotEmpty()) upsert(d, ip) else upsertRelay(d, System.currentTimeMillis())
         }
+        if (m.optString("type") == "task") {                 // коллега сменил статус задания
+            val tm = db.msg(m.optString("task_id")) ?: return
+            val t = tm.taskObj ?: return
+            if (m.optLong("ts") >= t.optLong("at")) {
+                t.put("status", m.optString("status")).put("by", m.optString("name", "?")).put("at", m.optLong("ts"))
+                db.setTask(tm.id, t.toString())
+                changed()
+                if (visibleChat != tm.chat) Notify.message(ctx, Msg(tm.id, tm.chat, from, "📋 " + t.optString("title"),
+                    m.optLong("ts"), m.optString("name", "?") + ": " + m.optString("status"), null, false, "", null))
+            }
+            return
+        }
         if (db.hasMsg(mid)) return
         val chat = if (m.optString("to") == ALL) ALL else from
         val meta = if (m.isNull("file")) null else FileMeta.of(m.optJSONObject("file")?.toString())
         val msg = Msg(mid, chat, from, m.optString("name", "?"), m.optLong("ts", System.currentTimeMillis()),
-            m.optString("text", ""), meta, false, "received", null)
+            m.optString("text", ""), meta, false, "received", null,
+            m.optJSONObject("reply")?.toString(), m.optJSONObject("task")?.toString())
         db.insertMsg(msg, visibleChat != chat)
         changed()
         if (visibleChat != chat) Notify.message(ctx, msg)

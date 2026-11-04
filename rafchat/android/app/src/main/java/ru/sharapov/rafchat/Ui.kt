@@ -167,6 +167,45 @@ object Ui {
         dlg.show()
     }
 
+    /** Коротко о сообщении — для цитаты в ответе и результатов поиска. */
+    fun snippet(m: Msg, n: Int = 70): String {
+        val t = m.taskObj?.let { "📋 " + it.optString("title") }
+            ?: if (m.file != null && m.text.isEmpty()) "📎 " + m.file.name else m.text.replace('\n', ' ')
+        return if (t.length <= n) t else t.take(n - 1) + "…"
+    }
+
+    /** Текст задания для старых версий и iPhone (они не умеют показывать карточку). */
+    fun taskFallback(t: org.json.JSONObject): String {
+        val parts = arrayListOf("📋 Задание: " + t.optString("title"))
+        for ((k, l) in listOf("drawing" to "Чертёж/УП", "material" to "Материал", "qty" to "Кол-во", "due" to "Срок",
+                "who" to "Исполнитель", "note" to "")) {
+            val v = t.optString(k)
+            if (v.isNotEmpty()) parts.add(if (l.isEmpty()) v else "$l: $v")
+        }
+        return parts.joinToString("\n")
+    }
+
+    /** «10.11.2026» → текст и «горит ли» срок. */
+    fun dueInfo(due: String): Pair<String, Boolean> {
+        val d = try { SimpleDateFormat("dd.MM.yyyy", Locale.US).parse(due) } catch (e: Exception) { null } ?: return due to false
+        val c = Calendar.getInstance().apply { time = d }
+        val today = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+        val left = ((c.timeInMillis - today.timeInMillis) / 86_400_000L).toInt()
+        val dd = SimpleDateFormat("dd.MM", Locale.US).format(d)
+        return when {
+            left < 0 -> "до $dd — просрочено на ${-left} дн." to true
+            left == 0 -> "до $dd — сегодня" to true
+            else -> "до $dd (осталось $left дн.)" to false
+        }
+    }
+
+    val TASK_COLORS = mapOf(Node.TASK_NEW to 0xFF8E8E93.toInt(), Node.TASK_WORK to 0xFFFF9500.toInt(),
+        Node.TASK_DONE to 0xFF007AFF.toInt(), Node.TASK_OK to 0xFF34C759.toInt(), Node.TASK_REWORK to 0xFFFF3B30.toInt())
+    val TASK_NEXT = mapOf(
+        Node.TASK_NEW to listOf("Взять в работу" to Node.TASK_WORK), Node.TASK_WORK to listOf("Готово" to Node.TASK_DONE),
+        Node.TASK_DONE to listOf("Принято ОТК" to Node.TASK_OK, "Доработка" to Node.TASK_REWORK),
+        Node.TASK_REWORK to listOf("Взять в работу" to Node.TASK_WORK), Node.TASK_OK to emptyList())
+
     val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic")
     private val thumbs = android.util.LruCache<String, android.graphics.Bitmap>(40)
 

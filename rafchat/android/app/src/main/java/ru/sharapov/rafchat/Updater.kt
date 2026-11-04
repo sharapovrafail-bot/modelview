@@ -35,7 +35,7 @@ object Updater {
 
     /** Проверить (не чаще раза в 6 часов); onFound — в потоке интерфейса. */
     fun check(a: Activity, onFound: () -> Unit) {
-        if (System.currentTimeMillis() - lastCheck < 6 * 3_600_000L && newVer == null) return
+        if (System.currentTimeMillis() - lastCheck < 3_600_000L && newVer == null) return   // при открытии, не чаще раза в час
         lastCheck = System.currentTimeMillis()
         val cur = current(a)
         thread(isDaemon = true) {

@@ -34,14 +34,19 @@ data class FileMeta(val fid: String, val name: String, val size: Long, val relay
 data class Msg(
     val id: String, val chat: String, val sender: String, val senderName: String, val ts: Long,
     val text: String, val file: FileMeta?, val mine: Boolean, val status: String, val local: String?,
-)
+    /** ответ на сообщение {id,name,text} и карточка задания (JSON) */
+    val reply: String? = null, val task: String? = null,
+) {
+    val replyObj get() = reply?.let { try { JSONObject(it) } catch (e: Exception) { null } }
+    val taskObj get() = task?.let { try { JSONObject(it) } catch (e: Exception) { null } }
+}
 
 /** Переписка и участники — та же схема, что в программе для ПК. */
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 3) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE peers(id TEXT PRIMARY KEY, name TEXT, dept TEXT, ip TEXT, port INT, plat TEXT, last_seen INT, relay_seen INT DEFAULT 0, avh TEXT)")
         db.execSQL("CREATE TABLE messages(id TEXT PRIMARY KEY, chat TEXT, sender TEXT, sender_name TEXT, ts INT, " +
-            "text TEXT, file TEXT, mine INT, status TEXT, local TEXT, unread INT DEFAULT 0)")
+            "text TEXT, file TEXT, mine INT, status TEXT, local TEXT, unread INT DEFAULT 0, reply TEXT, task TEXT)")
         db.execSQL("CREATE INDEX msg_chat ON messages(chat, ts)")
         db.execSQL("CREATE TABLE outbox(peer TEXT, msg_id TEXT, payload TEXT, PRIMARY KEY(peer, msg_id))")
         db.execSQL("CREATE TABLE files(fid TEXT PRIMARY KEY, path TEXT)")
@@ -50,6 +55,10 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 3) {
     override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
         if (o < 2) db.execSQL("ALTER TABLE peers ADD COLUMN relay_seen INT DEFAULT 0")
         if (o < 3) db.execSQL("ALTER TABLE peers ADD COLUMN avh TEXT")
+        if (o < 4) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN reply TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN task TEXT")
+        }
     }
 
     @Synchronized
@@ -145,6 +154,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 3) {
             put("id", m.id); put("chat", m.chat); put("sender", m.sender); put("sender_name", m.senderName)
             put("ts", m.ts); put("text", m.text); put("file", m.file?.json()?.toString()); put("mine", if (m.mine) 1 else 0)
             put("status", m.status); put("local", m.local); put("unread", if (unread) 1 else 0)
+            put("reply", m.reply); put("task", m.task)
         }
         writableDatabase.insertWithOnConflict("messages", null, v, SQLiteDatabase.CONFLICT_IGNORE)
     }
@@ -159,10 +169,38 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 3) {
 
     private fun row(c: android.database.Cursor) = Msg(
         c.getString(0), c.getString(1), c.getString(2), c.getString(3) ?: "?", c.getLong(4), c.getString(5) ?: "",
-        FileMeta.of(c.getString(6)), c.getInt(7) == 1, c.getString(8) ?: "", c.getString(9)
+        FileMeta.of(c.getString(6)), c.getInt(7) == 1, c.getString(8) ?: "", c.getString(9),
+        c.getString(10), c.getString(11)
     )
 
-    private val cols = "id,chat,sender,sender_name,ts,text,file,mine,status,local"
+    private val cols = "id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task"
+
+    @Synchronized
+    fun setTask(id: String, task: String) =
+        writableDatabase.execSQL("UPDATE messages SET task=? WHERE id=?", arrayOf(task, id))
+
+    /** Поиск по всей переписке (без учёта регистра, в том числе по-русски). */
+    @Synchronized
+    fun search(q: String, limit: Int = 100): List<Msg> {
+        val out = ArrayList<Msg>()
+        val k = q.lowercase()
+        readableDatabase.rawQuery("SELECT $cols FROM messages ORDER BY ts DESC LIMIT 5000", null).use {
+            while (it.moveToNext() && out.size < limit) {
+                val m = row(it)
+                val hay = (m.text + " " + (m.file?.name ?: "") + " " + (m.task ?: "") + " " + m.senderName).lowercase()
+                if (hay.contains(k)) out.add(m)
+            }
+        }
+        return out
+    }
+
+    @Synchronized
+    fun tasks(limit: Int = 200): List<Msg> {
+        val out = ArrayList<Msg>()
+        readableDatabase.rawQuery("SELECT $cols FROM messages WHERE task IS NOT NULL ORDER BY ts DESC LIMIT $limit", null)
+            .use { while (it.moveToNext()) out.add(row(it)) }
+        return out
+    }
 
     @Synchronized
     fun msg(id: String): Msg? =

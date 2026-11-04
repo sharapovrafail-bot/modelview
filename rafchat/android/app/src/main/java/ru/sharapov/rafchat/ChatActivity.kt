@@ -30,13 +30,20 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var input: EditText
     private var shown = -1
     private var shownSig = ""
+    private var replyTo: org.json.JSONObject? = null
+    private lateinit var replyBar: LinearLayout
+    private lateinit var replyName: TextView
+    private lateinit var replyText: TextView
+    private val views = HashMap<String, View>()
+    private var focusId: String? = null
     private val d = { v: Float -> Ui.dpi(this, v) }
 
     private val pick = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@registerForActivityResult
         Toast.makeText(this, "Отправляю файлов: ${uris.size}", Toast.LENGTH_SHORT).show()
+        var rp = takeReply()
         thread {
-            for (u in uris) Ui.importUri(this, u)?.let { (f, name) -> Node.send(chat, "", f, name) }
+            for (u in uris) Ui.importUri(this, u)?.let { (f, name) -> Node.send(chat, "", f, name, rp); rp = null }
         }
     }
 
@@ -80,6 +87,7 @@ class ChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chat = intent.getStringExtra("chat") ?: Node.ALL
+        focusId = intent.getStringExtra("focus")
         savedInstanceState?.getString("shot")?.let { shot = java.io.File(it) }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFFF2F2F7.toInt()) }
         val head = LinearLayout(this).apply {
@@ -107,6 +115,26 @@ class ChatActivity : AppCompatActivity() {
         scroll.addView(msgs)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(View(this).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(-1, 1))
+        // полоска «ответ на сообщение»
+        replyBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Ui.SURFACE); setPadding(d(14f), d(8f), d(6f), 0); visibility = View.GONE
+        }
+        val rq = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(d(10f), d(4f), d(10f), d(4f))
+            background = android.graphics.drawable.LayerDrawable(arrayOf(
+                Ui.roundBg(0xFFEEF1F5.toInt(), Ui.dp(this@ChatActivity, 6f)),
+                android.graphics.drawable.ColorDrawable(Ui.ACCENT))).apply { setLayerWidth(1, d(3f)); setLayerGravity(1, Gravity.START or Gravity.FILL_VERTICAL) }
+        }
+        replyName = TextView(this).apply { textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.ACCENT) }
+        replyText = TextView(this).apply { textSize = 14f; setTextColor(Ui.MUTED); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        rq.addView(replyName); rq.addView(replyText)
+        replyBar.addView(rq, LinearLayout.LayoutParams(0, -2, 1f))
+        replyBar.addView(TextView(this).apply {
+            text = "✕"; textSize = 20f; setTextColor(Ui.MUTED); gravity = Gravity.CENTER
+            setOnClickListener { cancelReply() }
+        }, LinearLayout.LayoutParams(d(44f), d(40f)))
+        root.addView(replyBar)
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
             setBackgroundColor(Ui.SURFACE); setPadding(d(6f), d(8f), d(10f), d(10f))
@@ -124,6 +152,11 @@ class ChatActivity : AppCompatActivity() {
                 }
             }
         }, LinearLayout.LayoutParams(d(42f), d(46f)))
+        bar.addView(TextView(this).apply {
+            text = "📋"; textSize = 21f; gravity = Gravity.CENTER
+            contentDescription = "Новое задание"
+            setOnClickListener { taskDialog() }
+        }, LinearLayout.LayoutParams(d(40f), d(46f)))
         input = EditText(this).apply {
             hint = "Сообщение"; textSize = 16f; background = getDrawable(R.drawable.bg_input)
             setPadding(d(14f), d(10f), d(14f), d(10f)); maxLines = 6
@@ -163,7 +196,155 @@ class ChatActivity : AppCompatActivity() {
         if (t.isEmpty()) return
         if (!Node.running) { Toast.makeText(this, "RafChat ещё не в сети", Toast.LENGTH_SHORT).show(); return }
         input.setText("")
-        thread { Node.send(chat, t) }
+        val rp = takeReply()
+        thread { Node.send(chat, t, reply = rp) }
+    }
+
+    // ---------- ответ на сообщение
+    private fun startReply(m: Msg) {
+        replyTo = org.json.JSONObject().put("id", m.id).put("name", if (m.mine) "Вы" else m.senderName).put("text", Ui.snippet(m))
+        replyName.text = "Ответ: " + replyTo!!.optString("name")
+        replyText.text = replyTo!!.optString("text")
+        replyBar.visibility = View.VISIBLE
+        input.requestFocus()
+        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+            .showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun cancelReply() { replyTo = null; replyBar.visibility = View.GONE }
+
+    private fun takeReply(): org.json.JSONObject? = replyTo.also { cancelReply() }
+
+    private fun msgMenu(m: Msg) {
+        val items = arrayListOf("Ответить")
+        if (m.text.isNotEmpty() && m.task == null) items.add("Копировать текст")
+        androidx.appcompat.app.AlertDialog.Builder(this).setItems(items.toTypedArray()) { _, i ->
+            when (items[i]) {
+                "Ответить" -> startReply(m)
+                else -> {
+                    (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                        .setPrimaryClip(android.content.ClipData.newPlainText("RafChat", m.text))
+                    Toast.makeText(this, "Скопировано", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.show()
+    }
+
+    private fun jumpTo(mid: String) {
+        val v = views[mid] ?: return
+        scroll.post {
+            scroll.smoothScrollTo(0, maxOf(0, v.top - d(80f)))
+            v.setBackgroundColor(0x55FFCC00)
+            v.postDelayed({ v.setBackgroundColor(0) }, 1500)
+        }
+    }
+
+    // ---------- задание
+    private fun taskDialog() {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(20f), d(6f), d(20f), 0) }
+        fun field(label: String, hint: String, num: Boolean = false, list: List<String>? = null): EditText {
+            col.addView(TextView(this).apply { text = label; textSize = 13f; setTextColor(Ui.MUTED); setPadding(0, d(8f), 0, d(2f)) })
+            val e: EditText = if (list != null) android.widget.AutoCompleteTextView(this).apply {
+                setAdapter(android.widget.ArrayAdapter(this@ChatActivity, android.R.layout.simple_dropdown_item_1line, list))
+                threshold = 0
+                setOnFocusChangeListener { v, f -> if (f) (v as android.widget.AutoCompleteTextView).showDropDown() }
+            } else EditText(this)
+            e.hint = hint; e.textSize = 16f
+            if (num) e.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            col.addView(e)
+            return e
+        }
+        val title = field("Деталь / что сделать *", "например: Вал Ø32 h6")
+        val drawing = field("Чертёж / номер программы", "например: ВЛ-032.01, O1025")
+        val material = field("Материал", "40Х, 45, Д16Т…", list = listOf("40Х", "45", "45Х", "Ст3", "12Х18Н10Т", "20Х13", "Д16Т", "АМг6", "Латунь ЛС59"))
+        val qty = field("Количество, шт", "1", num = true).apply { setText("1") }
+        col.addView(TextView(this).apply { text = "Срок"; textSize = 13f; setTextColor(Ui.MUTED); setPadding(0, d(8f), 0, d(2f)) })
+        val cal = java.util.Calendar.getInstance().apply { add(java.util.Calendar.DAY_OF_MONTH, 3) }
+        val fmt = java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.US)
+        var due: String? = fmt.format(cal.time)
+        val dueBtn = TextView(this).apply {
+            text = "до $due  ›"; textSize = 16f; setTextColor(Ui.ACCENT); setPadding(0, d(6f), 0, d(6f))
+        }
+        dueBtn.setOnClickListener {
+            val dlg = android.app.DatePickerDialog(this, { _, y, mo, dd ->
+                cal.set(y, mo, dd); due = fmt.format(cal.time); dueBtn.text = "до $due  ›"
+            }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH))
+            dlg.setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Без срока") { _, _ -> due = null; dueBtn.text = "без срока  ›" }
+            dlg.show()
+        }
+        col.addView(dueBtn)
+        val who = field("Исполнитель", "кто делает", list = Node.db.peers().map { it.name }.distinct().sorted())
+        val note = field("Примечание", "допуски, квалитет, шероховатость…")
+        col.addView(TextView(this).apply {
+            text = "Файлы (модель, УП, чертёж) отправьте следом ответом на карточку"; textSize = 12f; setTextColor(Ui.MUTED)
+            setPadding(0, d(10f), 0, 0)
+        })
+        val dlg = androidx.appcompat.app.AlertDialog.Builder(this).setTitle("📋 Новое задание")
+            .setView(ScrollView(this).apply { addView(col) })
+            .setPositiveButton("Отправить", null).setNegativeButton("Отмена", null).create()
+        dlg.setOnShowListener {
+            dlg.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val tt = title.text.toString().trim()
+                if (tt.length < 2) { title.error = "Укажите деталь"; return@setOnClickListener }
+                val t = org.json.JSONObject().put("title", tt.take(120))
+                fun opt(k: String, v: String) { if (v.isNotBlank()) t.put(k, v.trim()) }
+                opt("drawing", drawing.text.toString().take(80)); opt("material", material.text.toString().take(40))
+                qty.text.toString().toIntOrNull()?.takeIf { it > 0 }?.let { t.put("qty", it) }
+                due?.let { t.put("due", it) }
+                opt("who", who.text.toString().take(60)); opt("note", note.text.toString().take(600))
+                val rp = takeReply()
+                thread { Node.send(chat, Ui.taskFallback(t), reply = rp, task0 = t) }
+                dlg.dismiss()
+            }
+        }
+        dlg.show()
+    }
+
+    private fun taskCard(b: LinearLayout, m: Msg, me: Boolean) {
+        val t = m.taskObj ?: return
+        val fg = if (me) 0xFFFFFFFF.toInt() else Ui.TEXT
+        val mu = if (me) 0xCCFFFFFF.toInt() else Ui.MUTED
+        b.minimumWidth = d(260f)
+        b.addView(TextView(this).apply { text = "📋 ЗАДАНИЕ"; textSize = 12f; setTypeface(typeface, Typeface.BOLD); setTextColor(mu); letterSpacing = 0.08f })
+        b.addView(TextView(this).apply { text = t.optString("title"); textSize = 18f; setTypeface(typeface, Typeface.BOLD); setTextColor(fg) })
+        val st = t.optString("status").ifEmpty { Node.TASK_NEW }
+        val rows = ArrayList<String>()
+        if (t.optString("drawing").isNotEmpty()) rows.add("Чертёж / УП: <b>${t.optString("drawing")}</b>")
+        val mq = listOf(t.optString("material"), t.optString("qty").let { if (it.isEmpty()) "" else "$it шт" }).filter { it.isNotEmpty() }
+        if (mq.isNotEmpty()) rows.add("Материал: <b>${mq.joinToString(" · ")}</b>")
+        if (t.optString("due").isNotEmpty()) {
+            val (txt, hot) = Ui.dueInfo(t.optString("due"))
+            val late = hot && st != Node.TASK_DONE && st != Node.TASK_OK
+            rows.add(if (late && !me) "Срок: <b><font color='#FF3B30'>⚠ $txt</font></b>" else "Срок: <b>${if (late) "⚠ " else ""}$txt</b>")
+        }
+        if (t.optString("who").isNotEmpty()) rows.add("Исполнитель: <b>${t.optString("who")}</b>")
+        if (t.optString("note").isNotEmpty()) rows.add(android.text.TextUtils.htmlEncode(t.optString("note")).replace("\n", "<br>"))
+        b.addView(TextView(this).apply {
+            text = androidx.core.text.HtmlCompat.fromHtml(rows.joinToString("<br>"), androidx.core.text.HtmlCompat.FROM_HTML_MODE_LEGACY)
+            textSize = 15f; setTextColor(fg); setPadding(0, d(2f), 0, d(4f))
+        })
+        val sr = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val col = Ui.TASK_COLORS[st] ?: Ui.MUTED
+        sr.addView(TextView(this).apply {
+            text = st; textSize = 13f; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(if (me) col else 0xFFFFFFFF.toInt())
+            background = Ui.roundBg(if (me) 0xFFFFFFFF.toInt() else col, Ui.dp(this@ChatActivity, 10f))
+            setPadding(d(9f), d(2f), d(9f), d(2f))
+        })
+        val at = t.optLong("at", m.ts)
+        sr.addView(TextView(this).apply {
+            text = "  ${t.optString("by")} · " + java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.US).format(java.util.Date(at))
+            textSize = 12f; setTextColor(mu)
+        })
+        b.addView(sr)
+        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, d(6f), 0, 0) }
+        for ((label, next) in Ui.TASK_NEXT[st] ?: emptyList()) btns.addView(TextView(this).apply {
+            text = label; textSize = 15f; setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
+            setTextColor(Ui.ACCENT); background = Ui.roundBg(if (me) 0xFFFFFFFF.toInt() else 0xFFE5F0FF.toInt(), Ui.dp(this@ChatActivity, 10f))
+            setPadding(d(12f), d(7f), d(12f), d(7f))
+            setOnClickListener { thread { Node.taskUpdate(m.id, next) } }
+        }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(6f) })
+        if (btns.childCount > 0) b.addView(btns)
     }
 
     private fun refresh() {
@@ -185,12 +366,13 @@ class ChatActivity : AppCompatActivity() {
         val history = Node.db.history(chat)
         // перерисовываем переписку, только если в ней что-то изменилось (иначе мешаем набору текста)
         val sig = history.joinToString("|") { m ->
-            m.id + m.status + (m.local ?: "") + (Node.progress[m.id]?.first ?: "")
+            m.id + m.status + (m.local ?: "") + (Node.progress[m.id]?.first ?: "") + (m.task ?: "")
         }
         if (sig == shownSig) return
         shownSig = sig
         val atBottom = scroll.getChildAt(0)?.let { scroll.scrollY + scroll.height >= it.height - d(40f) } ?: true
         msgs.removeAllViews()
+        views.clear()
         var lastDay = ""
         for (m in history) {
             val day = Ui.day(m.ts)
@@ -202,8 +384,9 @@ class ChatActivity : AppCompatActivity() {
                     setPadding(d(10f), d(3f), d(10f), d(3f))
                 }, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = d(10f); bottomMargin = d(6f) })
             }
-            msgs.addView(bubble(m))
+            msgs.addView(bubble(m).also { views[m.id] = it })
         }
+        focusId?.let { f -> focusId = null; scroll.post { jumpTo(f) }; return }
         // прокрутка вниз БЕЗ смены фокуса (fullScroll уводил фокус из поля ввода — курсор «вылетал»)
         if (atBottom || history.size != shown) scroll.post { scroll.scrollTo(0, msgs.height) }
         shown = history.size
@@ -224,6 +407,26 @@ class ChatActivity : AppCompatActivity() {
         if (!me && chat == Node.ALL) b.addView(TextView(this).apply {
             text = m.senderName; textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.color(m.sender))
         })
+        b.setOnLongClickListener { msgMenu(m); true }
+        m.replyObj?.let { rp ->                         // цитата сообщения, на которое ответили
+            val q = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(d(9f), d(3f), d(9f), d(4f))
+                background = android.graphics.drawable.LayerDrawable(arrayOf(
+                    Ui.roundBg(if (me) 0x30FFFFFF else 0xFFEEF1F5.toInt(), Ui.dp(this@ChatActivity, 6f)),
+                    android.graphics.drawable.ColorDrawable(if (me) 0xFFFFFFFF.toInt() else Ui.ACCENT))).apply { setLayerWidth(1, d(3f)); setLayerGravity(1, Gravity.START or Gravity.FILL_VERTICAL) }
+                setOnClickListener { jumpTo(rp.optString("id")) }
+            }
+            q.addView(TextView(this).apply {
+                text = rp.optString("name"); textSize = 12f; setTypeface(typeface, Typeface.BOLD)
+                setTextColor(if (me) 0xFFFFFFFF.toInt() else Ui.ACCENT)
+            })
+            q.addView(TextView(this).apply {
+                text = rp.optString("text"); textSize = 14f; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(if (me) 0xDDFFFFFF.toInt() else Ui.MUTED)
+            })
+            b.addView(q, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = d(4f) })
+        }
+        if (m.task != null) taskCard(b, m, me)
         val f = m.file
         val photo = if (f != null && m.local != null && Ui.ext(f.name) in Ui.IMAGE_EXT)
             Ui.thumb(this, m.local, d(260f) * 2) else null
@@ -269,9 +472,11 @@ class ChatActivity : AppCompatActivity() {
             }
             b.addView(action)
         }
-        if (jumbo) b.addView(TextView(this).apply { text = m.text.trim(); textSize = 46f })
+        if (m.task != null) Unit
+        else if (jumbo) b.addView(TextView(this).apply { text = m.text.trim(); textSize = 46f })
         else if (m.text.isNotEmpty()) b.addView(TextView(this).apply {
-            text = m.text; textSize = 16f; setTextColor(fg); setTextIsSelectable(true)
+            text = m.text; textSize = 16f; setTextColor(fg)
+            setOnLongClickListener { msgMenu(m); true }        // долгое нажатие — «Ответить / Копировать»
             android.text.util.Linkify.addLinks(this, android.text.util.Linkify.WEB_URLS)
             if (me) setLinkTextColor(0xFFFFFFFF.toInt())
         })
