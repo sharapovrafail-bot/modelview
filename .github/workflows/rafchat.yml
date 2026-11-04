@@ -1,0 +1,105 @@
+# Сборка RafChat: приложение для Android (APK) и установщик для Windows.
+# Результат — в релизе «rafchat-latest» (вкладка Releases) и в артефактах запуска.
+name: RafChat build
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths: ['rafchat/**', '.github/workflows/rafchat.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+      - name: Сборка APK
+        working-directory: rafchat/android
+        run: gradle --no-daemon assembleRelease
+      - name: Имя файла
+        run: |
+          VER=$(grep -oP 'versionName = "\K[^"]+' rafchat/android/app/build.gradle.kts)
+          cp rafchat/android/app/build/outputs/apk/release/app-release.apk RafChat-$VER.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-android
+          path: RafChat-*.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости
+        run: python -m pip install --upgrade pip pyinstaller pillow -r rafchat/pc/requirements.txt
+      - name: Значок
+        working-directory: rafchat/pc
+        run: |
+          python rafchat_pc.py --make-icon icon.png
+          python -c "from PIL import Image; Image.open('icon.png').save('rafchat.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+      - name: Сборка RafChat (папка с программой)
+        working-directory: rafchat/pc
+        run: |
+          python make_version.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr rafchat_pc.py
+      - name: Проверка запуском и снимок окна
+        working-directory: rafchat/pc
+        shell: pwsh
+        run: |
+          $env:RAFCHAT_HOME = "$PWD\testhome"
+          $p = Start-Process -FilePath .\dist\RafChat\RafChat.exe -ArgumentList '--screenshot', "$PWD\screenshot-win.png" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "программа не закрылась" }
+          if (-not (Test-Path screenshot-win.png)) { throw "окно не открылось" }
+      - name: Установщик (Inno Setup)
+        working-directory: rafchat/pc
+        shell: pwsh
+        run: |
+          $env:RAFCHAT_VER = (Select-String -Path rafchat_pc.py -Pattern 'APP_VER = "([^"]+)"').Matches[0].Groups[1].Value
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ошибка Inno Setup" }
+          Copy-Item screenshot-win.png ..\..\out\
+      - name: Проверка установщика (тихая установка, правило брандмауэра)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem out\RafChat-Setup-*.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          if (-not (Test-Path "$env:ProgramFiles\RafChat\RafChat.exe")) { throw "программа не установилась" }
+          netsh advfirewall firewall show rule name="RafChat"
+          if ($LASTEXITCODE -ne 0) { throw "нет правила брандмауэра" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-windows
+          path: out/*
+
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Релиз rafchat-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete rafchat-latest --yes --cleanup-tag || true
+          gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe \
+            --target "${{ github.sha }}" \
+            --title "RafChat — чат и файлы по локальной сети (последняя сборка)" \
+            --notes "RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — приложение для Android. Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md." \
+            --prerelease
