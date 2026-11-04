@@ -22,6 +22,8 @@ class LinkService : Service() {
 
     companion object {
         const val PORT = 47700
+        const val TLS_PORT = 47703
+        @Volatile var tlsPort = 0
         const val ACTION_STOP = "ru.sharapov.raflink.STOP"
         const val ACTION_CHANGED = "ru.sharapov.raflink.CHANGED"
         @Volatile var running = false
@@ -41,6 +43,7 @@ class LinkService : Service() {
     }
 
     private var server: HttpServer? = null
+    private var tlsServer: HttpServer? = null
     private var nsd: NsdManager? = null
     private var nsdListener: NsdManager.RegistrationListener? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -55,8 +58,16 @@ class LinkService : Service() {
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         )
         running = true
-        server = HttpServer(this, PORT) { changed() }.also {
+        server = HttpServer(this, PORT, false) { changed() }.also {
             try { it.start() } catch (e: Exception) { Prefs.addEvent(this, "info", "Ошибка сервера: ${e.message}") }
+        }
+        try {
+            Tls.ensureKey()
+            tlsServer = HttpServer(this, TLS_PORT, true) { changed() }.also { it.start() }
+            tlsPort = TLS_PORT
+        } catch (e: Exception) {
+            tlsPort = 0
+            Prefs.addEvent(this, "info", "Шифрование недоступно: ${e.message}")
         }
         registerNsd()
         @Suppress("DEPRECATION")
@@ -77,6 +88,8 @@ class LinkService : Service() {
     override fun onDestroy() {
         running = false
         server?.stop()
+        tlsServer?.stop()
+        tlsPort = 0
         try { nsdListener?.let { nsd?.unregisterService(it) } } catch (_: Exception) {}
         wifiLock?.release()
         sendBroadcast(Intent(ACTION_CHANGED).setPackage(packageName))

@@ -188,6 +188,43 @@
                 app:tint="@color/accent" />
         </LinearLayout>
 
+        <!-- Буфер на ПК -->
+        <LinearLayout
+            android:id="@+id/btnClip"
+            android:layout_width="match_parent"
+            android:layout_height="68dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card_click"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="22dp"
+            android:paddingEnd="18dp">
+
+            <ImageView
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:src="@drawable/ic_clip"
+                app:tint="@color/accent" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="18dp"
+                android:layout_weight="1"
+                android:text="Буфер на ПК"
+                android:textColor="@color/text"
+                android:textSize="19sp"
+                android:textStyle="bold" />
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_chevron"
+                app:tint="@color/accent" />
+        </LinearLayout>
+
         <!-- Последние передачи -->
         <TextView
             style="@style/Section"
@@ -222,6 +259,11 @@
             <LinearLayout android:id="@+id/rowBattery" style="@style/Row">
                 <TextView style="@style/RowText" android:text="Работа в фоне без ограничений" />
                 <TextView android:id="@+id/stBattery" style="@style/RowState" />
+            </LinearLayout>
+            <View style="@style/Divider" />
+            <LinearLayout android:id="@+id/rowControl" style="@style/Row">
+                <TextView style="@style/RowText" android:text="Управление с ПК (мышью)" />
+                <TextView android:id="@+id/stControl" style="@style/RowState" />
             </LinearLayout>
             <View style="@style/Divider" />
             <LinearLayout android:id="@+id/rowAutostart" style="@style/Row">

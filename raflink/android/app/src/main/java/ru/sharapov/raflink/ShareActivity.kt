@@ -22,6 +22,15 @@ class ShareActivity : Activity() {
             startActivity(Intent(this, MainActivity::class.java))
             finish(); return
         }
+        val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+        @Suppress("DEPRECATION")
+        val hasStream = intent.hasExtra(Intent.EXTRA_STREAM)
+        if (intent.action == Intent.ACTION_SEND && !hasStream && !sharedText.isNullOrEmpty()) {
+            Prefs.setClip(this, sharedText)
+            Prefs.addEvent(this, "info", "Текст отправлен в буфер ПК")
+            Toast.makeText(this, "Текст отправлен в буфер ПК", Toast.LENGTH_SHORT).show()
+            finish(); return
+        }
         val uris = collect(intent)
         if (uris.isEmpty()) {
             Toast.makeText(this, "Нечего отправлять", Toast.LENGTH_SHORT).show()

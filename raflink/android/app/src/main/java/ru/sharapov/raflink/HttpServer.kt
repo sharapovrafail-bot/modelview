@@ -37,7 +37,12 @@ import kotlin.concurrent.thread
  *  GET  /api/thumb?path=&size=   — миниатюра фото/видео (JPEG)
  *  POST /api/upload?name=        — файл с ПК → Загрузки/RafLink
  */
-class HttpServer(private val ctx: Context, val port: Int, private val onEvent: () -> Unit) {
+class HttpServer(
+    private val ctx: Context,
+    val port: Int,
+    private val secure: Boolean,
+    private val onEvent: () -> Unit,
+) {
 
     private var server: ServerSocket? = null
     @Volatile private var running = false
@@ -47,7 +52,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
 
     fun start() {
         running = true
-        val ss = ServerSocket()
+        val ss = if (secure) Tls.serverSocketFactory().createServerSocket() else ServerSocket()
         ss.reuseAddress = true
         ss.bind(InetSocketAddress(port))
         server = ss
@@ -97,6 +102,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         s.use { sock ->
             try {
                 sock.soTimeout = 60_000
+                if (sock is javax.net.ssl.SSLSocket) sock.startHandshake()
                 val inp = sock.getInputStream().buffered(65536)
                 val out = sock.getOutputStream().buffered(65536)
                 val first = readLine(inp) ?: return
@@ -132,17 +138,35 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
 
     // ---------- ответы ----------
 
-    private fun head(out: OutputStream, code: Int, type: String, length: Long) {
+    private fun head(out: OutputStream, code: Int, type: String, length: Long, extra: String = "") {
         val text = when (code) {
-            200 -> "OK"; 400 -> "Bad Request"; 401 -> "Unauthorized"; 403 -> "Forbidden"
-            404 -> "Not Found"; else -> "Error"
+            200 -> "OK"; 206 -> "Partial Content"; 400 -> "Bad Request"; 401 -> "Unauthorized"; 403 -> "Forbidden"
+            404 -> "Not Found"; 409 -> "Conflict"; else -> "Error"
         }
         val h = StringBuilder()
             .append("HTTP/1.1 $code $text\r\n")
             .append("Content-Type: $type\r\n")
             .append("Content-Length: $length\r\n")
+            .append(extra)
             .append("Connection: close\r\n\r\n")
         out.write(h.toString().toByteArray())
+    }
+
+    /** Отдать файл целиком или с места обрыва (заголовок Range: bytes=N-). */
+    private fun sendFile(r: Req, out: OutputStream, f: File) {
+        val len = f.length()
+        val start = Regex("bytes=(\\d+)-").find(r.headers["range"] ?: "")?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        FileInputStream(f).use { inp ->
+            if (start in 1 until len) {
+                head(out, 206, "application/octet-stream", len - start,
+                    "Content-Range: bytes $start-${len - 1}/$len\r\nAccept-Ranges: bytes\r\n")
+                var skip = start
+                while (skip > 0) { val k = inp.skip(skip); if (k <= 0) break; skip -= k }
+            } else {
+                head(out, 200, "application/octet-stream", len, "Accept-Ranges: bytes\r\n")
+            }
+            inp.copyTo(out, 65536)
+        }
     }
 
     private fun json(out: OutputStream, code: Int, obj: Any) {
@@ -162,6 +186,9 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         }
         val token = Prefs.token(ctx)
         if (token == null || r.headers["x-token"] != token) return err(out, 401, "not_paired")
+        // ПК, перешедший на шифрование, больше не принимается по открытому каналу
+        if (!secure && Prefs.tlsOnly(ctx)) return err(out, 403, "tls_required")
+        if (secure && !Prefs.tlsOnly(ctx)) Prefs.setTlsOnly(ctx, true)
         Prefs.updatePcHost(ctx, r.remote)
         Prefs.touch(ctx)
 
@@ -176,6 +203,13 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             "/api/outbox" -> outboxList(out)
             "/api/outbox/file" -> outboxFile(r, out)
             "/api/outbox/done" -> outboxDone(r, out)
+            "/api/upload/status" -> uploadStatus(r, out)
+            "/api/clip" -> if (r.method == "POST") clipSet(r, out) else clipGet(out)
+            "/api/screen/request" -> screenRequest(out)
+            "/api/screen/state" -> json(out, 200, screenStateJson())
+            "/api/screen/stream" -> screenStream(out)
+            "/api/screen/stop" -> { ScreenService.stop(ctx); json(out, 200, JSONObject().put("ok", true)) }
+            "/api/input" -> input(r, out)
             else -> err(out, 404, "not_found")
         }
     }
@@ -186,6 +220,11 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         .put("name", deviceName(ctx))
         .put("model", Build.MODEL)
         .put("paired", Prefs.isPaired(ctx))
+        .put("secure", secure)
+        .apply {
+            val fp = Tls.fingerprint
+            if (fp != null && LinkService.tlsPort > 0) put("tls_port", LinkService.tlsPort).put("fp", fp)
+        }
 
     private fun pair(r: Req, out: OutputStream) {
         val body = readBody(r, 4096) ?: return err(out, 400, "bad_body")
@@ -200,6 +239,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             val token = Prefs.newToken()
             val pcName = o.optString("pc_name", "ПК").take(64)
             Prefs.savePairing(ctx, token, pcName, r.remote, o.optInt("pc_port", 47701))
+            Prefs.setTlsOnly(ctx, secure)
             Prefs.newPin(ctx)
             Prefs.addEvent(ctx, "info", "Подключён ПК «$pcName»")
             onEvent()
@@ -221,6 +261,10 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
             .put("files_access", Perms.hasAllFiles())
             .put("root", root.path)
             .put("outbox", Outbox.count(ctx))
+            .put("clip_seq", Prefs.clipSeq(ctx))
+            .put("screen", ScreenState.running)
+            .put("control", ControlService.instance != null)
+            .put("secure", secure)
     }
 
     /** Путь внутри памяти телефона; null — если выходит за её пределы. */
@@ -254,9 +298,8 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         if (!Perms.hasAllFiles()) return err(out, 403, "no_permission")
         val f = safe(r.query["path"]) ?: return err(out, 403, "outside")
         if (!f.isFile) return err(out, 404, "not_found")
-        head(out, 200, "application/octet-stream", f.length())
-        FileInputStream(f).use { it.copyTo(out, 65536) }
-        if (r.query["log"] == "1") {
+        sendFile(r, out, f)
+        if (r.query["log"] == "1" && r.headers["range"] == null) {
             Prefs.addEvent(ctx, "out", f.name)
             onEvent()
         }
@@ -298,8 +341,9 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         val name = cleanName(r.query["name"] ?: return err(out, 400, "no_name"))
         val len = r.length
         if (len < 0) return err(out, 400, "no_length")
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "RafLink")
-        dir.mkdirs()
+        val dir = inboxDir()
+        val uid = r.query["id"]?.filter { it.isLetterOrDigit() }?.take(40)
+        if (!uid.isNullOrEmpty()) return uploadResumable(r, out, dir, name, uid, len)
         val dst = unique(dir, name)
         val tmp = File(dir, ".${dst.name}.part")
         var left = len
@@ -386,8 +430,7 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
 
     private fun outboxFile(r: Req, out: OutputStream) {
         val it = Outbox.find(ctx, r.query["id"] ?: "") ?: return err(out, 404, "not_found")
-        head(out, 200, "application/octet-stream", it.file.length())
-        FileInputStream(it.file).use { f -> f.copyTo(out, 65536) }
+        sendFile(r, out, it.file)
     }
 
     private fun outboxDone(r: Req, out: OutputStream) {
@@ -396,6 +439,103 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
         Prefs.addEvent(ctx, "out", it.name)
         Notify.delivered(ctx, it.name)
         onEvent()
+        json(out, 200, JSONObject().put("ok", true))
+    }
+
+    private fun inboxDir() =
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "RafLink").apply { mkdirs() }
+
+    private fun uploadStatus(r: Req, out: OutputStream) {
+        val uid = r.query["id"]?.filter { it.isLetterOrDigit() }?.take(40) ?: return err(out, 400, "no_id")
+        val part = File(inboxDir(), ".rl_$uid.part")
+        json(out, 200, JSONObject().put("have", if (part.exists()) part.length() else 0))
+    }
+
+    /** Приём файла частями: при обрыве Wi-Fi ПК продолжает с того места, где остановился. */
+    private fun uploadResumable(r: Req, out: OutputStream, dir: File, name: String, uid: String, len: Long) {
+        val total = r.query["total"]?.toLongOrNull() ?: return err(out, 400, "no_total")
+        val offset = r.query["offset"]?.toLongOrNull() ?: 0L
+        val part = File(dir, ".rl_$uid.part")
+        val have = if (part.exists()) part.length() else 0L
+        if (offset != have) return json(out, 409, JSONObject().put("error", "offset").put("have", have))
+        val buf = ByteArray(65536)
+        var left = len
+        FileOutputStream(part, true).use { fo ->
+            while (left > 0) {
+                val n = r.body.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                if (n < 0) break
+                fo.write(buf, 0, n)
+                left -= n
+            }
+        }
+        if (part.length() < total) return json(out, 200, JSONObject().put("have", part.length()).put("partial", true))
+        val dst = unique(dir, name)
+        part.renameTo(dst)
+        MediaScannerConnection.scanFile(ctx, arrayOf(dst.path), null, null)
+        Prefs.addEvent(ctx, "in", dst.name)
+        Notify.received(ctx, dst.name)
+        onEvent()
+        json(out, 200, JSONObject().put("path", dst.path).put("name", dst.name))
+    }
+
+    // ---------- буфер обмена ----------
+
+    private fun clipSet(r: Req, out: OutputStream) {
+        val body = readBody(r, 2_000_000) ?: return err(out, 400, "bad_body")
+        val text = try { JSONObject(body).optString("text") } catch (e: Exception) { return err(out, 400, "bad_json") }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("RafLink", text))
+        }
+        Notify.clip(ctx, text)
+        json(out, 200, JSONObject().put("ok", true))
+    }
+
+    private fun clipGet(out: OutputStream) =
+        json(out, 200, JSONObject().put("seq", Prefs.clipSeq(ctx)).put("text", Prefs.clipText(ctx)))
+
+    // ---------- экран телефона ----------
+
+    private fun screenStateJson() = JSONObject()
+        .put("running", ScreenState.running)
+        .put("width", ScreenState.width)
+        .put("height", ScreenState.height)
+        .put("control", ControlService.instance != null)
+
+    private fun screenRequest(out: OutputStream) {
+        ScreenState.lastWant = System.currentTimeMillis()
+        if (!ScreenState.running) Notify.screenRequest(ctx)
+        json(out, 200, screenStateJson())
+    }
+
+    /** Поток кадров MJPEG: ПК читает его и показывает экран телефона. */
+    private fun screenStream(out: OutputStream) {
+        if (!ScreenState.running) return err(out, 409, "not_running")
+        out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=rlframe\r\n" +
+            "Cache-Control: no-cache\r\nConnection: close\r\n\r\n").toByteArray())
+        out.flush()
+        ScreenState.watchers.incrementAndGet()
+        try {
+            var last = 0L
+            while (ScreenState.running && running) {
+                ScreenState.lastWant = System.currentTimeMillis()
+                val f = ScreenState.next(last, 1500) ?: continue
+                last = f.first
+                out.write("--rlframe\r\nContent-Type: image/jpeg\r\nContent-Length: ${f.second.size}\r\n\r\n".toByteArray())
+                out.write(f.second)
+                out.write("\r\n".toByteArray())
+                out.flush()
+            }
+        } finally {
+            ScreenState.watchers.decrementAndGet()
+        }
+    }
+
+    private fun input(r: Req, out: OutputStream) {
+        val svc = ControlService.instance ?: return err(out, 409, "no_control")
+        val body = readBody(r, 100_000) ?: return err(out, 400, "bad_body")
+        val o = try { JSONObject(body) } catch (e: Exception) { return err(out, 400, "bad_json") }
+        android.os.Handler(android.os.Looper.getMainLooper()).post { svc.handle(o) }
         json(out, 200, JSONObject().put("ok", true))
     }
 
@@ -442,4 +582,4 @@ class HttpServer(private val ctx: Context, val port: Int, private val onEvent: (
     }
 }
 
-object BuildConfigVersion { const val NAME = "0.3.2" }
+object BuildConfigVersion { const val NAME = "0.4.0" }

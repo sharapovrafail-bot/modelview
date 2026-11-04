@@ -11,6 +11,7 @@ import androidx.core.app.NotificationManagerCompat
 object Notify {
     const val CH_SERVICE = "service"
     const val CH_FILES = "files"
+    const val CH_REQ = "requests"
 
     fun channels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -21,6 +22,10 @@ object Notify {
         nm.createNotificationChannel(
             NotificationChannel(CH_FILES, "Полученные файлы", NotificationManager.IMPORTANCE_DEFAULT)
         )
+        nm.createNotificationChannel(
+            NotificationChannel(CH_REQ, "Запросы с ПК", NotificationManager.IMPORTANCE_HIGH)
+                .apply { description = "ПК просит показать экран телефона" }
+        )
     }
 
     fun openApp(ctx: Context): PendingIntent = PendingIntent.getActivity(
@@ -29,6 +34,27 @@ object Notify {
     )
 
     fun delivered(ctx: Context, name: String) = show(ctx, "Получено на ПК", name)
+
+    fun clip(ctx: Context, text: String) = show(ctx, "Текст с ПК в буфере", text.take(80).replace('\n', ' '))
+
+    /** ПК просит показать экран: нажатие открывает системный запрос «Начать». */
+    fun screenRequest(ctx: Context) {
+        val i = Intent(ctx, ScreenConsentActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try { ctx.startActivity(i) } catch (_: Exception) {}   // сработает, если RafLink открыт
+        if (!Perms.hasNotifications(ctx)) return
+        val pi = PendingIntent.getActivity(ctx, 5, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(ctx, CH_REQ)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle("ПК просит показать экран")
+            .setContentText("Нажмите, затем «Начать»")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setTimeoutAfter(60_000)
+            .build()
+        try { NotificationManagerCompat.from(ctx).notify(77, n) } catch (_: SecurityException) {}
+    }
 
     fun received(ctx: Context, name: String) = show(ctx, "Файл с ПК", "$name — в «Загрузки/RafLink»")
 

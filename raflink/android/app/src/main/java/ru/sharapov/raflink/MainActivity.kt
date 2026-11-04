@@ -67,6 +67,8 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.btnSend).setOnClickListener { if (needPc()) pickFiles.launch(arrayOf("*/*")) }
         findViewById<View>(R.id.btnPhoto).setOnClickListener { if (needPc()) photo() }
+        findViewById<View>(R.id.btnClip).setOnClickListener { if (needPc()) clipToPc() }
+        findViewById<View>(R.id.rowControl).setOnClickListener { controlSetup() }
         findViewById<View>(R.id.rowFiles).setOnClickListener { open(Perms.allFilesIntent(this)) }
         findViewById<View>(R.id.rowNotif).setOnClickListener {
             if (Build.VERSION.SDK_INT >= 33) askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -135,6 +137,41 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Текст из буфера телефона → в буфер ПК (читать буфер Android разрешает только открытому приложению). */
+    private fun clipToPc() {
+        val cm = getSystemService(android.content.ClipboardManager::class.java)
+        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
+        if (text.isNullOrEmpty()) {
+            Toast.makeText(this, "Буфер пуст — сначала скопируйте текст", Toast.LENGTH_LONG).show()
+            return
+        }
+        Prefs.setClip(this, text)
+        Prefs.addEvent(this, "info", "Текст отправлен в буфер ПК")
+        Toast.makeText(this, "Текст уйдёт в буфер ПК через пару секунд", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun controlSetup() {
+        if (ControlService.isEnabled(this)) {
+            open(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            return
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Управление с ПК")
+            .setMessage(
+                "Чтобы управлять телефоном мышкой с ПК, включите RafLink в «Специальных возможностях»:\n\n" +
+                    "1. Нажмите «Открыть настройки».\n" +
+                    "2. «Скачанные приложения» → «RafLink — управление с ПК» → включить.\n\n" +
+                    "Если переключатель серый (Xiaomi/Android 13+): Настройки → Приложения → RafLink → " +
+                    "⋮ в правом верхнем углу → «Разрешить ограниченные настройки», затем снова сюда."
+            )
+            .setPositiveButton("Открыть настройки") { _, _ ->
+                open(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+            .setNeutralButton("О приложении") { _, _ -> open(Perms.appSettings(this)) }
+            .setNegativeButton("Позже", null)
+            .show()
+    }
+
     private val appVersion: String
         get() = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
 
@@ -196,6 +233,7 @@ class MainActivity : AppCompatActivity() {
         state(R.id.stFiles, Perms.hasAllFiles())
         state(R.id.stNotif, Perms.hasNotifications(this))
         state(R.id.stBattery, Perms.ignoresBattery(this))
+        state(R.id.stControl, ControlService.isEnabled(this))
 
         fillEvents()
     }

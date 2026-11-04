@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">RafLink</string>
     <string name="share_label">На ПК (RafLink)</string>
+    <string name="control_label">RafLink — управление с ПК</string>
+    <string name="control_desc">Позволяет управлять телефоном мышкой и клавиатурой с вашего ПК, когда экран телефона показан в программе RafLink. Работает только с сопряжённым ПК и только пока вы смотрите экран.</string>
 </resources>

@@ -51,6 +51,16 @@ object Prefs {
         if (pcHost(ctx) != host) sp(ctx).edit().putString("pcHost", host).apply()
     }
 
+    fun tlsOnly(ctx: Context) = sp(ctx).getBoolean("tlsOnly", false)
+    fun setTlsOnly(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("tlsOnly", v).apply()
+
+    /** Текст, который телефон отдал в буфер ПК (ПК забирает его по номеру). */
+    fun clipSeq(ctx: Context) = sp(ctx).getLong("clipSeq", 0)
+    fun clipText(ctx: Context): String = sp(ctx).getString("clipText", "") ?: ""
+    fun setClip(ctx: Context, text: String) {
+        sp(ctx).edit().putString("clipText", text.take(1_000_000)).putLong("clipSeq", clipSeq(ctx) + 1).apply()
+    }
+
     fun lastSeen(ctx: Context): Long = sp(ctx).getLong("lastSeen", 0)
     fun touch(ctx: Context) = sp(ctx).edit().putLong("lastSeen", System.currentTimeMillis()).apply()
 
