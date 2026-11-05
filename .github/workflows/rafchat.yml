@@ -1,0 +1,291 @@
+# Сборка RafChat: приложение для Android (APK) и установщик для Windows.
+# Результат — в релизе «rafchat-latest» (вкладка Releases) и в артефактах запуска.
+name: RafChat build
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths: ['rafchat/**', '.github/workflows/rafchat.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+      - name: Сборка APK
+        working-directory: rafchat/android
+        run: gradle --no-daemon assembleRelease
+      - name: Имя файла
+        run: |
+          VER=$(grep -oP 'versionName = "\K[^"]+' rafchat/android/app/build.gradle.kts)
+          cp rafchat/android/app/build/outputs/apk/release/app-release.apk RafChat-$VER.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-android
+          path: RafChat-*.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости
+        run: python -m pip install --upgrade pip pyinstaller pillow -r rafchat/pc/requirements.txt
+      - name: Значок
+        working-directory: rafchat/pc
+        run: |
+          python -c "from PIL import Image; Image.open('../assets/icon/icon-3d.png').save('rafchat.ico', sizes=[(16,16),(20,20),(24,24),(32,32),(40,40),(48,48),(64,64),(128,128),(256,256)])"
+      - name: Сборка RafChat (папка с программой)
+        working-directory: rafchat/pc
+        run: |
+          python make_version.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --collect-submodules qrcode --collect-all pypdfium2 --collect-all pypdfium2_raw --hidden-import openpyxl --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." --add-data "../assets/corp_pattern.png:." --add-data "../assets/corp_logo.png:." rafchat_pc.py
+      - name: Проверка запуском и снимок окна
+        working-directory: rafchat/pc
+        shell: pwsh
+        run: |
+          $env:RAFCHAT_HOME = "$PWD\testhome"
+          $p = Start-Process -FilePath .\dist\RafChat\RafChat.exe -ArgumentList '--screenshot', "$PWD\screenshot-win.png" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "программа не закрылась" }
+          if (-not (Test-Path screenshot-win.png)) { throw "окно не открылось" }
+      - name: Установщик (Inno Setup)
+        working-directory: rafchat/pc
+        shell: pwsh
+        run: |
+          $env:RAFCHAT_VER = (Select-String -Path rafchat_pc.py -Pattern 'APP_VER = "([^"]+)"').Matches[0].Groups[1].Value
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ошибка Inno Setup" }
+          Copy-Item screenshot-win.png ..\..\out\
+      - name: Проверка установщика (тихая установка, правило брандмауэра)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem out\RafChat-Setup-*.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          if (-not (Test-Path "$env:ProgramFiles\RafChat\RafChat.exe")) { throw "программа не установилась" }
+          netsh advfirewall firewall show rule name="RafChat"
+          if ($LASTEXITCODE -ne 0) { throw "нет правила брандмауэра" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-windows
+          path: out/*
+
+  ios:
+    runs-on: macos-15-intel     # Mac на Apple M у GitHub часто заняты; для iPhone годится и Intel
+    env:
+      # Подпись включится сама, когда в Settings → Secrets репозитория появятся сертификат и профиль Apple
+      IOS_SIGN: ${{ secrets.IOS_CERT_P12_BASE64 != '' && secrets.IOS_PROFILE_BASE64 != '' }}
+      HAS_ASC: ${{ secrets.ASC_API_KEY_P8_BASE64 != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: XcodeGen
+        run: brew install xcodegen
+      - name: Проект Xcode
+        working-directory: rafchat/ios
+        run: xcodegen generate
+      - name: Сборка без подписи (для Sideloadly)
+        working-directory: rafchat/ios
+        run: |
+          xcodebuild -project RafChat.xcodeproj -scheme RafChat -configuration Release -sdk iphoneos \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
+            || { grep -E "error:|Error:" -A4 build.log | head -150; tail -20 build.log; exit 1; }
+          grep -c "warning:" build.log || true
+          test -d build/Build/Products/Release-iphoneos/RafChat.app
+          VER=$(grep -oE 'MARKETING_VERSION: "[^"]+"' project.yml | grep -oE '[0-9.]+')
+          mkdir -p Payload ../../out && cp -R build/Build/Products/Release-iphoneos/RafChat.app Payload/
+          zip -qry ../../out/RafChat-$VER-iOS-unsigned.ipa Payload
+          ls -la ../../out
+      - name: Подпись (если есть сертификат Apple)
+        if: env.IOS_SIGN == 'true'
+        working-directory: rafchat/ios
+        env:
+          CERT: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          CERT_PASS: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_PROFILE_BASE64 }}
+          TEAM: ${{ secrets.IOS_TEAM_ID }}
+          METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+        run: |
+          KC=$RUNNER_TEMP/build.keychain-db; KCP=$(uuidgen)
+          security create-keychain -p "$KCP" "$KC"; security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCP" "$KC"; security list-keychains -d user -s "$KC"
+          echo -n "$CERT" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 -k "$KC" -P "$CERT_PASS" -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KCP" "$KC"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo -n "$PROFILE" | base64 --decode > $RUNNER_TEMP/p.mobileprovision
+          security cms -D -i $RUNNER_TEMP/p.mobileprovision > $RUNNER_TEMP/p.plist
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' $RUNNER_TEMP/p.plist)
+          PNAME=$(/usr/libexec/PlistBuddy -c 'Print Name' $RUNNER_TEMP/p.plist)
+          cp $RUNNER_TEMP/p.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          METHOD=${METHOD:-app-store}
+          xcodebuild -project RafChat.xcodeproj -scheme RafChat -configuration Release -sdk iphoneos \
+            -archivePath $RUNNER_TEMP/RafChat.xcarchive archive CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="$TEAM" \
+            CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PNAME" > archive.log 2>&1 \
+            || { grep -E "error:" -A4 archive.log | head -80; exit 1; }
+          cat > $RUNNER_TEMP/export.plist <<PL
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>$METHOD</string>
+            <key>teamID</key><string>$TEAM</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key><dict><key>ru.sharapov.rafchat</key><string>$PNAME</string></dict>
+          </dict></plist>
+          PL
+          xcodebuild -exportArchive -archivePath $RUNNER_TEMP/RafChat.xcarchive -exportPath $RUNNER_TEMP/export \
+            -exportOptionsPlist $RUNNER_TEMP/export.plist
+          VER=$(grep -oE 'MARKETING_VERSION: "[^"]+"' project.yml | grep -oE '[0-9.]+')
+          cp $RUNNER_TEMP/export/*.ipa ../../out/RafChat-$VER-iOS.ipa
+      - name: Отправка в TestFlight (если есть ключ App Store Connect)
+        if: env.IOS_SIGN == 'true' && env.HAS_ASC == 'true'
+        env:
+          ASC_KEY: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo -n "$ASC_KEY" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+          xcrun altool --upload-app -f out/RafChat-*-iOS.ipa -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-ios
+          path: out/*.ipa
+
+  mac:
+    # RafChat для Mac (Apple M и Intel): та же программа, что для ПК
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Mac на Apple M у GitHub часто заняты (сборка отменяется «not acquired by Runner»).
+          # Сборка для Intel работает и на Apple M (через Rosetta 2), поэтому собираем её.
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости
+        run: python -m pip install --upgrade pip pyinstaller pillow -r rafchat/pc/requirements.txt
+      - name: Сборка RafChat.app
+        working-directory: rafchat/pc
+        run: |
+          python -c "from PIL import Image; Image.open('../assets/icon/icon-3d.png').save('rafchat.icns')"
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.icns \
+            --osx-bundle-identifier ru.sharapov.rafchat --collect-all ifaddr --collect-submodules cryptography \
+            --collect-submodules paramiko --collect-submodules qrcode --collect-all pypdfium2 --collect-all pypdfium2_raw --hidden-import openpyxl --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" \
+            --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." \
+            --add-data "../assets/corp_pattern.png:." --add-data "../assets/corp_logo.png:." rafchat_pc.py
+          VER=$(python -c "import re;print(re.search(r'APP_VER = \"([^\"]+)\"', open('rafchat_pc.py').read()).group(1))")
+          echo "VER=$VER" >> $GITHUB_ENV
+          PL=dist/RafChat.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" $PL || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VER" $PL
+          /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string 'RafChat находит коллег и передаёт сообщения и файлы в локальной сети.'" $PL || true
+          /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string '© 2026 Рафаил Шарапов · rafail@sharapov-cnc.ru'" $PL || true
+          codesign --force --deep --sign - dist/RafChat.app
+          codesign --verify --deep --strict dist/RafChat.app && echo "подпись OK"
+      - name: Проверка запуском и снимок окна
+        working-directory: rafchat/pc
+        run: |
+          export RAFCHAT_HOME=$PWD/testhome
+          ./dist/RafChat.app/Contents/MacOS/RafChat --screenshot $PWD/screenshot-mac-${{ matrix.arch }}.png &
+          P=$!
+          for i in $(seq 1 90); do kill -0 $P 2>/dev/null || break; sleep 1; done
+          kill $P 2>/dev/null || true
+          test -f screenshot-mac-${{ matrix.arch }}.png && echo "окно открылось"
+      - name: DMG
+        working-directory: rafchat/pc
+        run: |
+          mkdir dmg && cp -R dist/RafChat.app dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "RafChat $VER" -srcfolder dmg -ov -format UDZO "RafChat-$VER-mac-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafchat-mac-${{ matrix.arch }}
+          path: |
+            rafchat/pc/RafChat-*.dmg
+            rafchat/pc/screenshot-mac-*.png
+
+  release:
+    # iPhone не задерживает выкладку: Mac на GitHub бывает занят — .ipa добавится позже (job ios-release)
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Релиз rafchat-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          NOTES="RafChat-Setup-*.exe — установщик для ПК (Windows 10/11). RafChat-*.apk — Android. RafChat-*-mac-*.dmg — Mac (arm64 — Apple M, x64 — Intel). RafChat-*-iOS-unsigned.ipa — iPhone (через Sideloadly). Всем ввести одинаковый «код организации». Инструкция — rafchat/README.md."
+          if gh release view rafchat-latest >/dev/null 2>&1; then
+            # релиз не пересоздаём: файлы Mac и iPhone от прошлой сборки остаются, пока собираются новые
+            for a in $(gh release view rafchat-latest --json assets -q '.assets[].name' | grep -E '\.(apk|exe)$' || true); do
+              gh release delete-asset rafchat-latest "$a" --yes || true
+            done
+            for i in 1 2 3; do gh release upload rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe --clobber && break || sleep 15; done
+            gh release edit rafchat-latest --target "${{ github.sha }}" --notes "$NOTES" --prerelease || true
+          else
+            for i in 1 2 3; do gh release create rafchat-latest out/rafchat-android/RafChat-*.apk out/rafchat-windows/RafChat-Setup-*.exe \
+              --target "${{ github.sha }}" --title "RafChat — корпоративный чат (последняя сборка)" --notes "$NOTES" \
+              --prerelease && break || sleep 15; done
+          fi
+          gh release view rafchat-latest >/dev/null
+
+  ios-release:
+    needs: [ios, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rafchat-ios
+          path: out
+      - name: Добавить .ipa в релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for a in $(gh release view rafchat-latest --json assets -q '.assets[].name' | grep -E '\.ipa$' || true); do
+            gh release delete-asset rafchat-latest "$a" --yes || true
+          done
+          for i in 1 2 3; do gh release upload rafchat-latest out/*.ipa --clobber && break || sleep 15; done
+
+  mac-release:
+    needs: [mac, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rafchat-mac-*
+          merge-multiple: true
+          path: out
+      - name: Добавить .dmg в релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la out
+          for a in $(gh release view rafchat-latest --json assets -q '.assets[].name' | grep -E '\.dmg$' || true); do
+            gh release delete-asset rafchat-latest "$a" --yes || true
+          done
+          for i in 1 2 3; do gh release upload rafchat-latest out/*.dmg --clobber && break || sleep 15; done

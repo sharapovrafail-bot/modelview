@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingTop="18dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="30dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="RafLink"
+            android:textColor="@color/text"
+            android:textSize="36sp"
+            android:textStyle="bold" />
+
+        <!-- Статус связи -->
+        <LinearLayout
+            style="@style/Card"
+            android:layout_marginTop="16dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="20dp">
+
+            <ImageView
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:src="@drawable/ic_monitor" />
+
+            <View
+                android:layout_width="1dp"
+                android:layout_height="44dp"
+                android:layout_marginStart="18dp"
+                android:layout_marginEnd="18dp"
+                android:background="@color/line" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <View
+                        android:id="@+id/statusDot"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:background="@drawable/dot" />
+
+                    <TextView
+                        android:id="@+id/statusText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:textColor="@color/text"
+                        android:textSize="19sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/statusSub"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/text2"
+                    android:textSize="15sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Код для подключения (виден, пока ПК не подключён) -->
+        <LinearLayout
+            android:id="@+id/pinCard"
+            style="@style/Card"
+            android:gravity="center_horizontal"
+            android:padding="20dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Код для подключения ПК"
+                android:textColor="@color/text2"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/pinText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:letterSpacing="0.12"
+                android:textColor="@color/text"
+                android:textSize="44sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="Введите его в программе RafLink на компьютере"
+                android:textColor="@color/text2"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <!-- Отправить файлы -->
+        <LinearLayout
+            android:id="@+id/btnSend"
+            android:layout_width="match_parent"
+            android:layout_height="68dp"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_primary"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="22dp"
+            android:paddingEnd="18dp">
+
+            <ImageView
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:src="@drawable/ic_upload" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="18dp"
+                android:layout_weight="1"
+                android:text="Отправить файлы на ПК"
+                android:textColor="#FFFFFF"
+                android:textSize="19sp"
+                android:textStyle="bold" />
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_chevron" />
+        </LinearLayout>
+
+        <!-- Фото на ПК -->
+        <LinearLayout
+            android:id="@+id/btnPhoto"
+            android:layout_width="match_parent"
+            android:layout_height="68dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card_click"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="22dp"
+            android:paddingEnd="18dp">
+
+            <ImageView
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:src="@drawable/ic_camera"
+                app:tint="@color/accent" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="18dp"
+                android:layout_weight="1"
+                android:text="Фото на ПК"
+                android:textColor="@color/text"
+                android:textSize="19sp"
+                android:textStyle="bold" />
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_chevron"
+                app:tint="@color/accent" />
+        </LinearLayout>
+
+        <!-- Буфер на ПК -->
+        <LinearLayout
+            android:id="@+id/btnClip"
+            android:layout_width="match_parent"
+            android:layout_height="68dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card_click"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="22dp"
+            android:paddingEnd="18dp">
+
+            <ImageView
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:src="@drawable/ic_clip"
+                app:tint="@color/accent" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="18dp"
+                android:layout_weight="1"
+                android:text="Буфер на ПК"
+                android:textColor="@color/text"
+                android:textSize="19sp"
+                android:textStyle="bold" />
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:src="@drawable/ic_chevron"
+                app:tint="@color/accent" />
+        </LinearLayout>
+
+        <!-- Последние передачи -->
+        <TextView
+            style="@style/Section"
+            android:text="Последние передачи" />
+
+        <LinearLayout
+            android:id="@+id/events"
+            style="@style/Card"
+            android:layout_marginTop="10dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp" />
+
+        <!-- Настройка -->
+        <TextView
+            style="@style/Section"
+            android:text="Настройка телефона" />
+
+        <LinearLayout
+            style="@style/Card"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout android:id="@+id/rowFiles" style="@style/Row">
+                <TextView style="@style/RowText" android:text="Доступ ко всем файлам" />
+                <TextView android:id="@+id/stFiles" style="@style/RowState" />
+            </LinearLayout>
+            <View style="@style/Divider" />
+            <LinearLayout android:id="@+id/rowNotif" style="@style/Row">
+                <TextView style="@style/RowText" android:text="Уведомления" />
+                <TextView android:id="@+id/stNotif" style="@style/RowState" />
+            </LinearLayout>
+            <View style="@style/Divider" />
+            <LinearLayout android:id="@+id/rowBattery" style="@style/Row">
+                <TextView style="@style/RowText" android:text="Работа в фоне без ограничений" />
+                <TextView android:id="@+id/stBattery" style="@style/RowState" />
+            </LinearLayout>
+            <View style="@style/Divider" />
+            <LinearLayout android:id="@+id/rowControl" style="@style/Row">
+                <TextView style="@style/RowText" android:text="Управление с ПК (мышью)" />
+                <TextView android:id="@+id/stControl" style="@style/RowState" />
+            </LinearLayout>
+            <View style="@style/Divider" />
+            <LinearLayout android:id="@+id/rowAutostart" style="@style/Row">
+                <TextView style="@style/RowText" android:text="Автозапуск (Xiaomi)" />
+                <TextView style="@style/RowState" android:text="Открыть ›" />
+            </LinearLayout>
+            <View style="@style/Divider" />
+            <LinearLayout android:id="@+id/rowPin" style="@style/Row">
+                <TextView android:id="@+id/pinRowText" style="@style/RowText" />
+                <TextView style="@style/RowState" android:text="Новый код" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/about"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:lineSpacingExtra="3dp"
+            android:padding="8dp"
+            android:textColor="@color/text2"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/mail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:padding="8dp"
+            android:textColor="@color/accent"
+            android:textSize="15sp" />
+    </LinearLayout>
+</ScrollView>
