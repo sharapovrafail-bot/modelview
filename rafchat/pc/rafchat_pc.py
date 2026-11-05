@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from PySide6.QtCore import QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextOption
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QSpinBox, QSystemTrayIcon,
                                QVBoxLayout, QWidget)
@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.6.0"
+APP_VER = "0.6.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -62,6 +62,29 @@ def uid_of(name: str, dept: str) -> str:
     return "u" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:15]
 
 
+def is_ext(chat: str) -> bool:
+    """Чат с внешним контактом (не из организации): ключ — «x» + его личный код."""
+    return bool(chat) and chat.startswith("x") and len(chat) > 4
+
+
+def norm_code(code: str) -> str:
+    return "".join(ch for ch in (code or "").upper() if ch.isalnum())
+
+
+def fmt_code(code: str) -> str:
+    c = norm_code(code)
+    return "-".join(c[i:i + 4] for i in range(0, len(c), 4))
+
+
+def xorg(code: str) -> str:
+    """«Почтовый ящик» человека на сервере — для писем от внешних контактов."""
+    return hashlib.sha256(("RafChat-inbox:" + norm_code(code)).encode()).hexdigest()[:32]
+
+
+def xkey(code: str) -> bytes:
+    return hashlib.sha256(("RafChat-inbox-key:" + norm_code(code)).encode()).digest()
+
+
 def is_uid(chat: str) -> bool:
     return bool(chat) and chat != ALL and chat.startswith("u") and len(chat) == 16
 
@@ -75,7 +98,8 @@ def now_ms() -> int:
 
 
 def initials(name: str) -> str:
-    parts = [p for p in name.replace(".", " ").split() if p]
+    parts = ["".join(ch for ch in p if ch.isalnum()) for p in name.replace(".", " ").split()]
+    parts = [p for p in parts if p]
     return ("".join(p[0] for p in parts[:2]) or "?").upper()
 
 
@@ -218,6 +242,10 @@ class Node(QObject):
         # шифрование «от устройства до устройства» для сервера: сервер видит только шифротекст
         self.ekey = hashlib.sha256(("RafChat-e2e:" + org).encode()).digest()
         self.org_id = hashlib.sha256(("RafChat-org:" + org).encode()).hexdigest()[:32]
+        # личный код — как номер телефона для внешних контактов; одинаковый на всех устройствах человека
+        # (из кода организации, имени и должности — посторонний его не вычислит)
+        h = hashlib.sha256(("RafChat-mycode:" + org + "|" + uid_of(cfg.get("name", ""), cfg.get("dept", ""))).encode()).digest()
+        cfg["mycode"] = "".join("ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[b % 32] for b in h[:12])
         self.relay_ok = None                 # None — сервер не задан, True/False — есть ли связь
         self._av_loading: set = set()
         alt = cfg.get("relay_alt") or [None, False]       # запомненный рабочий порт сервера (мобильный интернет)
@@ -230,14 +258,14 @@ class Node(QObject):
         self.running = True
 
     # ---------- шифрование для сервера (AES-256-GCM: 12 байт nonce + шифротекст + тег)
-    def enc(self, data: bytes) -> bytes:
+    def enc(self, data: bytes, key: bytes | None = None) -> bytes:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         n = os.urandom(12)
-        return n + AESGCM(self.ekey).encrypt(n, data, None)
+        return n + AESGCM(key or self.ekey).encrypt(n, data, None)
 
-    def dec(self, blob: bytes) -> bytes:
+    def dec(self, blob: bytes, key: bytes | None = None) -> bytes:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        return AESGCM(self.ekey).decrypt(blob[:12], blob[12:], None)
+        return AESGCM(key or self.ekey).decrypt(blob[:12], blob[12:], None)
 
     # ---------- подписи
     def sign(self, data: bytes) -> str:
@@ -360,6 +388,7 @@ class Node(QObject):
         threading.Thread(target=self._outbox_loop, daemon=True).start()
         threading.Thread(target=self._ping_loop, daemon=True).start()
         threading.Thread(target=self._relay_loop, daemon=True).start()
+        threading.Thread(target=self._ext_loop, daemon=True).start()
 
     def stop(self):
         self.running = False
@@ -511,6 +540,13 @@ class Node(QObject):
         """Удалить чат: переписку и очередь; личный чат — вместе со всеми устройствами человека
         (вернутся, если он снова появится в сети)."""
         self.store.q("DELETE FROM messages WHERE chat=?", (key,))
+        self.opened().pop(key, None)
+        if is_ext(key):
+            self.contacts().pop(key[1:], None)
+            self.store.q("DELETE FROM outbox WHERE peer=?", (key,))
+            save_cfg(self.cfg)
+            self.peers_changed.emit()
+            return
         if key != ALL:
             hidden = self.cfg.setdefault("hidden", {})
             for dev in self.devices(key) or [key]:
@@ -556,8 +592,36 @@ class Node(QObject):
                 a["photo"] = p["photo"]
         return list(acc.values())
 
+    def opened(self) -> dict:
+        """Чаты, открытые вручную («Новый чат»), — видны, даже пока переписки нет."""
+        return self.cfg.setdefault("opened", {})
+
+    def open_chat_with(self, key):
+        if key != ALL and key not in self.opened():
+            self.opened()[key] = time.time()
+            save_cfg(self.cfg)
+
+    def visible_chats(self):
+        """Список чатов как в WhatsApp: только те, где есть переписка или которые открыли сами."""
+        have = {r[0] for r in self.store.q("SELECT DISTINCT chat FROM messages")}
+        out = []
+        for a in self.accounts():
+            if a["id"] in have or a["id"] in self.opened():
+                out.append(dict(a, ext=False))
+        for code, c in self.contacts().items():
+            out.append(self._ext_account(code, c))
+        return out
+
     def account(self, uid):
+        if is_ext(uid):
+            c = self.contacts().get(uid[1:])
+            return self._ext_account(uid[1:], c) if c is not None else None
         return next((a for a in self.accounts() if a["id"] == uid), None)
+
+    @staticmethod
+    def _ext_account(code, c):
+        return dict(id="x" + code, name=c.get("name") or fmt_code(code), dept=c.get("dept", ""), ext=True, code=code,
+                    online=False, lan=False, relay=False, plats=set(), photo=None, devices=[], last_seen=0)
 
     def _migrate_chats(self):
         """Переписка, которая хранилась по устройствам, переезжает в чат человека."""
@@ -705,6 +769,9 @@ class Node(QObject):
             fmeta = {"fid": fid, "name": file.name, "size": file.stat().st_size}
         m = {"id": mid, "from": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
              "uid": self.my_uid, "to": chat, "ts": now_ms(), "text": text, "file": fmeta, "port": TCP_PORT}
+        if is_ext(chat):            # внешнему контакту: обратный адрес — мой код; моим устройствам — кто это
+            c = self.contacts().get(chat[1:], {})
+            m.update(xcode=self.cfg["mycode"], xpeer={"code": chat[1:], "name": c.get("name", ""), "dept": c.get("dept", "")})
         if reply:
             m["reply"] = reply
         if task:
@@ -749,6 +816,8 @@ class Node(QObject):
         """Кому отправить: всем (общий чат) или всем устройствам человека и моим другим устройствам."""
         if chat == ALL:
             return [p["id"] for p in self.peers()]
+        if is_ext(chat):
+            return [chat] + self.my_devices()           # «x…» — доставка через «почтовый ящик» на сервере
         if is_uid(chat):
             # устройства, молчащие больше 2 недель (старые установки), не ждём
             fresh = {p["id"] for p in self.peers() if time.time() - p["last_seen"] < 14 * 86400}
@@ -763,6 +832,15 @@ class Node(QObject):
             relay = bool(self.server_addr())
             mine_devs = set(self.my_devices())
             for peer_id, mid, payload in self.store.q("SELECT peer,msg_id,payload FROM outbox"):
+                if is_ext(peer_id):                     # внешний контакт — только через сервер
+                    try:
+                        ok = relay and self._ext_deliver(peer_id[1:], payload)
+                    except (OSError, ValueError, http.client.HTTPException):
+                        ok = False
+                    if ok:
+                        self.store.q("DELETE FROM outbox WHERE peer=? AND msg_id=?", (peer_id, mid))
+                        self._via_relay(mid)
+                    continue
                 p = online.get(peer_id)
                 ok = False
                 if p:                                     # в одной сети — напрямую
@@ -838,11 +916,11 @@ class Node(QObject):
             return http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)
         return http.client.HTTPConnection(host, port, timeout=timeout)
 
-    def _relay_call(self, method, path, body=None, raw=None, timeout=15):
+    def _relay_call(self, method, path, body=None, raw=None, timeout=15, org=None):
         host, port = self.server_addr()
         c = self._relay_conn(host, port, getattr(self, "_alt_tls", False) and bool(getattr(self, "_alt_port", None)),
                              timeout)
-        h = {"X-Org": self.org_id, "X-Node": self.id}
+        h = {"X-Org": org or self.org_id, "X-Node": self.id}
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         if data is not None:
             h["Content-Type"] = "application/octet-stream" if raw is not None else "application/json"
@@ -856,8 +934,95 @@ class Node(QObject):
             raise OSError(f"сервер ответил {r.status}")
         return out
 
-    def _relay_json(self, method, path, body=None, timeout=15):
-        return json.loads(self._relay_call(method, path, body=body, timeout=timeout) or b"{}")
+    def _relay_json(self, method, path, body=None, timeout=15, org=None):
+        return json.loads(self._relay_call(method, path, body=body, timeout=timeout, org=org) or b"{}")
+
+    # ---------- внешние контакты (не из организации): переписка через «почтовый ящик» на сервере
+    def contacts(self) -> dict:
+        return self.cfg.setdefault("xcontacts", {})
+
+    def add_contact(self, code: str, name: str = "") -> str:
+        code = norm_code(code)
+        if len(code) < 8 or code == norm_code(self.cfg.get("mycode", "")):
+            return ""
+        c = self.contacts().setdefault(code, {"name": name or "Контакт " + fmt_code(code)[:4], "dept": ""})
+        if name:
+            c["name"] = name
+        save_cfg(self.cfg)
+        self.peers_changed.emit()
+        return "x" + code
+
+    def _ext_profile(self):
+        return dict(self.profile(), code=self.cfg["mycode"], owner=True)
+
+    def _ext_devices(self, code):
+        """Устройства внешнего контакта — по его «почтовому ящику» на сервере."""
+        blob = base64.b64encode(self.enc(json.dumps(dict(self._ext_profile(), owner=False)).encode(), xkey(code))).decode()
+        r = self._relay_json("POST", "/r/hello", {"profile": blob}, org=xorg(code))
+        out = []
+        for p in r.get("peers", []):
+            try:
+                d = json.loads(self.dec(base64.b64decode(p["profile"]), xkey(code)))
+            except Exception:
+                continue
+            if d.get("owner") and norm_code(d.get("code", "")) == code and d.get("id") == p.get("id"):
+                out.append(d)
+        return out
+
+    def _ext_deliver(self, code, payload: str) -> bool:
+        cache = self.__dict__.setdefault("_xdev", {})
+        t, devs = cache.get(code, (0, []))
+        if time.time() - t > 20:
+            devs = self._ext_devices(code)
+            cache[code] = (time.time(), devs)
+        if not devs:
+            return False                                  # ещё ни разу не выходил на связь — ждём
+        c = self.contacts().get(code)
+        if c is not None and c.get("dept") != devs[0].get("dept", ""):
+            c["dept"] = devs[0].get("dept", "")
+            save_cfg(self.cfg)
+        m = json.loads(payload)
+        m["xcode"] = self.cfg["mycode"]
+        f = m.get("file")
+        if f and f.get("size", 0) <= RELAY_FILE_MAX:
+            row = self.store.q("SELECT path FROM files WHERE fid=?", (f["fid"],), one=True)
+            if not row or not Path(row[0]).is_file():
+                return False
+            self._relay_call("PUT", "/r/file?" + urlencode({"fid": f["fid"]}),
+                             raw=self.enc(Path(row[0]).read_bytes(), xkey(code)), timeout=300, org=xorg(code))
+            f.update(relay=True, xorg=code)
+        blob = base64.b64encode(self.enc(json.dumps(m, ensure_ascii=False).encode(), xkey(code))).decode()
+        for d in devs:
+            self._relay_json("POST", "/r/send", {"to": d["id"], "blob": blob}, org=xorg(code))
+        return True
+
+    def _ext_loop(self):
+        """Свой «почтовый ящик»: письма от внешних контактов."""
+        code = self.cfg["mycode"]
+        last_hello = 0.0
+        while self.running:
+            if not self.server_addr():
+                time.sleep(5)
+                continue
+            try:
+                if time.time() - last_hello > 30:
+                    blob = base64.b64encode(self.enc(json.dumps(self._ext_profile()).encode(), xkey(code))).decode()
+                    self._relay_json("POST", "/r/hello", {"profile": blob}, org=xorg(code))
+                    last_hello = time.time()
+                items = self._relay_json("GET", "/r/poll?wait=25", timeout=40, org=xorg(code)).get("items", [])
+                acks = []
+                for it in items:
+                    acks.append(it["qid"])
+                    try:
+                        m = json.loads(self.dec(base64.b64decode(it["blob"]), xkey(code)))
+                    except Exception:
+                        continue
+                    if m.get("xcode") and m.get("from") != self.id:
+                        self.receive(m, None, ext=True)
+                if acks:
+                    self._relay_json("POST", "/r/ack", {"qids": acks}, org=xorg(code))
+            except (OSError, ValueError, http.client.HTTPException):
+                time.sleep(5)
 
     def _relay_send(self, to, m: dict) -> bool:
         try:
@@ -996,8 +1161,15 @@ class Node(QObject):
         self.message.emit(mid, False)
 
     # ---------- приём
-    def receive(self, m, ip):
-        if m.get("from") and m["from"] != self.id:
+    def receive(self, m, ip, ext=False):
+        if ext:                                     # письмо от внешнего контакта (не из организации)
+            code = norm_code(m.get("xcode", ""))
+            c = self.contacts().setdefault(code, {"name": m.get("name", ""), "dept": ""})
+            if not c.get("name") or c["name"].startswith("Контакт "):
+                c["name"] = m.get("name", "") or c.get("name", "")
+            c["dept"] = m.get("dept", "")
+            save_cfg(self.cfg)
+        elif m.get("from") and m["from"] != self.id:
             d = {"id": m["from"], "name": m.get("name"), "port": m.get("port") or 47801, "plat": m.get("plat", "")}
             if "dept" in m:
                 d["dept"] = m.get("dept") or ""
@@ -1022,12 +1194,19 @@ class Node(QObject):
         sp = self.peer(m["from"])
         s_uid = m.get("uid") or (uid_of(sp["name"], sp["dept"]) if sp else uid_of(m.get("name", ""), m.get("dept", "")))
         mine = s_uid == self.my_uid                 # моё сообщение с другого моего устройства
-        if m.get("to") == ALL:
+        if ext:
+            chat, mine = "x" + norm_code(m.get("xcode", "")), False
+        elif m.get("to") == ALL:
             chat = ALL
         elif mine:
-            chat = m.get("to") if is_uid(m.get("to", "")) else None
+            chat = m.get("to") if (is_uid(m.get("to", "")) or is_ext(m.get("to", ""))) else None
             if not chat or chat == self.my_uid:
                 return
+            if is_ext(chat) and isinstance(m.get("xpeer"), dict):   # мой контакт — и на этом устройстве
+                xp = m["xpeer"]
+                c = self.contacts().setdefault(chat[1:], {"name": xp.get("name", ""), "dept": xp.get("dept", "")})
+                c["name"] = c.get("name") or xp.get("name", "")
+                save_cfg(self.cfg)
         else:
             chat = s_uid
         f = m.get("file")
@@ -1064,7 +1243,9 @@ class Node(QObject):
                 p = self.peer(sender)
                 if not (p and p["lan"]) and f.get("relay") and self.server_addr():
                     try:                                # отправитель не в нашей сети — берём копию с сервера
-                        data = self.dec(self._relay_call("GET", "/r/file?" + urlencode({"fid": f["fid"]}), timeout=300))
+                        xo = f.get("xorg")
+                        data = self.dec(self._relay_call("GET", "/r/file?" + urlencode({"fid": f["fid"]}), timeout=300,
+                                                         org=xorg(xo) if xo else None), xkey(xo) if xo else None)
                         dest.write_bytes(data)
                         self.store.q("UPDATE messages SET local=? WHERE id=?", (str(dest), mid))
                         self.file_progress.emit(mid, f["size"], f["size"])
@@ -1825,11 +2006,15 @@ class ChatWindow(QMainWindow):
         top.setContentsMargins(16, 0, 8, 0)
         t = label("Чаты", "h1")
         top.addWidget(t, 1)
+        nb = button("✏️", "icon", tip="Новый чат — коллега или внешний контакт", fn=self.new_chat)
+        nb.setStyleSheet("font-size:18px")
+        top.addWidget(nb)
         gb = button("", "icon", icon="gear", tip="Настройки", color=P["muted"])
         gm = QMenu(gb)
         gm.addAction("Профиль и сеть…", self.settings)
         gm.addAction("Установить сервер на VPS…", self.setup_server)
         gm.addAction("Фото профиля…", self.choose_photo)
+        gm.addAction("Мой код для внешних контактов…", self.show_my_code)
         gm.addAction("Папка с файлами", lambda: open_local(self._downloads()))
         gm.addSeparator()
         gm.addAction(f"О программе RafChat {APP_VER}", self.about)
@@ -1992,12 +2177,14 @@ class ChatWindow(QMainWindow):
         cur = self.chat
         self.chats.blockSignals(True)
         self.chats.clear()
-        peers = sorted(self.node.accounts(), key=lambda p: (not p["online"], p["name"].lower()))
-        online = sum(p["online"] for p in peers)
+        # как в WhatsApp: только чаты с перепиской (или открытые через «Новый чат»), свежие — выше
+        vis = self.node.visible_chats()
+        lastts = {p["id"]: (self.node.last_and_unread(p["id"])[0] or {}).get("ts", 0) for p in vis}
+        vis.sort(key=lambda p: (-lastts[p["id"]], p["name"].lower()))
         entries = [(ALL, "Общий чат", True, avatar("", "", 44, group=True))]
-        for p in peers:
-            entries.append((p["id"], p["name"] + (f" · {p['dept']}" if p["dept"] else ""), p["online"],
-                            self._peer_avatar(p)))
+        for p in vis:
+            title = p["name"] + (f" · {p['dept']}" if p["dept"] else "") + ("  🌐" if p.get("ext") else "")
+            entries.append((p["id"], title, p["online"], self._peer_avatar(p)))
         for key, title, on, pix in entries:
             last, unread = self.node.last_and_unread(key)
             if last:
@@ -2006,7 +2193,8 @@ class ChatWindow(QMainWindow):
                 when = datetime.fromtimestamp(last["ts"] / 1000)
                 when = when.strftime("%H:%M") if when.date() == datetime.now().date() else when.strftime("%d.%m")
             else:
-                preview = "в сети" if on and key != ALL else ("не в сети" if key != ALL else "Сообщения для всех")
+                preview = "Сообщения для всех" if key == ALL else ("внешний контакт" if is_ext(key) else
+                                                                  ("в сети" if on else "не в сети"))
                 when = ""
             it = QListWidgetItem()
             it.setData(ROLE, key)
@@ -2021,7 +2209,7 @@ class ChatWindow(QMainWindow):
         self.chats.blockSignals(False)
         q = self.node.queued_count()
         srv = {None: "", True: "\nСервер: на связи ✓", False: "\nСервер: нет связи"}[self.node.relay_ok]
-        self.net_lbl.setText(f"В сети: {online} из {len(peers)}" + (f" · в очереди: {q}" if q else "") + srv +
+        self.net_lbl.setText((f"В очереди: {q}" if q else "") + srv.lstrip("\n" if not q else "") +
                              f"\nКод организации: {'•' * min(len(self.cfg['org']), 8)}")
         self._update_head()
 
@@ -2094,7 +2282,8 @@ class ChatWindow(QMainWindow):
             act = m.addAction("Удалить чат")
         if m.exec(self.chats.viewport().mapToGlobal(pos)) is act:
             what = "Очистить историю «Общего чата» на этом ПК?" if key == ALL else \
-                "Удалить этот чат и переписку на этом ПК?\n(Если человек снова появится в сети, чат вернётся.)"
+                ("Удалить внешний контакт и переписку с ним на этом ПК?" if is_ext(key) else
+                 "Удалить этот чат и переписку на этом ПК?\n(Чат появится снова, если вам напишут.)")
             if QMessageBox.question(self, "RafChat", what) == QMessageBox.Yes:
                 self.node.delete_chat(key)
                 if self.chat == key:
@@ -2137,7 +2326,9 @@ class ChatWindow(QMainWindow):
                 return
             self.head_av.setPixmap(avatar(p["name"], p["id"], 38, photo=p.get("photo")))
             self.head_title.setText(p["name"] + (f" · {p['dept']}" if p["dept"] else ""))
-            if p["online"]:
+            if p.get("ext"):
+                self.head_sub.setText(f"внешний контакт · код {fmt_code(p['code'])} · через сервер, зашифровано")
+            elif p["online"]:
                 names = {"android": "телефон", "ios": "iPhone", "pc": "ПК"}
                 kind = ", ".join(sorted(names.get(x, x) for x in p["plats"]))
                 self.head_sub.setText(("в сети" if p["lan"] else "в сети через интернет") + (f" · {kind}" if kind else ""))
@@ -2293,7 +2484,7 @@ class ChatWindow(QMainWindow):
     def _chat_title(self, chat):
         if chat == ALL:
             return "Общий чат"
-        p = self.node.account(chat) or self.node.peer(chat)
+        p = self.node.account(chat) or (None if is_ext(chat) else self.node.peer(chat))
         return p["name"] if p else "?"
 
     def _show_results(self, items, empty, tasks=False):
@@ -2397,7 +2588,7 @@ class ChatWindow(QMainWindow):
 
     def _tray_icon(self) -> QIcon:
         """Значок у часов с красным кружком непрочитанных."""
-        total = sum(self.node.last_and_unread(k)[1] for k in [ALL] + [p["id"] for p in self.node.accounts()])
+        total = sum(self.node.last_and_unread(k)[1] for k in [ALL] + [p["id"] for p in self.node.visible_chats()])
         pm = C.app_icon_pixmap(64)
         if total:
             p = QPainter(pm)
@@ -2439,6 +2630,95 @@ class ChatWindow(QMainWindow):
         self.node.stop()
         self.tray.hide()
         QApplication.quit()
+
+    # ---------- новый чат / внешние контакты
+    def new_chat(self):
+        d = QDialog(self)
+        d.setWindowTitle("Новый чат")
+        d.resize(380, 520)
+        lay = QVBoxLayout(d)
+        lst = QListWidget()
+        lst.setObjectName("chats")
+        add = QListWidgetItem("➕  Добавить внешний контакт по коду…")
+        add.setData(ROLE, "+")
+        lst.addItem(add)
+        people = sorted(self.node.accounts(), key=lambda p: p["name"].lower())
+        if people:
+            h = QListWidgetItem("Сотрудники")
+            h.setFlags(Qt.NoItemFlags)
+            lst.addItem(h)
+        for p in people:
+            it = QListWidgetItem(QIcon(self._peer_avatar(p)),
+                                 p["name"] + (f" · {p['dept']}" if p["dept"] else "") + ("   ● в сети" if p["online"] else ""))
+            it.setData(ROLE, p["id"])
+            lst.addItem(it)
+        xs = sorted(self.node.contacts().items(), key=lambda kv: (kv[1].get("name") or "").lower())
+        if xs:
+            h = QListWidgetItem("Внешние контакты")
+            h.setFlags(Qt.NoItemFlags)
+            lst.addItem(h)
+        for code, c in xs:
+            it = QListWidgetItem(QIcon(avatar(c.get("name") or code, "x" + code, 44)),
+                                 (c.get("name") or fmt_code(code)) + "  🌐")
+            it.setData(ROLE, "x" + code)
+            lst.addItem(it)
+        lay.addWidget(lst, 1)
+        chosen = []
+        lst.itemClicked.connect(lambda it: (chosen.append(it.data(ROLE)), d.accept()) if it.data(ROLE) else None)
+        d.exec()
+        if not chosen:
+            return
+        key = chosen[0]
+        if key == "+":
+            key = self.add_external()
+            if not key:
+                return
+        self.node.open_chat_with(key)
+        self.fill_chats()
+        self.open_chat(key)
+        self.fill_chats()
+
+    def add_external(self):
+        d = QDialog(self)
+        d.setWindowTitle("Внешний контакт")
+        f = QFormLayout(d)
+        f.addRow(label("Попросите человека открыть в RafChat\n«Настройки → Мой код для внешних контактов»\n"
+                       "и продиктовать или прислать код.", "small", wrap=True))
+        code = QLineEdit()
+        code.setPlaceholderText("XXXX-XXXX-XXXX")
+        name = QLineEdit()
+        name.setPlaceholderText("например: Иванов, поставщик металла")
+        f.addRow("Код:", code)
+        f.addRow("Имя:", name)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(d.accept)
+        bb.rejected.connect(d.reject)
+        f.addRow(bb)
+        while d.exec() == QDialog.Accepted:
+            c = norm_code(code.text())
+            if c == norm_code(self.cfg.get("mycode", "")):
+                QMessageBox.warning(self, "RafChat", "Это ваш собственный код.")
+                continue
+            if len(c) != 12:
+                QMessageBox.warning(self, "RafChat", "Код состоит из 12 букв и цифр, например ABCD-EF23-4567.")
+                continue
+            return self.node.add_contact(c, name.text().strip())
+        return ""
+
+    def show_my_code(self):
+        c = fmt_code(self.cfg["mycode"])
+        mb = QMessageBox(self)
+        mb.setWindowTitle("Мой код")
+        mb.setText(f"<h2 style='letter-spacing:2px'>{c}</h2>")
+        mb.setInformativeText("Это ваш личный код — как номер телефона. Передайте его человеку не из вашей организации "
+                              "(заказчику, поставщику): он добавит вас в RafChat через «✏️ Новый чат → Добавить внешний "
+                              "контакт», и вы сможете переписываться и пересылать файлы. Переписка идёт через сервер "
+                              "и зашифрована. Код один на все ваши устройства.")
+        cp = mb.addButton("Копировать", QMessageBox.ActionRole)
+        mb.addButton(QMessageBox.Ok)
+        mb.exec()
+        if mb.clickedButton() is cp:
+            QApplication.clipboard().setText(c)
 
     def settings(self):
         d = ProfileDialog(self.cfg, first=False, parent=self)
