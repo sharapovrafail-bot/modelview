@@ -92,6 +92,17 @@ Mac — [mac-latest](https://github.com/sharapovrafail-bot/modelview/releases/ta
 | **STZ FANUC LAN** | передача УП на стойки Fanuc по сети (FOCAS) и RS-232 |
 | **STZ WireCut** | программы для проволочно-вырезного электроэрозионного станка |
 
+<table>
+<tr>
+<td width="50%"><b>STZ Расчёт зубьев</b><br><img src="docs/img/stz-raschet.png" alt="STZ Расчёт зубьев"></td>
+<td width="50%"><b>Наладка зубофрезерного 5К32А</b><br><img src="docs/img/stz-5k32a.png" alt="Наладка 5К32А"></td>
+</tr>
+<tr>
+<td><b>Симулятор УП Fanuc (KVL 1000 / PUMA 3050)</b><br><img src="docs/img/stz-simulyator.png" alt="Симулятор УП Fanuc"></td>
+<td><b>STZ WireCut — электроэрозия</b><br><img src="docs/img/stz-wirecut.jpg" alt="STZ WireCut"></td>
+</tr>
+</table>
+
 **Скачать:** [stz-soft → Releases](https://github.com/sharapovrafail-bot/stz-soft/releases/latest)
 
 ---
