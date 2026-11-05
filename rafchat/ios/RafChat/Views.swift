@@ -200,12 +200,18 @@ struct ChatListView: View {
                     } header: { Text("Все задания") }
                 } else {
                     Section {
+                        if !node.joined {
+                            Text("Ищу коллег с тем же кодом организации… Проверьте код: ⚙ → профиль.")
+                                .font(.footnote).foregroundColor(.secondary)
+                        }
+                        if node.joined {
                         NavigationLink(value: Route(chat: Node.all)) {
                             row(key: Node.all, title: "Общий чат", online: true, group: true)
                         }
                         .listRowBackground(RoundedRectangle(cornerRadius: 12).fill(Color(UIColor { $0.userInterfaceStyle == .dark
                             ? UIColor(red: 0.2, green: 0.14, blue: 0.06, alpha: 1) : UIColor(red: 1, green: 0.945, blue: 0.878, alpha: 1) }))
                             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(red: 1, green: 0.82, blue: 0.6))))
+                        }
                         ForEach(sortedPeers) { p in
                             NavigationLink(value: Route(chat: p.id)) {
                                 row(key: p.id, title: p.title + (p.ext ? "  🌐" : ""), online: p.online, group: false)
@@ -501,7 +507,7 @@ struct ChatView: View {
         .quickLookPreview($preview)
         .confirmationDialog("Переслать", isPresented: Binding(get: { forwarding != nil }, set: { if !$0 { forwarding = nil } }),
                             titleVisibility: .visible) {
-            Button("Общий чат") { forward(to: Node.all) }
+            if node.joined { Button("Общий чат") { forward(to: Node.all) } }
             ForEach(forwardTargets) { a in
                 Button(a.title + (a.ext ? "  🌐" : "")) { forward(to: a.id) }
             }

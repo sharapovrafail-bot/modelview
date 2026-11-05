@@ -300,8 +300,8 @@ class ChatActivity : AppCompatActivity() {
         if (m.file != null && m.local == null) {
             Toast.makeText(this, "Сначала скачайте файл — потом его можно переслать", Toast.LENGTH_LONG).show(); return
         }
-        val keys = arrayListOf(Node.ALL)
-        val names = arrayListOf("Общий чат")
+        val keys = if (Node.joined()) arrayListOf(Node.ALL) else arrayListOf()
+        val names = if (Node.joined()) arrayListOf("Общий чат") else arrayListOf()
         for (a in (Node.visibleChats() + Node.accounts().sortedBy { it.name.lowercase() }).distinctBy { it.id }) {
             if (a.id == chat) continue
             keys.add(a.id); names.add(a.title + if (a.ext) "  🌐" else "")

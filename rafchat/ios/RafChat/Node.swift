@@ -1067,6 +1067,15 @@ extension Node {
         return "x" + code
     }
 
+    /// Видел ли коллегу с тем же кодом организации. До этого общий чат, название и логотип ООО не показываются.
+    var joined: Bool {
+        if UserDefaults.standard.bool(forKey: "joined") { return true }
+        if !peers.isEmpty || messages.contains(where: { $0.chat == Node.all }) {
+            UserDefaults.standard.set(true, forKey: "joined"); return true
+        }
+        return false
+    }
+
     func openChatWith(_ key: String) { if key != Node.all { var o = Profile.opened; o.insert(key); Profile.opened = o; tick += 1 } }
 
     /// Список чатов как в WhatsApp: только с перепиской или открытые самим, плюс внешние контакты.

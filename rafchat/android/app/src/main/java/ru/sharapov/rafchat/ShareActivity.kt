@@ -23,8 +23,9 @@ class ShareActivity : AppCompatActivity() {
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         val peers = (Node.visibleChats() + Node.accounts()).distinctBy { it.id }
             .sortedWith(compareBy({ -(Node.db.last(it.id)?.ts ?: 0L) }, { it.name.lowercase() }))
-        val keys = listOf(Node.ALL) + peers.map { it.id }
-        val names = listOf("Общий чат") + peers.map { (if (it.online) "● " else "○ ") + it.title }
+        val all = if (Node.joined()) listOf(Node.ALL) else emptyList()
+        val keys = all + peers.map { it.id }
+        val names = all.map { "Общий чат" } + peers.map { (if (it.online) "● " else "○ ") + it.title }
         AlertDialog.Builder(this)
             .setTitle("Кому отправить?")
             .setItems(names.toTypedArray()) { _, i ->

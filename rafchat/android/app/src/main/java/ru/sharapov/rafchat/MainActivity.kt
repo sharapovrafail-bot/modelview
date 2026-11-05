@@ -246,7 +246,8 @@ class MainActivity : AppCompatActivity() {
         // как в WhatsApp: только чаты с перепиской (или открытые через «Новый чат»), свежие — выше
         val peers = Node.visibleChats().sortedWith(compareBy({ -(Node.db.last(it.id)?.ts ?: 0L) }, { it.name.lowercase() }))
         val rows = ArrayList<Triple<String, String, Boolean>>()
-        rows.add(Triple(Node.ALL, "Общий чат", true))
+        val joined = Node.joined()
+        if (joined) rows.add(Triple(Node.ALL, "Общий чат", true))
         peers.forEach { rows.add(Triple(it.id, it.title + (if (it.ext) "  🌐" else ""), it.online)) }
         rows.forEachIndexed { i, (key, title, online) ->
             val row = LinearLayout(this).apply {
@@ -303,7 +304,8 @@ class MainActivity : AppCompatActivity() {
         }
         val q = Node.db.queued()
         val srv = when (Node.relayOk) { true -> "\nСервер: на связи ✓"; false -> "\nСервер: нет связи"; null -> "" }
-        status.text = "Новый чат — кнопка ✏️ вверху" + (if (q > 0) " · в очереди: $q" else "") +
+        status.text = (if (joined) "" else "Ищу коллег с тем же кодом организации… Проверьте код: ⚙ → профиль.\n") +
+            "Новый чат — кнопка ✏️ вверху" + (if (q > 0) " · в очереди: $q" else "") +
             "\nТелефон в сети: ${Node.localIp() ?: "нет Wi-Fi"}" + srv
     }
 

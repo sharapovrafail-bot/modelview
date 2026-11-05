@@ -37,7 +37,7 @@ import common as C
 from previews import PREVIEW_EXT, STEP_EXT, make_preview, step_info
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.8.0"
+APP_VER = "0.8.1"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -593,6 +593,19 @@ class Node(QObject):
             if p.get("photo") and (a["photo"] is None or p["online"]):
                 a["photo"] = p["photo"]
         return list(acc.values())
+
+    def joined(self) -> bool:
+        """Подключён ли к своей организации: видел хоть одного коллегу с тем же кодом (или есть переписка
+        в общем чате). До этого общий чат, название и логотип организации не показываются — тот, кто
+        скачал программу без кода организации, видит пустой список."""
+        if self.cfg.get("joined"):
+            return True
+        if self.store.q("SELECT 1 FROM peers LIMIT 1", one=True) or \
+                self.store.q("SELECT 1 FROM messages WHERE chat=? LIMIT 1", (ALL,), one=True):
+            self.cfg["joined"] = True
+            save_cfg(self.cfg)
+            return True
+        return False
 
     def opened(self) -> dict:
         """Чаты, открытые вручную («Новый чат»), — видны, даже пока переписки нет."""
@@ -2647,7 +2660,7 @@ class ChatWindow(QMainWindow):
         vis = self.node.visible_chats()
         lastts = {p["id"]: (self.node.last_and_unread(p["id"])[0] or {}).get("ts", 0) for p in vis}
         vis.sort(key=lambda p: (-lastts[p["id"]], p["name"].lower()))
-        entries = [(ALL, "Общий чат", True, avatar("", "", 44, group=True))]
+        entries = [(ALL, "Общий чат", True, avatar("", "", 44, group=True))] if self.node.joined() else []
         for p in vis:
             title = p["name"] + (f" · {p['dept']}" if p["dept"] else "") + ("  🌐" if p.get("ext") else "")
             entries.append((p["id"], title, p["online"], self._peer_avatar(p)))
@@ -2763,7 +2776,7 @@ class ChatWindow(QMainWindow):
     # ---------- переписка
     def open_chat(self, key):
         self.chat = key
-        self.msgs.set_corp(key == ALL)
+        self.msgs.set_corp(key == ALL and self.node.joined())
         self.node.mark_read(key)
         self.bubbles.clear()
         while self.ml.count() > 1:
@@ -2788,7 +2801,13 @@ class ChatWindow(QMainWindow):
     def _update_head(self):
         if getattr(self, "_typing_timer", None) and self._typing_timer.isActive() and getattr(self, "_typing_chat", None) == self.chat:
             return
+        if self.chat == ALL and not self.node.joined():
+            self.head_av.setPixmap(C.app_icon_pixmap(38))
+            self.head_title.setText("RafChat")
+            self.head_sub.setText("Ищу коллег с тем же кодом организации… Проверьте код: ⚙ → «Профиль и сеть»")
+            return
         if self.chat == ALL:
+            self.msgs.set_corp(True)
             peers = self.node.accounts()
             on = sum(p["online"] for p in peers)
             self.head_av.setPixmap(avatar("", "", 38, group=True))
@@ -3012,9 +3031,10 @@ class ChatWindow(QMainWindow):
         lay.addWidget(label("Кому переслать:", "small"))
         lst = QListWidget()
         lst.setObjectName("chats")
-        it = QListWidgetItem(QIcon(avatar("", "", 44, group=True)), "Общий чат")
-        it.setData(ROLE, ALL)
-        lst.addItem(it)
+        if self.node.joined():
+            it = QListWidgetItem(QIcon(avatar("", "", 44, group=True)), "Общий чат")
+            it.setData(ROLE, ALL)
+            lst.addItem(it)
         seen = set()
         for p in self.node.visible_chats() + sorted(self.node.accounts(), key=lambda a: a["name"].lower()):
             if p["id"] in seen or p["id"] == m["chat"]:

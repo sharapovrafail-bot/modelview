@@ -64,6 +64,9 @@ object Prefs {
     /** «auto» — как в системе, «light», «dark». */
     fun theme(ctx: Context) = sp(ctx).getString("theme", "auto") ?: "auto"
     fun setTheme(ctx: Context, v: String) = sp(ctx).edit().putString("theme", v).apply()
+    /** Подключён к своей организации (видел коллегу с тем же кодом) — только тогда показываем общий чат. */
+    fun joined(ctx: Context) = sp(ctx).getBoolean("joined", false)
+    fun setJoined(ctx: Context) = sp(ctx).edit().putBoolean("joined", true).apply()
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

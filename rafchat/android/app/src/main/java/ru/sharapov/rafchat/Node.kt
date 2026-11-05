@@ -318,6 +318,14 @@ object Node {
         return out
     }
 
+    /** Видел ли коллегу с тем же кодом организации. До этого общий чат, название и логотип ООО не показываются:
+     *  кто скачал программу без кода, видит пустой список. */
+    fun joined(): Boolean {
+        if (Prefs.joined(ctx)) return true
+        if (db.peers().isNotEmpty() || db.last(ALL) != null) { Prefs.setJoined(ctx); return true }
+        return false
+    }
+
     fun openChatWith(key: String) { if (key != ALL) Prefs.setOpened(ctx, key, true) }
 
     /** Добавить внешний контакт по коду. Возвращает ключ чата или "" (неверный код). */
