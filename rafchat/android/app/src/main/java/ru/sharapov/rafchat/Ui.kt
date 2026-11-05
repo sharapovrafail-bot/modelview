@@ -20,15 +20,41 @@ import java.util.Locale
 
 /** Общие мелочи интерфейса: аватары, значки файлов, время. */
 object Ui {
-    const val ACCENT = 0xFF007AFF.toInt()
-    const val TEXT = 0xFF1C1C1E.toInt()
-    const val MUTED = 0xFF8A8A8E.toInt()
-    const val OK = 0xFF34C759.toInt()
-    const val LINE = 0xFFE5E5EA.toInt()
-    const val SURFACE = 0xFFFFFFFF.toInt()
+    /** Тёмная тема (настройка «Тема оформления»: как в системе / светлая / тёмная). */
+    @Volatile var dark = false
+    private fun c(light: Long, night: Long) = (if (dark) night else light).toInt()
+    val ACCENT get() = c(0xFF007AFF, 0xFF0A84FF)
+    val TEXT get() = c(0xFF1C1C1E, 0xFFF2F2F7)
+    val MUTED get() = c(0xFF8A8A8E, 0xFF8E8E93)
+    val OK get() = c(0xFF34C759, 0xFF30D158)
+    val LINE get() = c(0xFFE5E5EA, 0xFF38383A)
+    val SURFACE get() = c(0xFFFFFFFF, 0xFF1C1C1E)
+    val BG get() = c(0xFFF2F2F7, 0xFF000000)
+    val CHAT_BG get() = c(0xFFECEEF2, 0xFF0E0F12)
+    val QUOTE get() = c(0xFFEEF1F5, 0xFF2C2C2E)
+    val CHIP get() = c(0xFFE5E5EA, 0xFF3A3A3C)
+    val WASH get() = c(0xFFE5F0FF, 0xFF0B2A4A)
+    val CORP_BG get() = c(0xFFFFF1E0, 0xFF33240F)
+    val CORP_LINE get() = c(0xFFFFD199, 0xFF6B4A1E)
     /** «Общий чат» организации выделен оранжевым */
-    const val ORANGE = 0xFFFF8A00.toInt()
-    const val ORANGE_TEXT = 0xFFD96F00.toInt()
+    val ORANGE get() = 0xFFFF8A00.toInt()
+    val ORANGE_TEXT get() = c(0xFFD96F00, 0xFFFF9F0A)
+
+    /** Применить тему до создания экрана. */
+    fun applyTheme(ctx: Context) {
+        val mode = Prefs.theme(ctx)
+        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(when (mode) {
+            "dark" -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES
+            "light" -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+            else -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+        })
+        dark = when (mode) {
+            "dark" -> true
+            "light" -> false
+            else -> (ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+        }
+    }
     val COMPANY: String get() = BuildConfig.COMPANY
     private val COLORS = intArrayOf(
         0xFFFF9500.toInt(), 0xFF34C759.toInt(), 0xFFAF52DE.toInt(), 0xFFFF2D55.toInt(),
@@ -106,7 +132,8 @@ object Ui {
         val side = dpi(ctx, 300f)
         val tile = android.graphics.drawable.BitmapDrawable(ctx.resources, android.graphics.Bitmap.createScaledBitmap(src, side, side, true))
         tile.setTileModeXY(android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT)
-        return android.graphics.drawable.LayerDrawable(arrayOf(android.graphics.drawable.ColorDrawable(0xFFECEEF2.toInt()), tile))
+        if (dark) tile.alpha = if (corp) 60 else 50
+        return android.graphics.drawable.LayerDrawable(arrayOf(android.graphics.drawable.ColorDrawable(CHAT_BG), tile))
     }
 
     /** Картинка → JPEG: поворот по EXIF учитывается, длинная сторона не больше maxSide, square — квадрат по центру. */
@@ -186,7 +213,8 @@ object Ui {
     /** Коротко о сообщении — для цитаты в ответе и результатов поиска. */
     fun snippet(m: Msg, n: Int = 70): String {
         val t = m.taskObj?.let { "📋 " + it.optString("title") }
-            ?: if (m.file != null && m.text.isEmpty()) "📎 " + m.file.name else m.text.replace('\n', ' ')
+            ?: if (m.file != null && m.text.isEmpty() && m.file.isVoice()) "🎤 Голосовое " + fmtSecs(m.file.voice)
+            else if (m.file != null && m.text.isEmpty()) "📎 " + m.file.name else m.text.replace('\n', ' ')
         return if (t.length <= n) t else t.take(n - 1) + "…"
     }
 

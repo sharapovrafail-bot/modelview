@@ -78,6 +78,37 @@ class ChatActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- голосовые
+    private lateinit var micBtn: TextView
+    private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) toggleVoice() else Toast.makeText(this, "Без доступа к микрофону голосовые не записать", Toast.LENGTH_LONG).show()
+    }
+    private val recTick = object : Runnable {
+        override fun run() {
+            if (!Voice.isRecording) return
+            input.hint = "🔴 Запись ${fmtSecs(Voice.seconds)} — нажмите ⏹, чтобы отправить"
+            input.postDelayed(this, 500)
+        }
+    }
+
+    private fun toggleVoice() {
+        if (!Voice.isRecording) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) { askMic.launch(android.Manifest.permission.RECORD_AUDIO); return }
+            if (!Voice.start(this)) { Toast.makeText(this, "Не удалось включить микрофон", Toast.LENGTH_SHORT).show(); return }
+            micBtn.text = "⏹"; micBtn.background = Ui.roundBg(0xFFFF3B30.toInt(), Ui.dp(this, 20f))
+            input.isEnabled = false
+            recTick.run()
+            return
+        }
+        micBtn.text = "🎤"; micBtn.background = null
+        input.isEnabled = true; input.hint = "Сообщение"
+        val rp = takeReply()
+        val to = chat
+        Thread { Voice.stop(true)?.let { (f, secs) -> Node.send(to, "", f, f.name, rp, voice = secs) } }.start()
+    }
+
+
     private fun takePhoto() {
         if (!Node.running) { Toast.makeText(this, "RafChat ещё не в сети", Toast.LENGTH_SHORT).show(); return }
         val dir = java.io.File(cacheDir, "camera").apply { mkdirs() }
@@ -100,11 +131,12 @@ class ChatActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.applyTheme(this)
         super.onCreate(savedInstanceState)
         chat = intent.getStringExtra("chat") ?: Node.ALL
         focusId = intent.getStringExtra("focus")
         savedInstanceState?.getString("shot")?.let { shot = java.io.File(it) }
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFFF2F2F7.toInt()) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Ui.SURFACE); setPadding(d(4f), d(8f), d(16f), d(8f))
@@ -138,7 +170,7 @@ class ChatActivity : AppCompatActivity() {
         val rq = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(d(10f), d(4f), d(10f), d(4f))
             background = android.graphics.drawable.LayerDrawable(arrayOf(
-                Ui.roundBg(0xFFEEF1F5.toInt(), Ui.dp(this@ChatActivity, 6f)),
+                Ui.roundBg(Ui.QUOTE, Ui.dp(this@ChatActivity, 6f)),
                 android.graphics.drawable.ColorDrawable(Ui.ACCENT))).apply { setLayerWidth(1, d(3f)); setLayerGravity(1, Gravity.START or Gravity.FILL_VERTICAL) }
         }
         replyName = TextView(this).apply { textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.ACCENT) }
@@ -185,6 +217,11 @@ class ChatActivity : AppCompatActivity() {
             })
         }
         bar.addView(input, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = d(2f); marginEnd = d(4f) })
+        micBtn = TextView(this).apply {
+            text = "🎤"; textSize = 20f; gravity = Gravity.CENTER; contentDescription = "Голосовое сообщение"
+            setOnClickListener { toggleVoice() }
+        }
+        bar.addView(micBtn, LinearLayout.LayoutParams(d(40f), d(40f)).apply { marginEnd = d(2f) })
         bar.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_camera); setPadding(d(9f), d(9f), d(9f), d(9f))
             contentDescription = "Сфотографировать и отправить"
@@ -208,6 +245,11 @@ class ChatActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        if (Voice.isRecording) {
+            Thread { Voice.stop(false) }.start()
+            micBtn.text = "🎤"; micBtn.background = null; input.isEnabled = true; input.hint = "Сообщение"
+        }
+        Voice.stopPlay()
         Node.visibleChat = null
         try { unregisterReceiver(changed) } catch (_: Exception) {}
         super.onPause()
@@ -343,7 +385,7 @@ class ChatActivity : AppCompatActivity() {
         val ab = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, d(12f), 0, 0) }
         fun abtn(t: String, fn: () -> Unit) = ab.addView(TextView(this).apply {
             text = t; textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.ACCENT); gravity = Gravity.CENTER
-            background = Ui.roundBg(0xFFE5F0FF.toInt(), Ui.dp(this@ChatActivity, 10f)); setPadding(d(12f), d(9f), d(12f), d(9f))
+            background = Ui.roundBg(Ui.WASH, Ui.dp(this@ChatActivity, 10f)); setPadding(d(12f), d(9f), d(12f), d(9f))
             setOnClickListener { fn() }
         }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = d(8f) })
         abtn("📎 Файлы") { pick.launch(arrayOf("*/*")) }
@@ -481,7 +523,7 @@ class ChatActivity : AppCompatActivity() {
                 lastDay = day
                 msgs.addView(TextView(this).apply {
                     text = day; textSize = 12f; setTextColor(Ui.MUTED); setTypeface(typeface, Typeface.BOLD)
-                    background = Ui.roundBg(0xFFE5E5EA.toInt(), Ui.dp(this@ChatActivity, 10f))
+                    background = Ui.roundBg(Ui.CHIP, Ui.dp(this@ChatActivity, 10f))
                     setPadding(d(10f), d(3f), d(10f), d(3f))
                 }, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = d(10f); bottomMargin = d(6f) })
             }
@@ -516,7 +558,7 @@ class ChatActivity : AppCompatActivity() {
             val q = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; setPadding(d(9f), d(3f), d(9f), d(4f))
                 background = android.graphics.drawable.LayerDrawable(arrayOf(
-                    Ui.roundBg(if (me) 0x30FFFFFF else 0xFFEEF1F5.toInt(), Ui.dp(this@ChatActivity, 6f)),
+                    Ui.roundBg(if (me) 0x30FFFFFF else Ui.QUOTE, Ui.dp(this@ChatActivity, 6f)),
                     android.graphics.drawable.ColorDrawable(if (me) 0xFFFFFFFF.toInt() else Ui.ACCENT))).apply { setLayerWidth(1, d(3f)); setLayerGravity(1, Gravity.START or Gravity.FILL_VERTICAL) }
                 setOnClickListener { jumpTo(rp.optString("id")) }
             }
@@ -546,14 +588,42 @@ class ChatActivity : AppCompatActivity() {
                 setOnClickListener { Ui.open(this@ChatActivity, m.local!!, f.name) }
             }, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = d(4f) })
             b.setPadding(d(5f), d(5f), d(5f), d(5f))
+        } else if (f != null && f.isVoice()) {
+            // голосовое: ▶ и длительность
+            val playing = Voice.playingId == m.id
+            b.addView(TextView(this).apply {
+                text = when {
+                    m.local == null && !me -> "🎤 Голосовое ${fmtSecs(f.voice)} · скачивается…"
+                    playing -> "⏹  🎤 ${fmtSecs(f.voice)}"
+                    else -> "▶  🎤 Голосовое ${fmtSecs(f.voice)}"
+                }
+                textSize = 17f; setTypeface(typeface, Typeface.BOLD); setTextColor(fg); setPadding(0, d(4f), d(6f), d(2f))
+                setOnClickListener {
+                    val loc = m.local ?: run { Node.download(m.id); return@setOnClickListener }
+                    if (!Voice.toggle(this@ChatActivity, m.id, loc) { runOnUiThread { shownSig = ""; refresh() } } && Voice.playingId == null && playing.not())
+                        Toast.makeText(this@ChatActivity, "Не удалось проиграть", Toast.LENGTH_SHORT).show()
+                    shownSig = ""; refresh()
+                }
+            })
         } else if (f != null) {
+            if (m.local != null && Ui.ext(f.name) in Previews.EXT) {
+                Previews.thumb(this, f.fid, m.local, f.name, d(240f) * 2)?.let { bm ->
+                    b.addView(ImageView(this).apply {
+                        setImageBitmap(bm); adjustViewBounds = true; maxWidth = d(240f); maxHeight = d(260f)
+                        scaleType = ImageView.ScaleType.FIT_CENTER; setBackgroundColor(0xFFD0D0D5.toInt()); setPadding(2, 2, 2, 2)
+                        setOnClickListener { Ui.open(this@ChatActivity, m.local, f.name) }
+                    }, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = d(6f) })
+                }
+            }
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             row.addView(Ui.fileBadge(this, f.name), LinearLayout.LayoutParams(d(38f), d(44f)))
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(10f), 0, 0, 0) }
             col.addView(TextView(this).apply { text = f.name; textSize = 15f; setTypeface(typeface, Typeface.BOLD); setTextColor(fg) })
             val prog = Node.progress[m.id]
             col.addView(TextView(this).apply {
-                text = if (prog != null && m.local == null) "${Ui.human(prog.first)} из ${Ui.human(prog.second)}" else Ui.human(f.size)
+                text = if (prog != null && m.local == null) "${Ui.human(prog.first)} из ${Ui.human(prog.second)}"
+                    else if (m.local != null && Ui.ext(f.name) in setOf("step", "stp")) Ui.human(f.size) + " · " + Previews.stepInfo(this@ChatActivity, m.local)
+                    else Ui.human(f.size)
                 textSize = 13f; setTextColor(meta)
             })
             row.addView(col)

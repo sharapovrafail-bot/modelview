@@ -34,13 +34,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.applyTheme(this)
         super.onCreate(savedInstanceState)
         if (!Prefs.isSetUp(this)) {
             startActivity(Intent(this, SetupActivity::class.java).putExtra("first", true))
             finish(); return
         }
         val d = dp
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFFF2F2F7.toInt()) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.BG) }
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(d(20f), d(18f), d(12f), d(4f))
@@ -373,6 +374,6 @@ class MainActivity : AppCompatActivity() {
 /** Оранжевая подложка строки «Общий чат». */
 private object GradientDrawableCompat {
     fun corp(ctx: android.content.Context) = android.graphics.drawable.GradientDrawable().apply {
-        setColor(0xFFFFF1E0.toInt()); setStroke(Ui.dpi(ctx, 1f), 0xFFFFD199.toInt()); cornerRadius = Ui.dp(ctx, 16f)
+        setColor(Ui.CORP_BG); setStroke(Ui.dpi(ctx, 1f), Ui.CORP_LINE); cornerRadius = Ui.dp(ctx, 16f)
     }
 }

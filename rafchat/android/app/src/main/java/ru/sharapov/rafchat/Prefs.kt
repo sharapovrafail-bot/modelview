@@ -61,6 +61,9 @@ object Prefs {
     /** Уже показанные напоминания о сроке заданий: «id:вид». */
     fun reminded(ctx: Context): Set<String> = sp(ctx).getStringSet("reminded", emptySet()) ?: emptySet()
     fun addReminded(ctx: Context, k: String) = sp(ctx).edit().putStringSet("reminded", HashSet(reminded(ctx)) + k).apply()
+    /** «auto» — как в системе, «light», «dark». */
+    fun theme(ctx: Context) = sp(ctx).getString("theme", "auto") ?: "auto"
+    fun setTheme(ctx: Context, v: String) = sp(ctx).edit().putString("theme", v).apply()
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

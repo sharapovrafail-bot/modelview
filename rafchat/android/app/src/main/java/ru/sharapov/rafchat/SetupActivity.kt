@@ -36,6 +36,7 @@ class SetupActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Ui.applyTheme(this)
         super.onCreate(savedInstanceState)
         val first = intent.getBooleanExtra("first", false)
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(20f), d(24f), d(20f), d(30f)) }
@@ -121,6 +122,19 @@ class SetupActivity : AppCompatActivity() {
                 for (i in intents) try { startActivity(i); return@setOnClickListener } catch (_: Exception) {}
             }
         })
+        col.addView(TextView(this).apply {
+            val names = mapOf("auto" to "как в системе", "light" to "светлая", "dark" to "тёмная")
+            text = "Тема оформления: ${names[Prefs.theme(this@SetupActivity)]}  ›"
+            textSize = 17f; setTextColor(Ui.ACCENT); setPadding(d(4f), d(18f), 0, d(10f))
+            setOnClickListener {
+                val keys = listOf("auto", "light", "dark")
+                androidx.appcompat.app.AlertDialog.Builder(this@SetupActivity).setTitle("Тема оформления")
+                    .setSingleChoiceItems(arrayOf("Как в системе", "Светлая", "Тёмная"), keys.indexOf(Prefs.theme(this@SetupActivity))) { dl, i ->
+                        Prefs.setTheme(this@SetupActivity, keys[i]); dl.dismiss()
+                        Ui.applyTheme(this@SetupActivity); recreate()
+                    }.show()
+            }
+        })
         val appSettings = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
         link("Уведомления: включите «Всплывающие» и «На экране блокировки»",
             Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName), appSettings)
@@ -133,6 +147,6 @@ class SetupActivity : AppCompatActivity() {
             text = "RafChat · Автор: Рафаил Шарапов · rafail@sharapov-cnc.ru"
             textSize = 13f; setTextColor(Ui.MUTED); gravity = Gravity.CENTER; setPadding(0, d(26f), 0, 0)
         })
-        setContentView(ScrollView(this).apply { setBackgroundColor(0xFFF2F2F7.toInt()); addView(col) })
+        setContentView(ScrollView(this).apply { setBackgroundColor(Ui.BG); addView(col) })
     }
 }

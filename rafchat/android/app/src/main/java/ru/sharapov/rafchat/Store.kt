@@ -43,14 +43,17 @@ data class Peer(
 }
 
 /** relay — копия файла лежит на сервере (можно скачать, даже если отправитель не в нашей сети). */
-data class FileMeta(val fid: String, val name: String, val size: Long, val relay: Boolean = false, val xorg: String = "") {
+data class FileMeta(val fid: String, val name: String, val size: Long, val relay: Boolean = false, val xorg: String = "",
+                    /** голосовое сообщение: длительность, сек (-1 — обычный файл) */
+                    val voice: Int = -1) {
     fun json(): JSONObject = JSONObject().put("fid", fid).put("name", name).put("size", size)
-        .apply { if (relay) put("relay", true); if (xorg.isNotEmpty()) put("xorg", xorg) }
+        .apply { if (relay) put("relay", true); if (xorg.isNotEmpty()) put("xorg", xorg); if (voice >= 0) put("voice", voice) }
 
     companion object {
         fun of(s: String?): FileMeta? = if (s.isNullOrEmpty() || s == "null") null else try {
             val o = JSONObject(s)
-            FileMeta(o.getString("fid"), o.getString("name"), o.getLong("size"), o.optBoolean("relay"), o.optString("xorg"))
+            FileMeta(o.getString("fid"), o.getString("name"), o.getLong("size"), o.optBoolean("relay"), o.optString("xorg"),
+                if (o.has("voice")) o.optInt("voice", 0) else -1)
         } catch (e: Exception) { null }
     }
 }

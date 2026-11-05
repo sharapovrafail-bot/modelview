@@ -639,13 +639,13 @@ object Node {
     // ---------- отправка
     /** Отправить текст и/или файл (файл уже лежит в памяти приложения). */
     fun send(chat: String, text: String, file: File? = null, fileName: String? = null,
-             reply: JSONObject? = null, task0: JSONObject? = null, fwd: String? = null): String {
+             reply: JSONObject? = null, task0: JSONObject? = null, fwd: String? = null, voice: Int = -1): String {
         val mid = UUID.randomUUID().toString().replace("-", "")
         var meta: FileMeta? = null
         if (file != null) {
             val fid = UUID.randomUUID().toString().replace("-", "")
             db.addFile(fid, file.path)
-            meta = FileMeta(fid, fileName ?: file.name, file.length())
+            meta = FileMeta(fid, fileName ?: file.name, file.length(), voice = voice)
         }
         val ts = System.currentTimeMillis()
         val targets = targets(chat)
