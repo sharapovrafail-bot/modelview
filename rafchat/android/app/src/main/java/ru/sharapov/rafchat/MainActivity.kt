@@ -119,6 +119,26 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) askNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
         ChatService.start(this)
+        openFromQr(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        openFromQr(intent)
+    }
+
+    /** QR с листа задания (rafchat://task/<id>) — открыть задание в его чате. */
+    private fun openFromQr(i: Intent?) {
+        val u = i?.data ?: return
+        if (u.scheme != "rafchat" || u.host != "task") return
+        val mid = u.lastPathSegment ?: return
+        if (!Node.running) try { Node.start(this) } catch (_: Exception) {}
+        val m = if (Node.running) Node.db.msg(mid) else null
+        if (m == null) {
+            android.widget.Toast.makeText(this, "Этого задания нет на этом телефоне (оно было отправлено не вам)",
+                android.widget.Toast.LENGTH_LONG).show(); return
+        }
+        startActivity(Intent(this, ChatActivity::class.java).putExtra("chat", m.chat).putExtra("focus", m.id))
     }
 
     override fun onResume() {

@@ -60,17 +60,19 @@ data class Msg(
     val text: String, val file: FileMeta?, val mine: Boolean, val status: String, val local: String?,
     /** ответ на сообщение {id,name,text} и карточка задания (JSON) */
     val reply: String? = null, val task: String? = null,
+    /** переслано от (имя) и когда прочитано получателем */
+    val fwd: String? = null, val readAt: Long = 0,
 ) {
     val replyObj get() = reply?.let { try { JSONObject(it) } catch (e: Exception) { null } }
     val taskObj get() = task?.let { try { JSONObject(it) } catch (e: Exception) { null } }
 }
 
 /** Переписка и участники — та же схема, что в программе для ПК. */
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 5) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE peers(id TEXT PRIMARY KEY, name TEXT, dept TEXT, ip TEXT, port INT, plat TEXT, last_seen INT, relay_seen INT DEFAULT 0, avh TEXT)")
         db.execSQL("CREATE TABLE messages(id TEXT PRIMARY KEY, chat TEXT, sender TEXT, sender_name TEXT, ts INT, " +
-            "text TEXT, file TEXT, mine INT, status TEXT, local TEXT, unread INT DEFAULT 0, reply TEXT, task TEXT)")
+            "text TEXT, file TEXT, mine INT, status TEXT, local TEXT, unread INT DEFAULT 0, reply TEXT, task TEXT, fwd TEXT, read_at INT DEFAULT 0)")
         db.execSQL("CREATE INDEX msg_chat ON messages(chat, ts)")
         db.execSQL("CREATE TABLE outbox(peer TEXT, msg_id TEXT, payload TEXT, PRIMARY KEY(peer, msg_id))")
         db.execSQL("CREATE TABLE files(fid TEXT PRIMARY KEY, path TEXT)")
@@ -82,6 +84,10 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
         if (o < 4) {
             db.execSQL("ALTER TABLE messages ADD COLUMN reply TEXT")
             db.execSQL("ALTER TABLE messages ADD COLUMN task TEXT")
+        }
+        if (o < 5) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN fwd TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN read_at INT DEFAULT 0")
         }
     }
 
@@ -183,7 +189,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
             put("id", m.id); put("chat", m.chat); put("sender", m.sender); put("sender_name", m.senderName)
             put("ts", m.ts); put("text", m.text); put("file", m.file?.json()?.toString()); put("mine", if (m.mine) 1 else 0)
             put("status", m.status); put("local", m.local); put("unread", if (unread) 1 else 0)
-            put("reply", m.reply); put("task", m.task)
+            put("reply", m.reply); put("task", m.task); put("fwd", m.fwd)
         }
         writableDatabase.insertWithOnConflict("messages", null, v, SQLiteDatabase.CONFLICT_IGNORE)
     }
@@ -199,10 +205,36 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
     private fun row(c: android.database.Cursor) = Msg(
         c.getString(0), c.getString(1), c.getString(2), c.getString(3) ?: "?", c.getLong(4), c.getString(5) ?: "",
         FileMeta.of(c.getString(6)), c.getInt(7) == 1, c.getString(8) ?: "", c.getString(9),
-        c.getString(10), c.getString(11)
+        c.getString(10), c.getString(11), c.getString(12), c.getLong(13)
     )
 
-    private val cols = "id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task"
+    private val cols = "id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd,read_at"
+
+    /** Собеседник прочитал мои сообщения до момента upto. Возвращает, изменилось ли что-то. */
+    @Synchronized
+    fun markSeen(chat: String, upto: Long, at: Long): Boolean {
+        val n = writableDatabase.compileStatement(
+            "UPDATE messages SET status='read', read_at=? WHERE chat=? AND mine=1 AND ts<=? AND status!='read'").apply {
+            bindLong(1, at); bindString(2, chat); bindLong(3, upto)
+        }.executeUpdateDelete()
+        return n > 0
+    }
+
+    @Synchronized
+    fun markReadUpto(chat: String, upto: Long) =
+        writableDatabase.execSQL("UPDATE messages SET unread=0 WHERE chat=? AND ts<=? AND unread=1", arrayOf(chat, upto))
+
+    /** Последнее сообщение собеседника в чате: id и время. */
+    @Synchronized
+    fun lastIncoming(chat: String): Pair<String, Long>? =
+        readableDatabase.rawQuery("SELECT id,ts FROM messages WHERE chat=? AND mine=0 ORDER BY ts DESC LIMIT 1", arrayOf(chat))
+            .use { if (it.moveToFirst()) it.getString(0) to it.getLong(1) else null }
+
+    @Synchronized
+    fun addOutboxReplace(peer: String, mid: String, payload: String) {
+        val v = ContentValues().apply { put("peer", peer); put("msg_id", mid); put("payload", payload) }
+        writableDatabase.insertWithOnConflict("outbox", null, v, SQLiteDatabase.CONFLICT_REPLACE)
+    }
 
     @Synchronized
     fun setTask(id: String, task: String) =

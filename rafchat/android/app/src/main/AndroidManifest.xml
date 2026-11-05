@@ -26,6 +26,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- QR-код на листе задания: rafchat://task/<id> -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="rafchat" android:host="task" />
+            </intent-filter>
         </activity>
         <activity android:name=".ChatActivity" android:exported="false" android:theme="@style/Theme.RafChat.Chat"
             android:windowSoftInputMode="adjustResize" />

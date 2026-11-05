@@ -65,6 +65,10 @@ object Node {
     private var orgId = ""
     /** личный код — как номер телефона для внешних контактов; одинаковый на всех устройствах человека */
     var myCode = ""
+    /** кто печатает: чат → (имя, когда) */
+    val typing = ConcurrentHashMap<String, Pair<String, Long>>()
+    private val seenSent = ConcurrentHashMap<String, String>()
+    @Volatile private var typingAt = 0L
     private val xdev = ConcurrentHashMap<String, Pair<Long, List<String>>>()
     /** null — сервер не задан, true/false — есть ли с ним связь */
     @Volatile var relayOk: Boolean? = null
@@ -108,6 +112,10 @@ object Node {
         Prefs.relayAlt(ctx).let { (p, t) -> if (p > 0) { altPort = p; altTls = t } }
         thread(name = "rc-relay", isDaemon = true) { relayLoop() }
         thread(name = "rc-inbox", isDaemon = true) { extLoop() }
+        thread(name = "rc-remind", isDaemon = true) {
+            Thread.sleep(20_000)
+            while (running) { try { checkDeadlines() } catch (_: Exception) {}; Thread.sleep(10 * 60_000L) }
+        }
     }
 
     @Synchronized
@@ -631,7 +639,7 @@ object Node {
     // ---------- отправка
     /** Отправить текст и/или файл (файл уже лежит в памяти приложения). */
     fun send(chat: String, text: String, file: File? = null, fileName: String? = null,
-             reply: JSONObject? = null, task0: JSONObject? = null): String {
+             reply: JSONObject? = null, task0: JSONObject? = null, fwd: String? = null): String {
         val mid = UUID.randomUUID().toString().replace("-", "")
         var meta: FileMeta? = null
         if (file != null) {
@@ -646,11 +654,12 @@ object Node {
         val task = task0?.let { JSONObject(it.toString()).put("status", it.optString("status").ifEmpty { TASK_NEW })
             .put("by", Prefs.name(ctx)).put("at", ts) }
         db.insertMsg(Msg(mid, chat, id, Prefs.name(ctx), ts, text, meta, true, status, file?.path,
-            reply?.toString(), task?.toString()), false)
+            reply?.toString(), task?.toString(), fwd), false)
         val pj = JSONObject().put("id", mid).put("from", id).put("name", Prefs.name(ctx)).put("to", chat)
             .put("dept", Prefs.dept(ctx)).put("uid", myUid())
             .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).put("port", TCP)
         if (reply != null) pj.put("reply", reply)
+        if (fwd != null) pj.put("fwd", fwd)
         if (isExt(chat)) {          // внешнему контакту: обратный адрес — мой код; моим устройствам — кто это
             val c = Prefs.contacts(ctx).optJSONObject(chat.substring(1)) ?: JSONObject()
             pj.put("xcode", myCode).put("xpeer", JSONObject().put("code", chat.substring(1))
@@ -662,6 +671,93 @@ object Node {
         changed()
         kick()
         return mid
+    }
+
+    // ---------- «прочитано» и «печатает…» (личные чаты)
+    /** Служебное сообщение: его id — id уже существующего сообщения, поэтому старые версии его пропускают. */
+    private fun ctl(chat: String, kind: String, ref: String): JSONObject {
+        val m = JSONObject().put("type", kind).put("id", ref).put("from", id).put("name", Prefs.name(ctx))
+            .put("dept", Prefs.dept(ctx)).put("uid", myUid()).put("to", chat).put("ts", System.currentTimeMillis())
+            .put("port", TCP).put("text", "").put("file", JSONObject.NULL)
+        if (isExt(chat)) m.put("xcode", myCode)
+        return m
+    }
+
+    /** Открыл чат — отметить прочитанным и сообщить собеседнику (и своим устройствам). */
+    fun markRead(chat: String) {
+        db.markRead(chat)
+        if (chat == ALL) return
+        val (mid, ts) = db.lastIncoming(chat) ?: return
+        if (seenSent[chat] == mid) return
+        seenSent[chat] = mid
+        val p = ctl(chat, "seen", mid).put("upto", ts).toString()
+        for (t in targets(chat)) db.addOutboxReplace(t, "seen:$chat", p)
+        kick()
+    }
+
+    fun sendTyping(chat: String) {
+        if (chat == ALL || isExt(chat) || System.currentTimeMillis() - typingAt < 4000) return
+        typingAt = System.currentTimeMillis()
+        val last = db.last(chat) ?: return
+        val m = ctl(chat, "typing", last.id)
+        val devs = account(chat)?.devices?.filter { it.online } ?: return
+        thread(isDaemon = true) {
+            for (p in devs) try {
+                if (p.lan) {
+                    val body = m.toString().toByteArray()
+                    val c = URL("http://${p.ip}:${p.port}/msg").openConnection() as HttpURLConnection
+                    c.connectTimeout = 3000; c.readTimeout = 3000; c.requestMethod = "POST"; c.doOutput = true
+                    c.setRequestProperty("X-Auth", authHeader("POST", "/msg", body))
+                    c.setRequestProperty("Content-Type", "application/json")
+                    c.outputStream.use { it.write(body) }
+                    c.responseCode; c.disconnect()
+                } else if (serverAddr() != null) relaySend(p.id, m)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun onCtl(m: JSONObject, ext: Boolean) {
+        val mine: Boolean
+        val chat: String
+        if (ext) { chat = "x" + normCode(m.optString("xcode")); mine = false }
+        else {
+            val sp = db.peer(m.optString("from"))
+            val sUid = m.optString("uid").ifEmpty { if (sp != null) uidOf(sp.name, sp.dept) else uidOf(m.optString("name"), m.optString("dept")) }
+            mine = sUid == myUid()
+            chat = if (mine) m.optString("to") else sUid
+        }
+        if (chat.isEmpty() || chat == ALL) return
+        if (m.optString("type") == "typing") {
+            if (!mine) { typing[chat] = m.optString("name") to System.currentTimeMillis(); changed() }
+            return
+        }
+        val upto = m.optLong("upto")
+        if (mine) { db.markReadUpto(chat, upto); Notify.cancel(ctx, chat); changed(); return }
+        typing.remove(chat)
+        if (db.markSeen(chat, upto, m.optLong("ts", System.currentTimeMillis()))) changed()
+    }
+
+    /** Напоминания о сроке задания: завтра, сегодня, просрочено (автору и исполнителю). */
+    private fun checkDeadlines() {
+        val me = Prefs.name(ctx).trim().lowercase()
+        val fmt = java.text.SimpleDateFormat("dd.MM.yyyy", java.util.Locale.US)
+        val today = fmt.parse(fmt.format(java.util.Date()))!!.time
+        val done = Prefs.reminded(ctx)
+        for (m in db.tasks()) {
+            val t = m.taskObj ?: continue
+            val st = t.optString("status")
+            if (st == TASK_DONE || st == TASK_OK || t.optString("due").isEmpty()) continue
+            if (!m.mine && t.optString("who").trim().lowercase() != me) continue
+            val due = try { fmt.parse(t.optString("due"))!!.time } catch (e: Exception) { continue }
+            val left = Math.round((due - today) / 86_400_000.0)
+            val kind = when { left < 0 -> "late"; left == 0L -> "today"; left == 1L -> "tomorrow"; else -> continue }
+            if ("${m.id}:$kind" in done) continue
+            Prefs.addReminded(ctx, "${m.id}:$kind")
+            val txt = mapOf("tomorrow" to "Срок — завтра", "today" to "Срок — сегодня", "late" to "Срок прошёл!")[kind]
+            Notify.message(ctx, Msg(m.id + kind, m.chat, m.sender, "⏰ $txt: ${t.optString("title")}", m.ts,
+                "Статус: ${st.ifEmpty { TASK_NEW }}" + (t.optString("who").takeIf { it.isNotEmpty() }?.let { " · исполнитель: $it" } ?: ""),
+                null, false, "", null))
+        }
     }
 
     /** Сменить статус задания — у себя и у всех, кому оно было отправлено. */
@@ -697,7 +793,7 @@ object Node {
                 if (p == null) {
                     if (relay && relayDeliver(peer, payload)) {          // не в одной сети — через сервер
                         db.delOutbox(peer, mid)
-                        if (peer !in mineDevs) viaRelay(mid)
+                        if (peer !in mineDevs && !mid.startsWith("seen:")) viaRelay(mid)
                     }
                     continue
                 }
@@ -719,7 +815,7 @@ object Node {
                     continue
                 }
                 db.delOutbox(peer, mid)
-                if (peer !in mineDevs) delivered(mid)
+                if (peer !in mineDevs && !mid.startsWith("seen:")) delivered(mid)
             }
         }
     }
@@ -727,7 +823,7 @@ object Node {
     private fun viaRelay(mid: String) {
         val m = db.msg(mid) ?: return
         if (m.chat == ALL) return delivered(mid)
-        if (m.status != "delivered") { db.setStatus(mid, "relay"); changed() }
+        if (m.status != "delivered" && m.status != "read") { db.setStatus(mid, "relay"); changed() }
     }
 
     // ---------- сервер-ретранслятор (работа через интернет)
@@ -919,7 +1015,7 @@ object Node {
     private fun relayItem(m: JSONObject) {
         if (m.optString("type") == "ack") {                  // получатель подтвердил — ✓✓
             val mine = db.msg(m.optString("id"))
-            if (mine != null && mine.mine && mine.chat != ALL && m.optString("from") !in myDevices()) {
+            if (mine != null && mine.mine && mine.chat != ALL && mine.status != "read" && m.optString("from") !in myDevices()) {
                 db.setStatus(mine.id, "delivered"); changed()
             }
             return
@@ -927,11 +1023,13 @@ object Node {
         val from = m.optString("from")
         if (m.optString("id").isEmpty() || from.isEmpty() || from == id) return
         receive(m, "")
+        if (m.optString("type") == "seen" || m.optString("type") == "typing") return
         relaySend(from, JSONObject().put("type", "ack").put("id", m.getString("id")).put("from", id))
     }
 
     private fun delivered(mid: String) {
         val m = db.msg(mid) ?: return
+        if (m.status == "read") return
         val st = if (m.chat == ALL && m.status.contains('/')) {
             val a = m.status.substringBefore('/').toIntOrNull() ?: 0
             "${a + 1}/${m.status.substringAfter('/')}"
@@ -945,6 +1043,15 @@ object Node {
         val mid = m.getString("id")
         val from = m.getString("from")
         val xcode = normCode(m.optString("xcode"))
+        val kind = m.optString("type")
+        if ((kind == "seen" || kind == "typing") && from != id) {
+            if (ip.isNotEmpty() && !ext) {
+                val d = JSONObject().put("id", from).put("name", m.optString("name", "")).put("port", m.optInt("port", TCP))
+                if (m.has("dept")) d.put("dept", m.optString("dept"))
+                upsert(d, ip)
+            }
+            onCtl(m, ext); return
+        }
         if (ext) {                                          // письмо от внешнего контакта (не из организации)
             val cs = Prefs.contacts(ctx)
             val c = cs.optJSONObject(xcode) ?: JSONObject().put("name", "")
@@ -990,7 +1097,8 @@ object Node {
         val meta = if (m.isNull("file")) null else FileMeta.of(m.optJSONObject("file")?.toString())
         val msg = Msg(mid, chat, from, m.optString("name", "?"), m.optLong("ts", System.currentTimeMillis()),
             m.optString("text", ""), meta, mine, if (mine) "delivered" else "received", null,
-            m.optJSONObject("reply")?.toString(), m.optJSONObject("task")?.toString())
+            m.optJSONObject("reply")?.toString(), m.optJSONObject("task")?.toString(), m.optString("fwd").ifEmpty { null })
+        typing.remove(chat)
         db.insertMsg(msg, !mine && visibleChat != chat)
         changed()
         if (!mine && visibleChat != chat) Notify.message(ctx, msg)

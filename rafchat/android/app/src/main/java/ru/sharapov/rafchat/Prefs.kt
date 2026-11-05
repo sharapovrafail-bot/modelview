@@ -58,6 +58,9 @@ object Prefs {
         val s = HashSet(opened(ctx))
         if (if (on) s.add(key) else s.remove(key)) sp(ctx).edit().putStringSet("opened", s).apply()
     }
+    /** Уже показанные напоминания о сроке заданий: «id:вид». */
+    fun reminded(ctx: Context): Set<String> = sp(ctx).getStringSet("reminded", emptySet()) ?: emptySet()
+    fun addReminded(ctx: Context, k: String) = sp(ctx).edit().putStringSet("reminded", HashSet(reminded(ctx)) + k).apply()
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

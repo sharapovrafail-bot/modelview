@@ -176,6 +176,13 @@ class ChatActivity : AppCompatActivity() {
             hint = "Сообщение"; textSize = 16f; background = getDrawable(R.drawable.bg_input)
             setPadding(d(14f), d(10f), d(14f), d(10f)); maxLines = 6
             imeOptions = EditorInfo.IME_FLAG_NO_ENTER_ACTION
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    if (!s.isNullOrBlank() && Node.running) Node.sendTyping(chat)
+                }
+            })
         }
         bar.addView(input, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = d(2f); marginEnd = d(4f) })
         bar.addView(ImageView(this).apply {
@@ -231,11 +238,12 @@ class ChatActivity : AppCompatActivity() {
     private fun takeReply(): org.json.JSONObject? = replyTo.also { cancelReply() }
 
     private fun msgMenu(m: Msg) {
-        val items = arrayListOf("Ответить")
+        val items = arrayListOf("Ответить", "Переслать")
         if (m.text.isNotEmpty() && m.task == null) items.add("Копировать текст")
         androidx.appcompat.app.AlertDialog.Builder(this).setItems(items.toTypedArray()) { _, i ->
             when (items[i]) {
                 "Ответить" -> startReply(m)
+                "Переслать" -> forward(m)
                 else -> {
                     (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
                         .setPrimaryClip(android.content.ClipData.newPlainText("RafChat", m.text))
@@ -243,6 +251,38 @@ class ChatActivity : AppCompatActivity() {
                 }
             }
         }.show()
+    }
+
+    /** Переслать сообщение (текст, файл, задание) в другой чат. */
+    private fun forward(m: Msg) {
+        if (m.file != null && m.local == null) {
+            Toast.makeText(this, "Сначала скачайте файл — потом его можно переслать", Toast.LENGTH_LONG).show(); return
+        }
+        val keys = arrayListOf(Node.ALL)
+        val names = arrayListOf("Общий чат")
+        for (a in (Node.visibleChats() + Node.accounts().sortedBy { it.name.lowercase() }).distinctBy { it.id }) {
+            if (a.id == chat) continue
+            keys.add(a.id); names.add(a.title + if (a.ext) "  🌐" else "")
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Переслать").setItems(names.toTypedArray()) { _, i ->
+            val to = keys[i]
+            val who = m.fwd ?: if (m.mine) Prefs.name(this) else m.senderName
+            val task = m.taskObj?.put("status", Node.TASK_NEW)
+            Thread {
+                var file: java.io.File? = null
+                var fname: String? = null
+                if (m.file != null && m.local != null) {
+                    val loc = m.local
+                    if (loc.startsWith("content:")) Ui.importUri(this, android.net.Uri.parse(loc))?.let { (f, n) -> file = f; fname = n }
+                    else { file = java.io.File(loc); fname = m.file.name }
+                }
+                Node.openChatWith(to)
+                Node.send(to, m.text, file, fname, null, task, who)
+                runOnUiThread {
+                    startActivity(Intent(this, ChatActivity::class.java).putExtra("chat", to)); finish()
+                }
+            }.start()
+        }.setNegativeButton("Отмена", null).show()
     }
 
     private fun jumpTo(mid: String) {
@@ -398,7 +438,7 @@ class ChatActivity : AppCompatActivity() {
 
     private fun refresh() {
         if (!Node.running) { sub.text = "подключаюсь…"; return }
-        Node.db.markRead(chat)
+        Node.markRead(chat)
         if (chat == Node.ALL) {
             val peers = Node.accounts()
             title.text = "Общий чат"
@@ -418,6 +458,10 @@ class ChatActivity : AppCompatActivity() {
                 p?.relay == true -> "в сети через интернет"
                 else -> "не в сети — сообщения дойдут, когда появится"
             } + (if (p?.online == true && kinds.isNotEmpty()) " · $kinds" else "")
+            }
+            Node.typing[chat]?.let { (_, t) ->
+                val left = 6500 - (System.currentTimeMillis() - t)
+                if (left > 0) { sub.text = "печатает…"; sub.postDelayed({ refresh() }, left) }
             }
         }
         val history = Node.db.history(chat)
@@ -465,6 +509,9 @@ class ChatActivity : AppCompatActivity() {
             text = m.senderName; textSize = 13f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.color(m.sender))
         })
         b.setOnLongClickListener { msgMenu(m); true }
+        m.fwd?.let { w -> b.addView(TextView(this).apply {
+            text = "↪ Переслано от $w"; textSize = 12f; setTypeface(typeface, Typeface.ITALIC); setTextColor(meta)
+        }) }
         m.replyObj?.let { rp ->                         // цитата сообщения, на которое ответили
             val q = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; setPadding(d(9f), d(3f), d(9f), d(4f))
@@ -542,6 +589,7 @@ class ChatActivity : AppCompatActivity() {
             m.status == "queued" -> "  🕓"
             m.status == "relay" -> "  ✓ на сервере"
             m.status == "delivered" -> "  ✓✓"
+            m.status == "read" -> "  ✓✓ прочитано " + Ui.time(if (m.readAt > 0) m.readAt else m.ts)
             m.status.contains('/') -> {
                 val a = m.status.substringBefore('/'); val all = m.status.substringAfter('/')
                 if (a == all && all != "0") "  ✓✓" else "  ✓ $a/$all"
