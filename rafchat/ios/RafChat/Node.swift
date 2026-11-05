@@ -26,6 +26,11 @@ final class Node: ObservableObject {
     @Published var tick = 0
     /// nil — сервер не задан, true/false — есть ли с ним связь
     @Published var relayOk: Bool?
+    /// внешние контакты (не из организации): код → {name, dept}
+    @Published var contacts: [String: [String: String]] = Profile.contacts { didSet { Profile.contacts = contacts } }
+    /// личный код — как номер телефона для внешних контактов; одинаковый на всех устройствах человека
+    var myCode = ""
+    private var xdev: [String: (Date, [String])] = [:]
     var visibleChat: String?
 
     private let store = Store()
@@ -60,6 +65,9 @@ final class Node: ObservableObject {
         key = SymmetricKey(data: SHA256.hash(data: Data(("RafChat:" + org).utf8)))
         ekey = SymmetricKey(data: SHA256.hash(data: Data(("RafChat-e2e:" + org).utf8)))
         orgId = String(Node.hex(SHA256.hash(data: Data(("RafChat-org:" + org).utf8))).prefix(32))
+        let ch = Array(SHA256.hash(data: Data(("RafChat-mycode:" + org + "|" + myUid).utf8)))
+        let abc = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        myCode = String((0..<12).map { abc[Int(ch[$0]) % 32] })
         if Profile.relayAltPort > 0 { altPort = Profile.relayAltPort; altTLS = Profile.relayAltTLS }
         udpFd = Sock.udp(port: Node.udpPort)
         tcpFd = Sock.tcpServer(port: Node.tcpPort)
@@ -74,6 +82,7 @@ final class Node: ObservableObject {
         Thread.detachNewThread { [weak self] in self?.outboxLoop(g) }
         Thread.detachNewThread { [weak self] in self?.pingLoop(g) }
         Thread.detachNewThread { [weak self] in self?.relayLoop(g) }
+        Thread.detachNewThread { [weak self] in self?.extLoop(g) }
     }
 
     func stop() {
@@ -373,6 +382,12 @@ final class Node: ObservableObject {
                                       "file": meta?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
         if let r = reply { payload["reply"] = r }
         if let t = task { payload["task"] = t }
+        if isExt(chat) {            // внешнему контакту: обратный адрес — мой код; моим устройствам — кто это
+            let code = String(chat.dropFirst())
+            let c = contacts[code] ?? [:]
+            payload["xcode"] = myCode
+            payload["xpeer"] = ["code": code, "name": c["name"] ?? "", "dept": c["dept"] ?? ""]
+        }
         if let pd = try? JSONSerialization.data(withJSONObject: payload), let ps = String(data: pd, encoding: .utf8) {
             for t in tg { outbox.append(OutItem(peer: t, msgId: mid, payload: ps)) }
         }
@@ -393,6 +408,15 @@ final class Node: ObservableObject {
             }
             let relay = serverAddr() != nil
             for it in items {
+                if isExt(it.peer) {                                  // внешний контакт — только через сервер
+                    if relay && extDeliver(String(it.peer.dropFirst()), it.payload) {
+                        DispatchQueue.main.async {
+                            self.outbox.removeAll { $0.peer == it.peer && $0.msgId == it.msgId }
+                            self.viaRelay(it.msgId)
+                        }
+                    }
+                    continue
+                }
                 guard let p = online[it.peer], let url = URL(string: "http://\(p.ip):\(p.port)/msg") else {
                     if relay && relayDeliver(it.peer, it.payload) {          // иначе — через сервер
                         DispatchQueue.main.async {
@@ -448,12 +472,18 @@ final class Node: ObservableObject {
 
     // MARK: приём
 
-    private func receive(_ m: [String: Any], _ ip: String) {
+    private func receive(_ m: [String: Any], _ ip: String, ext: Bool = false) {
         guard let mid = m["id"] as? String, let from = m["from"] as? String else { return }
         let to = m["to"] as? String ?? ""
         let meta = FileMeta.from(m["file"])
+        let xcode = normCode(m["xcode"] as? String ?? "")
         DispatchQueue.main.async {
-            if from != self.id && !ip.isEmpty {
+            if ext {                                         // письмо от внешнего контакта (не из организации)
+                var c = self.contacts[xcode] ?? ["name": ""]
+                if (c["name"] ?? "").isEmpty { c["name"] = m["name"] as? String ?? "" }
+                c["dept"] = m["dept"] as? String ?? ""
+                self.contacts[xcode] = c
+            } else if from != self.id && !ip.isEmpty {
                 // пришло сообщение — значит, отправитель в сети (даже если его маяки до нас не доходят)
                 var d: [String: Any] = ["name": m["name"] as? String ?? "", "port": m["port"] as? Int ?? Int(Node.tcpPort)]
                 if let dp = m["dept"] as? String { d["dept"] = dp }
@@ -480,11 +510,18 @@ final class Node: ObservableObject {
             let sp = self.peers.first { $0.id == from }
             var sUid = m["uid"] as? String ?? ""
             if sUid.isEmpty { sUid = sp.map { uidOf($0.name, $0.dept) } ?? uidOf(m["name"] as? String ?? "", m["dept"] as? String ?? "") }
-            let mine = sUid == self.myUid                  // моё сообщение с другого моего устройства
+            let mine = !ext && sUid == self.myUid          // моё сообщение с другого моего устройства
             let chat: String
-            if to == Node.all { chat = Node.all }
-            else if mine { guard isUid(to), to != self.myUid else { return }; chat = to }
+            if ext { chat = "x" + xcode }
+            else if to == Node.all { chat = Node.all }
+            else if mine { guard isUid(to) || isExt(to), to != self.myUid else { return }; chat = to }
             else { chat = sUid }
+            if mine && isExt(chat), let xp = m["xpeer"] as? [String: Any] {   // мой внешний контакт — и на этом устройстве
+                let code = String(chat.dropFirst())
+                var c = self.contacts[code] ?? ["name": "", "dept": xp["dept"] as? String ?? ""]
+                if (c["name"] ?? "").isEmpty { c["name"] = xp["name"] as? String ?? "" }
+                self.contacts[code] = c
+            }
             let msg = Msg(id: mid, chat: chat, sender: from, senderName: m["name"] as? String ?? "?",
                           ts: (m["ts"] as? NSNumber)?.int64Value ?? Int64(Date().timeIntervalSince1970 * 1000),
                           text: m["text"] as? String ?? "", file: meta, mine: mine, status: mine ? "delivered" : "received",
@@ -507,8 +544,9 @@ final class Node: ObservableObject {
             for _ in 0..<40 {
                 let p = await MainActor.run { self.peers.first { $0.id == m.sender } }
                 if (p == nil || !p!.lan) && f.relay && self.serverAddr() != nil,
-                   let enc = try? self.relayCall("GET", "/r/file?fid=" + f.fid, nil, timeout: 300),
-                   let data = self.dec(enc) {
+                   let enc = try? self.relayCall("GET", "/r/file?fid=" + f.fid, nil, timeout: 300,
+                                                 org: f.xorg.isEmpty ? nil : self.xorg(f.xorg)),
+                   let data = f.xorg.isEmpty ? self.dec(enc) : self.dec(enc, self.xkey(f.xorg)) {
                     let dest = self.uniqueDest(f.name)
                     try? data.write(to: dest)
                     await MainActor.run {
@@ -635,11 +673,11 @@ extension Node {
     }()
 
     // ---------- шифрование для сервера (AES-256-GCM: nonce 12 байт + шифротекст + тег — как у ПК и Android)
-    func enc(_ data: Data) -> Data? { try? AES.GCM.seal(data, using: ekey).combined }
+    func enc(_ data: Data, _ k: SymmetricKey? = nil) -> Data? { try? AES.GCM.seal(data, using: k ?? ekey).combined }
 
-    func dec(_ blob: Data) -> Data? {
+    func dec(_ blob: Data, _ k: SymmetricKey? = nil) -> Data? {
         guard let box = try? AES.GCM.SealedBox(combined: blob) else { return nil }
-        return try? AES.GCM.open(box, using: ekey)
+        return try? AES.GCM.open(box, using: k ?? ekey)
     }
 
     func serverAddr() -> (String, Int)? {
@@ -652,13 +690,14 @@ extension Node {
     }
 
     /// Синхронный запрос к серверу (вызывать не с главного потока).
-    func relayCall(_ method: String, _ path: String, _ body: Data?, json: Bool = true, timeout: Double = 15) throws -> Data {
+    func relayCall(_ method: String, _ path: String, _ body: Data?, json: Bool = true, timeout: Double = 15,
+                   org: String? = nil) throws -> Data {
         guard let (host, port) = serverAddr() else { throw URLError(.badURL) }
         let scheme = (altTLS && altPort != nil) ? "https" : "http"
         guard let url = URL(string: "\(scheme)://\(host):\(port)\(path)") else { throw URLError(.badURL) }
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
-        req.setValue(orgId, forHTTPHeaderField: "X-Org")
+        req.setValue(org ?? orgId, forHTTPHeaderField: "X-Org")
         req.setValue(id, forHTTPHeaderField: "X-Node")
         if let b = body {
             req.httpBody = b
@@ -682,9 +721,10 @@ extension Node {
         return out ?? Data()
     }
 
-    func relayJSON(_ method: String, _ path: String, _ body: [String: Any]? = nil, timeout: Double = 15) throws -> [String: Any] {
+    func relayJSON(_ method: String, _ path: String, _ body: [String: Any]? = nil, timeout: Double = 15,
+                   org: String? = nil) throws -> [String: Any] {
         let b = try body.map { try JSONSerialization.data(withJSONObject: $0) }
-        let d = try relayCall(method, path, b, timeout: timeout)
+        let d = try relayCall(method, path, b, timeout: timeout, org: org)
         return (try? JSONSerialization.jsonObject(with: d) as? [String: Any]) ?? [:]
     }
 
@@ -794,6 +834,109 @@ extension Node {
         _ = relaySend(from, ["type": "ack", "id": m["id"] as? String ?? "", "from": id])
     }
 
+    // ---------- внешние контакты: переписка через «почтовый ящик» человека на сервере
+    func xorg(_ code: String) -> String {
+        String(Node.hex(SHA256.hash(data: Data(("RafChat-inbox:" + normCode(code)).utf8))).prefix(32))
+    }
+    func xkey(_ code: String) -> SymmetricKey {
+        SymmetricKey(data: SHA256.hash(data: Data(("RafChat-inbox-key:" + normCode(code)).utf8)))
+    }
+    private func extProfile(_ owner: Bool) -> [String: Any] {
+        var p = profile; p["code"] = myCode; p["owner"] = owner; return p
+    }
+
+    /// Устройства внешнего контакта — по его «почтовому ящику» на сервере.
+    private func extDevices(_ code: String) throws -> [String] {
+        let k = xkey(code)
+        guard let raw = try? JSONSerialization.data(withJSONObject: extProfile(false)), let blob = enc(raw, k) else { return [] }
+        let r = try relayJSON("POST", "/r/hello", ["profile": blob.base64EncodedString()], org: xorg(code))
+        var out: [String] = []
+        for p in r["peers"] as? [[String: Any]] ?? [] {
+            guard let pid = p["id"] as? String, let b = p["profile"] as? String, let pr = Data(base64Encoded: b),
+                  let d = dec(pr, k), let prof = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  prof["id"] as? String == pid, prof["owner"] as? Bool == true,
+                  normCode(prof["code"] as? String ?? "") == code else { continue }
+            out.append(pid)
+            let dept = prof["dept"] as? String ?? ""
+            DispatchQueue.main.async { if self.contacts[code] != nil, self.contacts[code]?["dept"] != dept { self.contacts[code]?["dept"] = dept } }
+        }
+        return out
+    }
+
+    private func extDeliver(_ code: String, _ payload: String) -> Bool {
+        do {
+            var devs: [String]
+            if let c = xdev[code], Date().timeIntervalSince(c.0) < 20 { devs = c.1 }
+            else { devs = try extDevices(code); xdev[code] = (Date(), devs) }
+            if devs.isEmpty { return false }                    // ещё ни разу не выходил на связь — ждём
+            guard var m = (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) as? [String: Any] else { return true }
+            m["xcode"] = myCode
+            let k = xkey(code)
+            if var f = m["file"] as? [String: Any], let fid = f["fid"] as? String,
+               ((f["size"] as? NSNumber)?.int64Value ?? 0) <= Node.relayFileMax {
+                let path = DispatchQueue.main.sync { files[fid] }
+                guard let path = path, let data = FileManager.default.contents(atPath: path), let blob = enc(data, k) else { return false }
+                _ = try relayCall("PUT", "/r/file?fid=" + fid, blob, json: false, timeout: 300, org: xorg(code))
+                f["relay"] = true; f["xorg"] = code; m["file"] = f
+            }
+            guard let raw = try? JSONSerialization.data(withJSONObject: m), let blob = enc(raw, k) else { return false }
+            for d in devs { _ = try relayJSON("POST", "/r/send", ["to": d, "blob": blob.base64EncodedString()], org: xorg(code)) }
+            return true
+        } catch { return false }
+    }
+
+    /// Свой «почтовый ящик»: письма от внешних контактов.
+    func extLoop(_ g: Int) {
+        var lastHello = Date.distantPast
+        while gen == g {
+            if serverAddr() == nil || myCode.isEmpty { Thread.sleep(forTimeInterval: 5); continue }
+            let k = xkey(myCode), o = xorg(myCode)
+            do {
+                if Date().timeIntervalSince(lastHello) > 30,
+                   let raw = try? JSONSerialization.data(withJSONObject: extProfile(true)), let blob = enc(raw, k) {
+                    _ = try relayJSON("POST", "/r/hello", ["profile": blob.base64EncodedString()], org: o)
+                    lastHello = Date()
+                }
+                let r = try relayJSON("GET", "/r/poll?wait=25", nil, timeout: 40, org: o)
+                var acks: [String] = []
+                for it in r["items"] as? [[String: Any]] ?? [] {
+                    if let q = it["qid"] as? String { acks.append(q) }
+                    guard let b = it["blob"] as? String, let raw = Data(base64Encoded: b), let d = dec(raw, k),
+                          let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                          !(m["xcode"] as? String ?? "").isEmpty, m["from"] as? String != id else { continue }
+                    receive(m, "", ext: true)
+                }
+                if !acks.isEmpty { _ = try? relayJSON("POST", "/r/ack", ["qids": acks], org: o) }
+            } catch {
+                if gen == g { Thread.sleep(forTimeInterval: 5) }
+            }
+        }
+    }
+
+    /// Добавить внешний контакт по коду. Возвращает ключ чата или "" (неверный код).
+    func addContact(_ code0: String, _ name: String) -> String {
+        let code = normCode(code0)
+        guard code.count == 12, code != myCode else { return "" }
+        var c = contacts[code] ?? ["name": "", "dept": ""]
+        if !name.isEmpty { c["name"] = name }
+        contacts[code] = c
+        return "x" + code
+    }
+
+    func openChatWith(_ key: String) { if key != Node.all { var o = Profile.opened; o.insert(key); Profile.opened = o; tick += 1 } }
+
+    /// Список чатов как в WhatsApp: только с перепиской или открытые самим, плюс внешние контакты.
+    var visibleChats: [Account] {
+        let have = Set(messages.map { $0.chat })
+        let op = Profile.opened
+        var out = accounts.filter { have.contains($0.id) || op.contains($0.id) }
+        for (code, c) in contacts {
+            out.append(Account(id: "x" + code, name: (c["name"] ?? "").isEmpty ? fmtCode(code) : c["name"]!,
+                               dept: c["dept"] ?? "", devices: [], code: code))
+        }
+        return out.sorted { (last($0.id)?.ts ?? 0, $1.name.lowercased()) > (last($1.id)?.ts ?? 0, $0.name.lowercased()) }
+    }
+
     /// Участник на связи через сервер (вызывать на главном потоке).
     func upsertRelay(_ d: [String: Any], _ seen: Double) {
         adoptServer(d)
@@ -873,6 +1016,12 @@ extension Node {
     /// Удалить чат: переписку и очередь; личный — вместе со всеми устройствами человека (вернутся, если выйдут на связь).
     func deleteChat(_ key: String) {
         messages.removeAll { $0.chat == key }
+        var op = Profile.opened; op.remove(key); Profile.opened = op
+        if isExt(key) {
+            contacts[String(key.dropFirst())] = nil
+            outbox.removeAll { $0.peer == key }
+            persist(); return
+        }
         if key != Node.all {
             let devs = devices(key).isEmpty ? [key] : devices(key)
             var h = Profile.hidden
@@ -898,7 +1047,15 @@ extension Node {
         }
     }
 
-    func account(_ uid: String) -> Account? { accounts.first { $0.id == uid } }
+    func account(_ uid: String) -> Account? {
+        if isExt(uid) {
+            let code = String(uid.dropFirst())
+            guard let c = contacts[code] else { return nil }
+            return Account(id: uid, name: (c["name"] ?? "").isEmpty ? fmtCode(code) : c["name"]!, dept: c["dept"] ?? "",
+                           devices: [], code: code)
+        }
+        return accounts.first { $0.id == uid }
+    }
 
     /// Переписка, хранившаяся по устройству, переезжает в чат человека.
     func migrateChats() {
@@ -912,6 +1069,7 @@ extension Node {
 
     func targets(_ chat: String) -> [String] {
         if chat == Node.all { return peers.map { $0.id } }
+        if isExt(chat) { return [chat] + myDevices }          // «x…» — через «почтовый ящик» на сервере
         if !isUid(chat) { return [chat] }                     // старый формат — конкретное устройство
         let now = Date().timeIntervalSince1970
         let fresh = Set(peers.filter { now - max($0.lastSeen, $0.relaySeen) < 14 * 86400 }.map { $0.id })

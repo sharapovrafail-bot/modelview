@@ -141,9 +141,18 @@ struct ChatListView: View {
     @State private var query = ""
     @State private var showTasks = false
     @State private var path: [Route] = []
+    @State private var showNew = false
+    @State private var showAdd = false
+    @State private var showCode = false
+    @State private var newCode = ""
+    @State private var newName = ""
 
-    private var sortedPeers: [Account] {
-        node.accounts.sorted { ($0.online ? 0 : 1, $0.name.lowercased()) < ($1.online ? 0 : 1, $1.name.lowercased()) }
+    /// как в WhatsApp: только чаты с перепиской (или открытые через «Новый чат»), свежие — выше
+    private var sortedPeers: [Account] { node.visibleChats }
+
+    private func openChat(_ key: String) {
+        node.openChatWith(key)
+        path.append(Route(chat: key))
     }
 
     private func chatTitle(_ chat: String) -> String {
@@ -183,15 +192,17 @@ struct ChatListView: View {
                         .listRowBackground(RoundedRectangle(cornerRadius: 12).fill(Color(red: 1, green: 0.945, blue: 0.878))
                             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(red: 1, green: 0.82, blue: 0.6))))
                         ForEach(sortedPeers) { p in
-                            NavigationLink(value: Route(chat: p.id)) { row(key: p.id, title: p.title, online: p.online, group: false) }
+                            NavigationLink(value: Route(chat: p.id)) {
+                                row(key: p.id, title: p.title + (p.ext ? "  🌐" : ""), online: p.online, group: false)
+                            }
                                 .swipeActions {
                                     Button(role: .destructive) { node.deleteChat(p.id) } label: { Label("Удалить", systemImage: "trash") }
                                 }
                         }
                     } footer: {
                         VStack(alignment: .leading, spacing: 4) {
-                            let on = node.accounts.filter { $0.online }.count
-                            Text("В сети: \(on) из \(node.accounts.count)" + (node.queued > 0 ? " · в очереди: \(node.queued)" : ""))
+                            Text("Новый чат — кнопка ✏️ вверху" + (node.queued > 0 ? " · в очереди: \(node.queued)" : ""))
+                            Button("Мой код для внешних контактов: \(fmtCode(node.myCode))") { showCode = true }
                             if let ok = node.relayOk { Text(ok ? "Сервер: на связи ✓" : "Сервер: нет связи") }
                             Text("iPhone получает сообщения, пока RafChat открыт. Недоставленное ждёт у коллег и придёт сразу после открытия.")
                             Text("RafChat · Автор: Рафаил Шарапов · rafail@sharapov-cnc.ru").padding(.top, 8)
@@ -207,8 +218,41 @@ struct ChatListView: View {
                     Button { showTasks.toggle() } label: { Text(showTasks ? "Чаты" : "📋") }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    HStack {
+                        Button { showNew = true } label: { Image(systemName: "square.and.pencil") }
+                        Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    }
                 }
+            }
+            .confirmationDialog("Новый чат", isPresented: $showNew, titleVisibility: .visible) {
+                Button("➕ Добавить внешний контакт по коду") {
+                    newCode = ""; newName = ""
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAdd = true }
+                }
+                ForEach(node.accounts.sorted { $0.name.lowercased() < $1.name.lowercased() }) { a in
+                    Button(a.title + (a.online ? "  ● в сети" : "")) { openChat(a.id) }
+                }
+                ForEach(node.contacts.keys.sorted(), id: \.self) { code in
+                    Button(((node.contacts[code]?["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? fmtCode(code)) + "  🌐") { openChat("x" + code) }
+                }
+                Button("Отмена", role: .cancel) {}
+            }
+            .alert("Внешний контакт", isPresented: $showAdd) {
+                TextField("Код: XXXX-XXXX-XXXX", text: $newCode).textInputAutocapitalization(.characters)
+                TextField("Имя, например: Иванов, поставщик", text: $newName)
+                Button("Добавить") {
+                    let k = node.addContact(newCode, newName.trimmingCharacters(in: .whitespaces))
+                    if !k.isEmpty { openChat(k) }
+                }
+                Button("Отмена", role: .cancel) {}
+            } message: {
+                Text("Попросите человека открыть RafChat и продиктовать «Мой код для внешних контактов». Код — 12 букв и цифр.")
+            }
+            .alert("Мой код: \(fmtCode(node.myCode))", isPresented: $showCode) {
+                Button("Копировать") { UIPasteboard.general.string = fmtCode(node.myCode) }
+                Button("Закрыть", role: .cancel) {}
+            } message: {
+                Text("Это ваш личный код — как номер телефона. Передайте его человеку не из вашей организации (заказчику, поставщику): он добавит вас через ✏️ «Новый чат → Добавить внешний контакт», и вы сможете переписываться и пересылать файлы. Переписка идёт через сервер и зашифрована. Код один на все ваши устройства.")
             }
             .sheet(isPresented: $showSettings) { SetupView(first: false) { showSettings = false; node.restart() } }
             .refreshable { node.beacon(ask: true, scan: true) }
@@ -235,7 +279,7 @@ struct ChatListView: View {
         let last = node.last(key)
         let unread = node.unread(key)
         let preview: String = {
-            guard let m = last else { return group ? "Сообщения для всех" : (online ? "в сети" : "не в сети") }
+            guard let m = last else { return group ? "Сообщения для всех" : (isExt(key) ? "внешний контакт" : (online ? "в сети" : "не в сети")) }
             let who = m.mine ? "Вы: " : (key == Node.all ? "\(m.senderName): " : "")
             return who + snippet(m)
         }()
@@ -299,6 +343,7 @@ struct ChatView: View {
             return "\(Defaults.company) · участников: \(node.accounts.count + 1), в сети: \(node.accounts.filter { $0.online }.count + 1)"
         }
         guard let p = node.account(chat) else { return "" }
+        if p.ext { return "внешний контакт · код \(fmtCode(p.code)) · через сервер" }
         let kinds = p.plats.isEmpty ? "" : " · " + p.plats.joined(separator: ", ")
         return p.lan ? "в сети" + kinds : (p.relay ? "в сети через интернет" + kinds : "не в сети — сообщение дойдёт, когда появится")
     }

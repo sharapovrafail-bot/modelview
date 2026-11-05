@@ -49,6 +49,9 @@ struct Account: Identifiable {
     var name: String
     var dept: String
     var devices: [Peer]
+    /// код внешнего контакта (не из организации); пусто — сотрудник
+    var code: String = ""
+    var ext: Bool { !code.isEmpty }
     var lan: Bool { devices.contains { $0.lan } }
     var relay: Bool { devices.contains { $0.relay } }
     var online: Bool { lan || relay }
@@ -67,21 +70,32 @@ func uidOf(_ name: String, _ dept: String) -> String {
 
 func isUid(_ chat: String) -> Bool { chat != Node.all && chat.count == 16 && chat.hasPrefix("u") }
 
+/// Чат с внешним контактом: «x» + его личный код.
+func isExt(_ chat: String) -> Bool { chat.count > 4 && chat.hasPrefix("x") }
+func normCode(_ c: String) -> String { String(c.uppercased().filter { $0.isLetter || $0.isNumber }) }
+func fmtCode(_ c: String) -> String {
+    let s = Array(normCode(c))
+    return stride(from: 0, to: s.count, by: 4).map { String(s[$0..<min($0 + 4, s.count)]) }.joined(separator: "-")
+}
+
 struct FileMeta: Codable, Equatable {
     var fid: String
     var name: String
     var size: Int64
     /// копия файла лежит на сервере (можно скачать, даже если отправитель не в нашей сети)
     var relay: Bool = false
+    /// файл от внешнего контакта лежит в «почтовом ящике» с этим кодом
+    var xorg: String = ""
 
     var dict: [String: Any] {
         var d: [String: Any] = ["fid": fid, "name": name, "size": size]
         if relay { d["relay"] = true }
+        if !xorg.isEmpty { d["xorg"] = xorg }
         return d
     }
 
-    init(fid: String, name: String, size: Int64, relay: Bool = false) {
-        self.fid = fid; self.name = name; self.size = size; self.relay = relay
+    init(fid: String, name: String, size: Int64, relay: Bool = false, xorg: String = "") {
+        self.fid = fid; self.name = name; self.size = size; self.relay = relay; self.xorg = xorg
     }
 
     init(from dec: Decoder) throws {
@@ -90,13 +104,14 @@ struct FileMeta: Codable, Equatable {
         name = try c.decode(String.self, forKey: .name)
         size = try c.decodeIfPresent(Int64.self, forKey: .size) ?? 0
         relay = try c.decodeIfPresent(Bool.self, forKey: .relay) ?? false
+        xorg = try c.decodeIfPresent(String.self, forKey: .xorg) ?? ""
     }
 
     static func from(_ any: Any?) -> FileMeta? {
         guard let d = any as? [String: Any], let fid = d["fid"] as? String, let name = d["name"] as? String
         else { return nil }
         let size = (d["size"] as? NSNumber)?.int64Value ?? 0
-        return FileMeta(fid: fid, name: name, size: size, relay: d["relay"] as? Bool ?? false)
+        return FileMeta(fid: fid, name: name, size: size, relay: d["relay"] as? Bool ?? false, xorg: d["xorg"] as? String ?? "")
     }
 }
 
@@ -203,6 +218,22 @@ enum Profile {
     static var relayAltTLS: Bool { d.bool(forKey: "relay_alt_tls") }
     static func setRelayAlt(_ p: Int, _ tls: Bool) {
         d.set(p, forKey: "relay_alt_port"); d.set(tls, forKey: "relay_alt_tls")
+    }
+
+    /// Внешние контакты: код → {name, dept}.
+    static var contacts: [String: [String: String]] {
+        get {
+            guard let s = d.string(forKey: "xcontacts"), let data = s.data(using: .utf8) else { return [:] }
+            return (try? JSONDecoder().decode([String: [String: String]].self, from: data)) ?? [:]
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) { d.set(String(data: data, encoding: .utf8), forKey: "xcontacts") }
+        }
+    }
+    /// Чаты, открытые через «Новый чат» (видны, даже пока переписки нет).
+    static var opened: Set<String> {
+        get { Set(d.stringArray(forKey: "opened") ?? []) }
+        set { d.set(Array(newValue), forKey: "opened") }
     }
 
     /// Удалённые чаты: не возвращать их из списка сервера, пока устройство само не выйдет на связь.
