@@ -63,6 +63,9 @@ object Node {
     private var key = ByteArray(0)
     private var ekey = ByteArray(0)
     private var orgId = ""
+    /** личный код — как номер телефона для внешних контактов; одинаковый на всех устройствах человека */
+    var myCode = ""
+    private val xdev = ConcurrentHashMap<String, Pair<Long, List<String>>>()
     /** null — сервер не задан, true/false — есть ли с ним связь */
     @Volatile var relayOk: Boolean? = null
     private val relayUploaded = ConcurrentHashMap.newKeySet<String>()
@@ -84,6 +87,8 @@ object Node {
         // шифрование «от устройства до устройства» для сервера: сервер видит только шифротекст
         ekey = sha256(("RafChat-e2e:" + org).toByteArray())
         orgId = hex(sha256(("RafChat-org:" + org).toByteArray())).take(32)
+        val ch = sha256(("RafChat-mycode:" + org + "|" + myUid()).toByteArray())
+        myCode = (0 until 12).map { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[(ch[it].toInt() and 0xFF) % 32] }.joinToString("")
         running = true
         val ss = ServerSocket()
         ss.reuseAddress = true
@@ -102,6 +107,7 @@ object Node {
         try { migrateChats() } catch (_: Exception) {}
         Prefs.relayAlt(ctx).let { (p, t) -> if (p > 0) { altPort = p; altTls = t } }
         thread(name = "rc-relay", isDaemon = true) { relayLoop() }
+        thread(name = "rc-inbox", isDaemon = true) { extLoop() }
     }
 
     @Synchronized
@@ -283,7 +289,116 @@ object Node {
         }
     }
 
-    fun account(uid: String) = accounts().firstOrNull { it.id == uid }
+    fun account(uid: String): Account? {
+        if (isExt(uid)) {
+            val c = Prefs.contacts(ctx).optJSONObject(uid.substring(1)) ?: return null
+            return extAccount(uid.substring(1), c)
+        }
+        return accounts().firstOrNull { it.id == uid }
+    }
+
+    private fun extAccount(code: String, c: JSONObject) =
+        Account("x$code", c.optString("name").ifEmpty { fmtCode(code) }, c.optString("dept"), emptyList(), code)
+
+    /** Список чатов как в WhatsApp: только те, где есть переписка или которые открыли сами, и внешние контакты. */
+    fun visibleChats(): List<Account> {
+        val have = db.chatsWithMessages()
+        val op = Prefs.opened(ctx)
+        val out = accounts().filter { it.id in have || it.id in op }.toMutableList()
+        val cs = Prefs.contacts(ctx)
+        for (k in cs.keys()) out.add(extAccount(k, cs.getJSONObject(k)))
+        return out
+    }
+
+    fun openChatWith(key: String) { if (key != ALL) Prefs.setOpened(ctx, key, true) }
+
+    /** Добавить внешний контакт по коду. Возвращает ключ чата или "" (неверный код). */
+    fun addContact(code0: String, name: String): String {
+        val code = normCode(code0)
+        if (code.length != 12 || code == myCode) return ""
+        val cs = Prefs.contacts(ctx)
+        val c = cs.optJSONObject(code) ?: JSONObject().put("name", "").put("dept", "")
+        if (name.isNotEmpty()) c.put("name", name)
+        cs.put(code, c); Prefs.setContacts(ctx, cs)
+        changed()
+        return "x$code"
+    }
+
+    private fun xorg(code: String) = hex(sha256(("RafChat-inbox:" + normCode(code)).toByteArray())).take(32)
+    private fun xkey(code: String) = sha256(("RafChat-inbox-key:" + normCode(code)).toByteArray())
+    private fun extProfile(owner: Boolean) = profile().put("code", myCode).put("owner", owner)
+
+    /** Устройства внешнего контакта — по его «почтовому ящику» на сервере. */
+    private fun extDevices(code: String): List<String> {
+        val k = xkey(code)
+        val r = relayJson("POST", "/r/hello", JSONObject().put("profile", b64(enc(extProfile(false).toString().toByteArray(), k))),
+            org = xorg(code))
+        val arr = r.optJSONArray("peers") ?: return emptyList()
+        val out = ArrayList<String>()
+        for (i in 0 until arr.length()) {
+            val p = arr.getJSONObject(i)
+            val d = try { JSONObject(String(dec(unb64(p.getString("profile")), k), Charsets.UTF_8)) } catch (e: Exception) { continue }
+            if (d.optBoolean("owner") && normCode(d.optString("code")) == code && d.optString("id") == p.optString("id")) {
+                out.add(d.getString("id"))
+                val cs = Prefs.contacts(ctx)
+                cs.optJSONObject(code)?.let { c ->
+                    if (c.optString("dept") != d.optString("dept")) { c.put("dept", d.optString("dept")); Prefs.setContacts(ctx, cs) }
+                }
+            }
+        }
+        return out
+    }
+
+    private fun extDeliver(code: String, payload: String): Boolean = try {
+        val (t, cached) = xdev[code] ?: (0L to emptyList())
+        val devs = if (System.currentTimeMillis() - t > 20_000) extDevices(code).also { xdev[code] = System.currentTimeMillis() to it } else cached
+        if (devs.isEmpty()) false                               // ещё ни разу не выходил на связь — ждём
+        else {
+            val k = xkey(code)
+            val m = JSONObject(payload).put("xcode", myCode)
+            val f = m.optJSONObject("file")
+            var ok = true
+            if (f != null && f.optLong("size") <= RELAY_FILE_MAX) {
+                val path = db.filePath(f.getString("fid"))
+                if (path != null && File(path).isFile) {
+                    relayCall("PUT", "/r/file?fid=" + f.getString("fid"), enc(File(path).readBytes(), k), false, 300_000, xorg(code))
+                    f.put("relay", true).put("xorg", code)
+                } else ok = false
+            }
+            if (ok) {
+                val blob = b64(enc(m.toString().toByteArray(), k))
+                for (d in devs) relayJson("POST", "/r/send", JSONObject().put("to", d).put("blob", blob), org = xorg(code))
+            }
+            ok
+        }
+    } catch (e: Exception) { false }
+
+    /** Свой «почтовый ящик»: письма от внешних контактов. */
+    private fun extLoop() {
+        var lastHello = 0L
+        while (running) {
+            if (serverAddr() == null) { Thread.sleep(5000); continue }
+            try {
+                val k = xkey(myCode)
+                val o = xorg(myCode)
+                if (System.currentTimeMillis() - lastHello > 30_000) {
+                    relayJson("POST", "/r/hello", JSONObject().put("profile", b64(enc(extProfile(true).toString().toByteArray(), k))), org = o)
+                    lastHello = System.currentTimeMillis()
+                }
+                val items = relayJson("GET", "/r/poll?wait=25", null, 40_000, o).optJSONArray("items")
+                val acks = org.json.JSONArray()
+                if (items != null) for (i in 0 until items.length()) {
+                    val it = items.getJSONObject(i)
+                    acks.put(it.getString("qid"))
+                    val m = try { JSONObject(String(dec(unb64(it.getString("blob")), k), Charsets.UTF_8)) } catch (e: Exception) { continue }
+                    if (m.optString("xcode").isNotEmpty() && m.optString("from") != id) try { receive(m, "", true) } catch (_: Exception) {}
+                }
+                if (acks.length() > 0) relayJson("POST", "/r/ack", JSONObject().put("qids", acks), org = o)
+            } catch (e: Exception) {
+                if (running) Thread.sleep(5000)
+            }
+        }
+    }
 
     /** Фото человека — с любого его устройства. */
     fun accountPhoto(uid: String): File? = devices(uid).firstNotNullOfOrNull { avatarFile(it) }
@@ -294,6 +409,7 @@ object Node {
 
     private fun targets(chat: String): List<String> {
         if (chat == ALL) return db.peers().map { it.id }
+        if (isExt(chat)) return listOf(chat) + myDevices()     // «x…» — через «почтовый ящик» на сервере
         if (!isUid(chat)) return listOf(chat)                 // старый формат — конкретное устройство
         val now = System.currentTimeMillis()
         val fresh = db.peers().filter { now - maxOf(it.lastSeen, it.relaySeen) < 14 * 86_400_000L }.map { it.id }.toSet()
@@ -301,6 +417,11 @@ object Node {
     }
 
     fun deleteChat(key: String) {
+        Prefs.setOpened(ctx, key, false)
+        if (isExt(key)) {
+            val cs = Prefs.contacts(ctx); cs.remove(key.substring(1)); Prefs.setContacts(ctx, cs)
+            db.deleteChat(key); changed(); return
+        }
         if (key != ALL) for (dev in devices(key).ifEmpty { listOf(key) }) {
             db.deleteChat(dev); avatarFile(dev)?.delete(); Prefs.setHidden(ctx, dev, true)
         }
@@ -530,6 +651,11 @@ object Node {
             .put("dept", Prefs.dept(ctx)).put("uid", myUid())
             .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).put("port", TCP)
         if (reply != null) pj.put("reply", reply)
+        if (isExt(chat)) {          // внешнему контакту: обратный адрес — мой код; моим устройствам — кто это
+            val c = Prefs.contacts(ctx).optJSONObject(chat.substring(1)) ?: JSONObject()
+            pj.put("xcode", myCode).put("xpeer", JSONObject().put("code", chat.substring(1))
+                .put("name", c.optString("name")).put("dept", c.optString("dept")))
+        }
         if (task != null) pj.put("task", task)
         val payload = pj.toString()
         for (t in targets) db.addOutbox(t, mid, payload)
@@ -563,6 +689,10 @@ object Node {
             val relay = serverAddr() != null
             val mineDevs = myDevices().toSet()          // копия на моё устройство — не «доставлено»
             for ((peer, mid, payload) in db.outbox()) {
+                if (isExt(peer)) {                               // внешний контакт — только через сервер
+                    if (relay && extDeliver(peer.substring(1), payload)) { db.delOutbox(peer, mid); viaRelay(mid) }
+                    continue
+                }
                 val p = online[peer]
                 if (p == null) {
                     if (relay && relayDeliver(peer, payload)) {          // не в одной сети — через сервер
@@ -657,16 +787,16 @@ object Node {
         }
     }
 
-    fun enc(data: ByteArray): ByteArray {
+    fun enc(data: ByteArray, k: ByteArray = ekey): ByteArray {
         val n = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
         val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(javax.crypto.Cipher.ENCRYPT_MODE, SecretKeySpec(ekey, "AES"), javax.crypto.spec.GCMParameterSpec(128, n))
+        c.init(javax.crypto.Cipher.ENCRYPT_MODE, SecretKeySpec(k, "AES"), javax.crypto.spec.GCMParameterSpec(128, n))
         return n + c.doFinal(data)
     }
 
-    fun dec(blob: ByteArray): ByteArray {
+    fun dec(blob: ByteArray, k: ByteArray = ekey): ByteArray {
         val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(javax.crypto.Cipher.DECRYPT_MODE, SecretKeySpec(ekey, "AES"),
+        c.init(javax.crypto.Cipher.DECRYPT_MODE, SecretKeySpec(k, "AES"),
             javax.crypto.spec.GCMParameterSpec(128, blob.copyOfRange(0, 12)))
         return c.doFinal(blob, 12, blob.size - 12)
     }
@@ -674,13 +804,14 @@ object Node {
     private fun b64(b: ByteArray) = android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP)
     private fun unb64(s: String) = android.util.Base64.decode(s, android.util.Base64.DEFAULT)
 
-    private fun relayCall(method: String, path: String, body: ByteArray? = null, json: Boolean = true, timeout: Int = 15000): ByteArray {
+    private fun relayCall(method: String, path: String, body: ByteArray? = null, json: Boolean = true, timeout: Int = 15000,
+                          org: String? = null): ByteArray {
         val (host, port) = serverAddr() ?: throw java.io.IOException("нет сервера")
         val c = relayConn(host, port, altTls && altPort != null, path)
         c.connectTimeout = 8000
         c.readTimeout = timeout
         c.requestMethod = method
-        c.setRequestProperty("X-Org", orgId)
+        c.setRequestProperty("X-Org", org ?: orgId)
         c.setRequestProperty("X-Node", id)
         try {
             if (body != null) {
@@ -694,8 +825,8 @@ object Node {
         } finally { c.disconnect() }
     }
 
-    private fun relayJson(method: String, path: String, body: JSONObject? = null, timeout: Int = 15000): JSONObject =
-        JSONObject(String(relayCall(method, path, body?.toString()?.toByteArray(), true, timeout), Charsets.UTF_8).ifEmpty { "{}" })
+    private fun relayJson(method: String, path: String, body: JSONObject? = null, timeout: Int = 15000, org: String? = null): JSONObject =
+        JSONObject(String(relayCall(method, path, body?.toString()?.toByteArray(), true, timeout, org), Charsets.UTF_8).ifEmpty { "{}" })
 
     private fun relaySend(to: String, m: JSONObject): Boolean = try {
         relayJson("POST", "/r/send", JSONObject().put("to", to).put("blob", b64(enc(m.toString().toByteArray()))))
@@ -810,10 +941,17 @@ object Node {
     }
 
     // ---------- приём
-    private fun receive(m: JSONObject, ip: String) {
+    private fun receive(m: JSONObject, ip: String, ext: Boolean = false) {
         val mid = m.getString("id")
         val from = m.getString("from")
-        if (from != id) {
+        val xcode = normCode(m.optString("xcode"))
+        if (ext) {                                          // письмо от внешнего контакта (не из организации)
+            val cs = Prefs.contacts(ctx)
+            val c = cs.optJSONObject(xcode) ?: JSONObject().put("name", "")
+            if (c.optString("name").isEmpty()) c.put("name", m.optString("name"))
+            c.put("dept", m.optString("dept"))
+            cs.put(xcode, c); Prefs.setContacts(ctx, cs)
+        } else if (from != id) {
             val d = JSONObject().put("id", from).put("name", m.optString("name", "")).put("port", m.optInt("port", TCP))
             if (m.has("dept")) d.put("dept", m.optString("dept"))
             // пришло сообщение — значит, отправитель на связи (по сети или через сервер)
@@ -835,12 +973,19 @@ object Node {
         // чат — это человек (имя + должность), а не его устройство
         val sp = db.peer(from)
         val sUid = m.optString("uid").ifEmpty { if (sp != null) uidOf(sp.name, sp.dept) else uidOf(m.optString("name"), m.optString("dept")) }
-        val mine = sUid == myUid()                         // моё сообщение с другого моего устройства
+        val mine = !ext && sUid == myUid()                 // моё сообщение с другого моего устройства
         val to = m.optString("to")
         val chat = when {
+            ext -> "x$xcode"
             to == ALL -> ALL
-            mine -> if (isUid(to) && to != myUid()) to else return
+            mine -> if ((isUid(to) || isExt(to)) && to != myUid()) to else return
             else -> sUid
+        }
+        if (mine && isExt(chat)) m.optJSONObject("xpeer")?.let { xp ->   // мой внешний контакт — и на этом устройстве
+            val cs = Prefs.contacts(ctx)
+            val c = cs.optJSONObject(chat.substring(1)) ?: JSONObject().put("name", "").put("dept", xp.optString("dept"))
+            if (c.optString("name").isEmpty()) c.put("name", xp.optString("name"))
+            cs.put(chat.substring(1), c); Prefs.setContacts(ctx, cs)
         }
         val meta = if (m.isNull("file")) null else FileMeta.of(m.optJSONObject("file")?.toString())
         val msg = Msg(mid, chat, from, m.optString("name", "?"), m.optLong("ts", System.currentTimeMillis()),
@@ -868,7 +1013,9 @@ object Node {
             val p = db.peer(m.sender)
             if ((p == null || !p.lan) && f.relay && serverAddr() != null) {
                 try {                                         // отправитель не в нашей сети — берём копию с сервера
-                    val data = dec(relayCall("GET", "/r/file?fid=" + f.fid, null, true, 300_000))
+                    val data = if (f.xorg.isNotEmpty())
+                        dec(relayCall("GET", "/r/file?fid=" + f.fid, null, true, 300_000, xorg(f.xorg)), xkey(f.xorg))
+                    else dec(relayCall("GET", "/r/file?fid=" + f.fid, null, true, 300_000))
                     part.writeBytes(data)
                     db.setLocal(mid, saveToDownloads(part, f.name))
                     changed()

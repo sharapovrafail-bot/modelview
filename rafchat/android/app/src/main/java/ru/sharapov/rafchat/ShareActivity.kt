@@ -21,13 +21,15 @@ class ShareActivity : AppCompatActivity() {
         }
         val uris = collect(intent)
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-        val peers = Node.db.peers().sortedWith(compareBy({ !it.online }, { it.name.lowercase() }))
+        val peers = (Node.visibleChats() + Node.accounts()).distinctBy { it.id }
+            .sortedWith(compareBy({ -(Node.db.last(it.id)?.ts ?: 0L) }, { it.name.lowercase() }))
         val keys = listOf(Node.ALL) + peers.map { it.id }
         val names = listOf("Общий чат") + peers.map { (if (it.online) "● " else "○ ") + it.title }
         AlertDialog.Builder(this)
             .setTitle("Кому отправить?")
             .setItems(names.toTypedArray()) { _, i ->
                 val chat = keys[i]
+                Node.openChatWith(chat)
                 thread {
                     for (u in uris) Ui.importUri(this, u)?.let { (f, n) -> Node.send(chat, "", f, n) }
                     if (uris.isEmpty() && !text.isNullOrEmpty()) Node.send(chat, text)

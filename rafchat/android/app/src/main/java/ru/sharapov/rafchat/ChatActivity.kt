@@ -408,6 +408,9 @@ class ChatActivity : AppCompatActivity() {
         } else {
             val p = Node.account(chat)
             title.text = p?.title ?: "?"
+            if (p?.ext == true) {
+                sub.text = "внешний контакт · код ${fmtCode(p.code)} · через сервер, зашифровано"
+            } else {
             val kinds = (p?.plats ?: emptySet()).map { mapOf("android" to "телефон", "ios" to "iPhone", "pc" to "ПК")[it] ?: it }
                 .sorted().joinToString(", ")
             sub.text = when {
@@ -415,6 +418,7 @@ class ChatActivity : AppCompatActivity() {
                 p?.relay == true -> "в сети через интернет"
                 else -> "не в сети — сообщения дойдут, когда появится"
             } + (if (p?.online == true && kinds.isNotEmpty()) " · $kinds" else "")
+            }
         }
         val history = Node.db.history(chat)
         // перерисовываем переписку, только если в ней что-то изменилось (иначе мешаем набору текста)

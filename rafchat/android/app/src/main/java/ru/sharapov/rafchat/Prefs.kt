@@ -48,6 +48,16 @@ object Prefs {
     fun relayAlt(ctx: Context): Pair<Int, Boolean> = sp(ctx).getInt("relay_alt_port", 0) to sp(ctx).getBoolean("relay_alt_tls", false)
     fun setRelayAlt(ctx: Context, port: Int, tls: Boolean) =
         sp(ctx).edit().putInt("relay_alt_port", port).putBoolean("relay_alt_tls", tls).apply()
+    /** Внешние контакты: код → {name, dept}. */
+    fun contacts(ctx: Context): org.json.JSONObject =
+        try { org.json.JSONObject(sp(ctx).getString("xcontacts", "{}") ?: "{}") } catch (_: Exception) { org.json.JSONObject() }
+    fun setContacts(ctx: Context, o: org.json.JSONObject) = sp(ctx).edit().putString("xcontacts", o.toString()).apply()
+    /** Чаты, открытые через «Новый чат» (видны, даже пока переписки нет). */
+    fun opened(ctx: Context): Set<String> = sp(ctx).getStringSet("opened", emptySet()) ?: emptySet()
+    fun setOpened(ctx: Context, key: String, on: Boolean) {
+        val s = HashSet(opened(ctx))
+        if (if (on) s.add(key) else s.remove(key)) sp(ctx).edit().putStringSet("opened", s).apply()
+    }
     fun isSetUp(ctx: Context) = name(ctx).length >= 2 && org(ctx).length >= 4
 
     fun save(ctx: Context, name: String, dept: String, org: String, extra: String) {

@@ -24,7 +24,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var updBtn: TextView
     private lateinit var search: android.widget.EditText
-    private var mode = ""          // "" — чаты, "search" — результаты поиска, "tasks" — все задания
+    private var mode = ""
+    private var myCodeView: TextView? = null          // "" — чаты, "search" — результаты поиска, "tasks" — все задания
     private val dp get() = { v: Float -> Ui.dpi(this, v) }
 
     private val askNotif = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -47,6 +48,10 @@ class MainActivity : AppCompatActivity() {
         top.addView(TextView(this).apply {
             text = "Чаты"; textSize = 34f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.TEXT)
         }, LinearLayout.LayoutParams(0, -2, 1f))
+        top.addView(TextView(this).apply {
+            text = "✏️"; textSize = 22f; gravity = Gravity.CENTER; contentDescription = "Новый чат"
+            setOnClickListener { newChat() }
+        }, LinearLayout.LayoutParams(d(48f), d(48f)))
         top.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_gear); setPadding(d(10f), d(10f), d(10f), d(10f))
             setOnClickListener { startActivity(Intent(this@MainActivity, SetupActivity::class.java)) }
@@ -54,7 +59,13 @@ class MainActivity : AppCompatActivity() {
         root.addView(top)
         root.addView(TextView(this).apply {
             text = "Вы: " + Prefs.name(this@MainActivity) + Prefs.dept(this@MainActivity).let { if (it.isNotEmpty()) " · $it" else "" }
-            setTextColor(Ui.MUTED); textSize = 15f; setPadding(d(20f), 0, d(20f), d(10f))
+            setTextColor(Ui.MUTED); textSize = 15f; setPadding(d(20f), 0, d(20f), 0)
+        })
+        root.addView(TextView(this).apply {
+            text = "Мой код для внешних контактов: …"; setTextColor(Ui.ACCENT); textSize = 14f
+            setPadding(d(20f), d(2f), d(20f), d(10f))
+            setOnClickListener { showMyCode() }
+            myCodeView = this
         })
         val sr = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(d(16f), 0, d(10f), d(8f))
@@ -195,7 +206,8 @@ class MainActivity : AppCompatActivity() {
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(if (all) "Очистить «Общий чат»?" else "Удалить чат «$title»?")
             .setMessage(if (all) "История общего чата удалится на этом телефоне."
-                else "Переписка удалится на этом телефоне. Если человек снова появится в сети, чат вернётся.")
+                else if (isExt(key)) "Внешний контакт и переписка с ним удалятся на этом телефоне."
+                else "Переписка удалится на этом телефоне. Чат появится снова, если вам напишут.")
             .setPositiveButton(if (all) "Очистить" else "Удалить") { _, _ -> if (Node.running) Node.deleteChat(key); refresh() }
             .setNegativeButton("Отмена", null)
             .show()
@@ -209,10 +221,12 @@ class MainActivity : AppCompatActivity() {
         val d = dp
         list.removeAllViews()
         if (mode.isNotEmpty()) { showResults(); return }
-        val peers = Node.accounts().sortedWith(compareBy({ !it.online }, { it.name.lowercase() }))
+        myCodeView?.text = "Мой код для внешних контактов: ${fmtCode(Node.myCode)}"
+        // как в WhatsApp: только чаты с перепиской (или открытые через «Новый чат»), свежие — выше
+        val peers = Node.visibleChats().sortedWith(compareBy({ -(Node.db.last(it.id)?.ts ?: 0L) }, { it.name.lowercase() }))
         val rows = ArrayList<Triple<String, String, Boolean>>()
         rows.add(Triple(Node.ALL, "Общий чат", true))
-        peers.forEach { rows.add(Triple(it.id, it.title, it.online)) }
+        peers.forEach { rows.add(Triple(it.id, it.title + (if (it.ext) "  🌐" else ""), it.online)) }
         rows.forEachIndexed { i, (key, title, online) ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -244,7 +258,8 @@ class MainActivity : AppCompatActivity() {
             })
             val line2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val preview = if (last == null) {
-                if (key == Node.ALL) "Сообщения для всех" else if (online) "в сети" else "не в сети"
+                if (key == Node.ALL) "Сообщения для всех" else if (isExt(key)) "внешний контакт"
+                else if (online) "в сети" else "не в сети"
             } else {
                 val who = if (last.mine) "Вы: " else if (key == Node.ALL) "${last.senderName}: " else ""
                 who + Ui.snippet(last)
@@ -265,11 +280,73 @@ class MainActivity : AppCompatActivity() {
             if (i < rows.size - 1) list.addView(View(this).apply { setBackgroundColor(Ui.LINE) },
                 LinearLayout.LayoutParams(-1, 1).apply { marginStart = d(74f) })
         }
-        val on = peers.count { it.online }
         val q = Node.db.queued()
         val srv = when (Node.relayOk) { true -> "\nСервер: на связи ✓"; false -> "\nСервер: нет связи"; null -> "" }
-        status.text = "В сети: $on из ${peers.size}" + (if (q > 0) " · в очереди: $q" else "") +
+        status.text = "Новый чат — кнопка ✏️ вверху" + (if (q > 0) " · в очереди: $q" else "") +
             "\nТелефон в сети: ${Node.localIp() ?: "нет Wi-Fi"}" + srv
+    }
+
+    private fun openChat(key: String) {
+        Node.openChatWith(key)
+        startActivity(Intent(this, ChatActivity::class.java).putExtra("chat", key))
+    }
+
+    /** «Новый чат»: сотрудник, внешний контакт или добавить внешний по коду. */
+    private fun newChat() {
+        if (!Node.running) return
+        val keys = ArrayList<String>()
+        val names = ArrayList<String>()
+        keys.add("+"); names.add("➕  Добавить внешний контакт по коду")
+        Node.accounts().sortedBy { it.name.lowercase() }.forEach { keys.add(it.id); names.add(it.title + if (it.online) "  ● в сети" else "") }
+        val cs = Prefs.contacts(this)
+        cs.keys().asSequence().toList().forEach { k ->
+            keys.add("x$k"); names.add(cs.getJSONObject(k).optString("name").ifEmpty { fmtCode(k) } + "  🌐")
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Новый чат")
+            .setItems(names.toTypedArray()) { _, i -> if (keys[i] == "+") addExternal() else openChat(keys[i]) }
+            .setNegativeButton("Отмена", null).show()
+    }
+
+    private fun addExternal() {
+        val d = dp
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(20f), d(8f), d(20f), 0) }
+        box.addView(TextView(this).apply {
+            text = "Попросите человека открыть RafChat и продиктовать «Мой код для внешних контактов» (под вашим именем на главном экране)."
+            textSize = 14f; setTextColor(Ui.MUTED)
+        })
+        val code = android.widget.EditText(this).apply { hint = "Код: XXXX-XXXX-XXXX"; isSingleLine = true
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS }
+        val name = android.widget.EditText(this).apply { hint = "Имя, например: Иванов, поставщик"; isSingleLine = true }
+        box.addView(code); box.addView(name)
+        val dlg = androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Внешний контакт").setView(box)
+            .setPositiveButton("Добавить", null).setNegativeButton("Отмена", null).show()
+        dlg.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val c = normCode(code.text.toString())
+            when {
+                c == Node.myCode -> code.error = "Это ваш собственный код"
+                c.length != 12 -> code.error = "Код — 12 букв и цифр, например ABCD-EF23-4567"
+                else -> { val k = Node.addContact(c, name.text.toString().trim()); dlg.dismiss(); if (k.isNotEmpty()) openChat(k) }
+            }
+        }
+    }
+
+    private fun showMyCode() {
+        if (!Node.running) return
+        val c = fmtCode(Node.myCode)
+        androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Мой код: $c")
+            .setMessage("Это ваш личный код — как номер телефона. Передайте его человеку не из вашей организации " +
+                "(заказчику, поставщику): он добавит вас в RafChat через ✏️ «Новый чат → Добавить внешний контакт», " +
+                "и вы сможете переписываться и пересылать файлы. Переписка идёт через сервер и зашифрована. " +
+                "Код один на все ваши устройства.")
+            .setPositiveButton("Поделиться") { _, _ ->
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_TEXT, "Мой код в RafChat: $c"), "Поделиться кодом"))
+            }
+            .setNeutralButton("Копировать") { _, _ ->
+                (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("RafChat", c))
+            }
+            .setNegativeButton("Закрыть", null).show()
     }
 }
 

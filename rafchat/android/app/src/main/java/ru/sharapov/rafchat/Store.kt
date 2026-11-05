@@ -7,7 +7,9 @@ import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 
 /** Человек — имя + отдел/должность; все его устройства (ПК, телефон, Mac, iPhone) — один чат, как в WhatsApp. */
-data class Account(val id: String, val name: String, val dept: String, val devices: List<Peer>) {
+data class Account(val id: String, val name: String, val dept: String, val devices: List<Peer>, val code: String = "") {
+    /** внешний контакт (не из организации) — переписка через его «почтовый ящик» на сервере */
+    val ext get() = code.isNotEmpty()
     val lan get() = devices.any { it.lan }
     val relay get() = devices.any { it.relay }
     val online get() = lan || relay
@@ -23,6 +25,11 @@ fun uidOf(name: String, dept: String): String {
 
 fun isUid(chat: String) = chat != Node.ALL && chat.length == 16 && chat.startsWith("u")
 
+/** Чат с внешним контактом: «x» + его личный код. */
+fun isExt(chat: String) = chat.length > 4 && chat.startsWith("x")
+fun normCode(c: String) = c.uppercase().filter { it.isLetterOrDigit() }
+fun fmtCode(c: String) = normCode(c).chunked(4).joinToString("-")
+
 data class Peer(
     val id: String, val name: String, val dept: String, val ip: String, val port: Int,
     val plat: String, val lastSeen: Long, val relaySeen: Long = 0, val avh: String = "",
@@ -36,14 +43,14 @@ data class Peer(
 }
 
 /** relay — копия файла лежит на сервере (можно скачать, даже если отправитель не в нашей сети). */
-data class FileMeta(val fid: String, val name: String, val size: Long, val relay: Boolean = false) {
+data class FileMeta(val fid: String, val name: String, val size: Long, val relay: Boolean = false, val xorg: String = "") {
     fun json(): JSONObject = JSONObject().put("fid", fid).put("name", name).put("size", size)
-        .apply { if (relay) put("relay", true) }
+        .apply { if (relay) put("relay", true); if (xorg.isNotEmpty()) put("xorg", xorg) }
 
     companion object {
         fun of(s: String?): FileMeta? = if (s.isNullOrEmpty() || s == "null") null else try {
             val o = JSONObject(s)
-            FileMeta(o.getString("fid"), o.getString("name"), o.getLong("size"), o.optBoolean("relay"))
+            FileMeta(o.getString("fid"), o.getString("name"), o.getLong("size"), o.optBoolean("relay"), o.optString("xorg"))
         } catch (e: Exception) { null }
     }
 }
@@ -238,6 +245,11 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
         ).use { while (it.moveToNext()) out.add(row(it)) }
         return out.reversed()
     }
+
+    @Synchronized
+    fun chatsWithMessages(): Set<String> =
+        readableDatabase.rawQuery("SELECT DISTINCT chat FROM messages", null).use { c ->
+            val s = HashSet<String>(); while (c.moveToNext()) s.add(c.getString(0)); s }
 
     @Synchronized
     fun last(chat: String): Msg? =
