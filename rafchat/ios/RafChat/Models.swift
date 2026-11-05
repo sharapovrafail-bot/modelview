@@ -131,6 +131,9 @@ struct Msg: Codable, Identifiable, Equatable {
     var reply: String? = nil
     /// карточка задания — JSON
     var task: String? = nil
+    /// переслано от (имя); когда прочитано получателем (мс)
+    var fwd: String? = nil
+    var readAt: Int64 = 0
 
     var replyObj: [String: Any]? { Msg.obj(reply) }
     var taskObj: [String: Any]? { Msg.obj(task) }
@@ -146,10 +149,11 @@ struct Msg: Codable, Identifiable, Equatable {
     }
 
     init(id: String, chat: String, sender: String, senderName: String, ts: Int64, text: String, file: FileMeta?,
-         mine: Bool, status: String, local: String?, unread: Bool, reply: String? = nil, task: String? = nil) {
+         mine: Bool, status: String, local: String?, unread: Bool, reply: String? = nil, task: String? = nil,
+         fwd: String? = nil) {
         self.id = id; self.chat = chat; self.sender = sender; self.senderName = senderName; self.ts = ts
         self.text = text; self.file = file; self.mine = mine; self.status = status; self.local = local
-        self.unread = unread; self.reply = reply; self.task = task
+        self.unread = unread; self.reply = reply; self.task = task; self.fwd = fwd
     }
 
     init(from dec: Decoder) throws {
@@ -167,6 +171,8 @@ struct Msg: Codable, Identifiable, Equatable {
         unread = try c.decodeIfPresent(Bool.self, forKey: .unread) ?? false
         reply = try c.decodeIfPresent(String.self, forKey: .reply)
         task = try c.decodeIfPresent(String.self, forKey: .task)
+        fwd = try c.decodeIfPresent(String.self, forKey: .fwd)
+        readAt = try c.decodeIfPresent(Int64.self, forKey: .readAt) ?? 0
     }
 }
 

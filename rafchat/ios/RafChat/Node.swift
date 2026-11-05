@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import SwiftUI
+import UserNotifications
 
 /// Участник сети RafChat — тот же протокол, что у ПК и Android:
 ///  UDP 47800 — маяк «я здесь» {"d": json, "s": HMAC}, TCP 47801 — POST /msg, GET /file?fid=, GET /ping.
@@ -30,6 +31,12 @@ final class Node: ObservableObject {
     @Published var contacts: [String: [String: String]] = Profile.contacts { didSet { Profile.contacts = contacts } }
     /// личный код — как номер телефона для внешних контактов; одинаковый на всех устройствах человека
     var myCode = ""
+    /// кто печатает: чат → время
+    @Published var typing: [String: Date] = [:]
+    /// задание, открытое по QR-коду с листа (rafchat://task/<id>)
+    @Published var pendingTask: String?
+    private var seenSent: [String: String] = [:]
+    private var typingAt = Date.distantPast
     private var xdev: [String: (Date, [String])] = [:]
     var visibleChat: String?
 
@@ -83,6 +90,43 @@ final class Node: ObservableObject {
         Thread.detachNewThread { [weak self] in self?.pingLoop(g) }
         Thread.detachNewThread { [weak self] in self?.relayLoop(g) }
         Thread.detachNewThread { [weak self] in self?.extLoop(g) }
+        scheduleReminders()
+    }
+
+    /// Напоминания о сроке заданий (автору и исполнителю): в 9:00 накануне, в день срока и на следующий день.
+    /// Это уведомления самого iPhone — придут, даже если RafChat закрыт.
+    func scheduleReminders() {
+        let me = Profile.name.trimmingCharacters(in: .whitespaces).lowercased()
+        let df = DateFormatter(); df.dateFormat = "dd.MM.yyyy"
+        var reqs: [UNNotificationRequest] = []
+        let now = Date()
+        for m in messages {
+            guard let t = m.taskObj, let due = (t["due"] as? String).flatMap({ df.date(from: $0) }) else { continue }
+            let st = t["status"] as? String ?? TaskStatus.new
+            if st == TaskStatus.done || st == TaskStatus.ok { continue }
+            let who = (t["who"] as? String ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+            guard m.mine || who == me else { continue }
+            for (off, kind) in [(-1, "Срок — завтра"), (0, "Срок — сегодня"), (1, "Срок прошёл!")] {
+                guard let day = Calendar.current.date(byAdding: .day, value: off, to: due),
+                      let at = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: day), at > now else { continue }
+                let c = UNMutableNotificationContent()
+                c.title = "⏰ \(kind): \(t["title"] as? String ?? "")"
+                c.body = "Статус: \(st)" + ((t["who"] as? String).flatMap { $0.isEmpty ? nil : " · исполнитель: \($0)" } ?? "")
+                c.sound = .default
+                c.userInfo = ["task": m.id]
+                let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: at)
+                reqs.append(UNNotificationRequest(identifier: "due-\(m.id)-\(off)", content: c,
+                                                  trigger: UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)))
+            }
+        }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { ok, _ in
+            guard ok else { return }
+            center.getPendingNotificationRequests { pend in
+                center.removePendingNotificationRequests(withIdentifiers: pend.map { $0.identifier }.filter { $0.hasPrefix("due-") })
+                for r in reqs.prefix(60) { center.add(r) }
+            }
+        }
     }
 
     func stop() {
@@ -355,7 +399,7 @@ final class Node: ObservableObject {
 
     @discardableResult
     func send(chat: String, text: String, file: URL? = nil, fileName: String? = nil,
-              reply: [String: Any]? = nil, task task0: [String: Any]? = nil) -> String {
+              reply: [String: Any]? = nil, task task0: [String: Any]? = nil, fwd: String? = nil) -> String {
         let mid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         var meta: FileMeta?
         if let file = file {
@@ -376,12 +420,13 @@ final class Node: ObservableObject {
         }
         messages.append(Msg(id: mid, chat: chat, sender: id, senderName: Profile.name, ts: ts, text: text, file: meta,
                             mine: true, status: status, local: file?.path, unread: false,
-                            reply: Msg.json(reply), task: Msg.json(task)))
+                            reply: Msg.json(reply), task: Msg.json(task), fwd: fwd))
         var payload: [String: Any] = ["id": mid, "from": id, "name": Profile.name, "dept": Profile.dept, "uid": myUid,
                                       "to": chat, "ts": ts, "text": text,
                                       "file": meta?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
         if let r = reply { payload["reply"] = r }
         if let t = task { payload["task"] = t }
+        if let f = fwd { payload["fwd"] = f }
         if isExt(chat) {            // внешнему контакту: обратный адрес — мой код; моим устройствам — кто это
             let code = String(chat.dropFirst())
             let c = contacts[code] ?? [:]
@@ -421,7 +466,7 @@ final class Node: ObservableObject {
                     if relay && relayDeliver(it.peer, it.payload) {          // иначе — через сервер
                         DispatchQueue.main.async {
                             self.outbox.removeAll { $0.peer == it.peer && $0.msgId == it.msgId }
-                            if !mineDevs.contains(it.peer) { self.viaRelay(it.msgId) }
+                            if !mineDevs.contains(it.peer) && !it.msgId.hasPrefix("seen:") { self.viaRelay(it.msgId) }
                         }
                     }
                     continue
@@ -435,7 +480,7 @@ final class Node: ObservableObject {
                 if Node.syncStatus(req) == 200 {
                     DispatchQueue.main.async {
                         self.outbox.removeAll { $0.peer == it.peer && $0.msgId == it.msgId }
-                        if !mineDevs.contains(it.peer) { self.delivered(it.msgId) }    // копия на моё устройство — не «доставлено»
+                        if !mineDevs.contains(it.peer) && !it.msgId.hasPrefix("seen:") { self.delivered(it.msgId) }    // копия на моё устройство — не «доставлено»
                     }
                 }
             }
@@ -454,7 +499,7 @@ final class Node: ObservableObject {
     }
 
     private func delivered(_ mid: String) {
-        guard let i = messages.firstIndex(where: { $0.id == mid }) else { return }
+        guard let i = messages.firstIndex(where: { $0.id == mid }), messages[i].status != "read" else { return }
         let st = messages[i].status
         if messages[i].chat == Node.all, st.contains("/") {
             let a = Int(st.split(separator: "/")[0]) ?? 0
@@ -477,6 +522,18 @@ final class Node: ObservableObject {
         let to = m["to"] as? String ?? ""
         let meta = FileMeta.from(m["file"])
         let xcode = normCode(m["xcode"] as? String ?? "")
+        let kind = m["type"] as? String ?? ""
+        if (kind == "seen" || kind == "typing") && from != id {
+            DispatchQueue.main.async {
+                if !ip.isEmpty && !ext {
+                    var d: [String: Any] = ["name": m["name"] as? String ?? "", "port": m["port"] as? Int ?? Int(Node.tcpPort)]
+                    if let dp = m["dept"] as? String { d["dept"] = dp }
+                    self.upsert(d, from, ip)
+                }
+                self.onCtl(m, ext)
+            }
+            return
+        }
         DispatchQueue.main.async {
             if ext {                                         // письмо от внешнего контакта (не из организации)
                 var c = self.contacts[xcode] ?? ["name": ""]
@@ -526,8 +583,10 @@ final class Node: ObservableObject {
                           ts: (m["ts"] as? NSNumber)?.int64Value ?? Int64(Date().timeIntervalSince1970 * 1000),
                           text: m["text"] as? String ?? "", file: meta, mine: mine, status: mine ? "delivered" : "received",
                           local: nil, unread: !mine && self.visibleChat != chat,
-                          reply: Msg.json(m["reply"] as? [String: Any]), task: Msg.json(m["task"] as? [String: Any]))
+                          reply: Msg.json(m["reply"] as? [String: Any]), task: Msg.json(m["task"] as? [String: Any]),
+                          fwd: (m["fwd"] as? String).flatMap { $0.isEmpty ? nil : $0 })
             self.messages.append(msg)
+            self.typing[chat] = nil
             self.persist()
             if let meta = meta, meta.size <= Node.autoDownload { self.download(mid) }
         }
@@ -645,6 +704,88 @@ final class Node: ObservableObject {
     func markRead(_ chat: String) {
         var changed = false
         for i in messages.indices where messages[i].chat == chat && messages[i].unread { messages[i].unread = false; changed = true }
+        if changed { persist() }
+        sendSeen(chat)
+    }
+
+    // MARK: «прочитано» и «печатает…» (личные чаты)
+    /// Служебное сообщение: его id — id уже существующего сообщения, поэтому старые версии его пропускают.
+    private func ctl(_ chat: String, _ kind: String, _ ref: String) -> [String: Any] {
+        var m: [String: Any] = ["type": kind, "id": ref, "from": id, "name": Profile.name, "dept": Profile.dept, "uid": myUid,
+                                "to": chat, "ts": Int64(Date().timeIntervalSince1970 * 1000), "port": Int(Node.tcpPort),
+                                "text": "", "file": NSNull()]
+        if isExt(chat) { m["xcode"] = myCode }
+        return m
+    }
+
+    func sendSeen(_ chat: String) {
+        guard chat != Node.all, let last = messages.filter({ $0.chat == chat && !$0.mine }).max(by: { $0.ts < $1.ts }),
+              seenSent[chat] != last.id else { return }
+        seenSent[chat] = last.id
+        var m = ctl(chat, "seen", last.id)
+        m["upto"] = last.ts
+        guard let d = try? JSONSerialization.data(withJSONObject: m), let ps = String(data: d, encoding: .utf8) else { return }
+        let key = "seen:" + chat
+        outbox.removeAll { $0.msgId == key }
+        for t in targets(chat) { outbox.append(OutItem(peer: t, msgId: key, payload: ps)) }
+        persist()
+        kick()
+    }
+
+    func sendTyping(_ chat: String) {
+        guard chat != Node.all, !isExt(chat), Date().timeIntervalSince(typingAt) > 4, let last = last(chat),
+              let acc = account(chat) else { return }
+        typingAt = Date()
+        let m = ctl(chat, "typing", last.id)
+        let devs = acc.devices.filter { $0.online }
+        guard let body = try? JSONSerialization.data(withJSONObject: m) else { return }
+        Thread.detachNewThread { [weak self] in
+            guard let self = self else { return }
+            for p in devs {
+                if p.lan, let url = URL(string: "http://\(p.ip):\(p.port)/msg") {
+                    var req = URLRequest(url: url, timeoutInterval: 3)
+                    req.httpMethod = "POST"; req.httpBody = body
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue(self.authHeader("POST", "/msg", body), forHTTPHeaderField: "X-Auth")
+                    _ = Node.syncStatus(req)
+                } else if self.serverAddr() != nil {
+                    _ = self.relaySend(p.id, m)
+                }
+            }
+        }
+    }
+
+    /// Пришло «прочитано» или «печатает…» (вызывать на главном потоке).
+    private func onCtl(_ m: [String: Any], _ ext: Bool) {
+        let chat: String, mine: Bool
+        if ext { chat = "x" + normCode(m["xcode"] as? String ?? ""); mine = false }
+        else {
+            let from = m["from"] as? String ?? ""
+            let sp = peers.first { $0.id == from }
+            var u = m["uid"] as? String ?? ""
+            if u.isEmpty { u = sp.map { uidOf($0.name, $0.dept) } ?? uidOf(m["name"] as? String ?? "", m["dept"] as? String ?? "") }
+            mine = u == myUid
+            chat = mine ? (m["to"] as? String ?? "") : u
+        }
+        guard !chat.isEmpty, chat != Node.all else { return }
+        if m["type"] as? String == "typing" {
+            if !mine {
+                typing[chat] = Date()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6.5) { self.tick += 1 }
+            }
+            return
+        }
+        let upto = (m["upto"] as? NSNumber)?.int64Value ?? 0
+        var changed = false
+        for i in messages.indices where messages[i].chat == chat && messages[i].ts <= upto {
+            if mine, messages[i].unread { messages[i].unread = false; changed = true }
+            if !mine, messages[i].mine, messages[i].status != "read" {
+                messages[i].status = "read"
+                messages[i].readAt = (m["ts"] as? NSNumber)?.int64Value ?? Int64(Date().timeIntervalSince1970 * 1000)
+                changed = true
+            }
+        }
+        if !mine { typing[chat] = nil }
         if changed { persist() }
     }
     var queued: Int { outbox.count }
@@ -823,6 +964,7 @@ extension Node {
             let mid = m["id"] as? String ?? ""
             DispatchQueue.main.async {
                 if let i = self.messages.firstIndex(where: { $0.id == mid }), self.messages[i].mine, self.messages[i].chat != Node.all,
+                   self.messages[i].status != "read",
                    !self.myDevices.contains(m["from"] as? String ?? "") {
                     self.messages[i].status = "delivered"; self.persist()
                 }
@@ -831,6 +973,7 @@ extension Node {
         }
         guard let from = m["from"] as? String, from != id, m["id"] as? String != nil else { return }
         receive(m, "")
+        if m["type"] as? String == "seen" || m["type"] as? String == "typing" { return }
         _ = relaySend(from, ["type": "ack", "id": m["id"] as? String ?? "", "from": id])
     }
 
@@ -992,7 +1135,7 @@ extension Node {
     func viaRelay(_ mid: String) {
         guard let i = messages.firstIndex(where: { $0.id == mid }) else { return }
         if messages[i].chat == Node.all { delivered(mid); return }
-        if messages[i].status != "delivered" { messages[i].status = "relay"; persist() }
+        if messages[i].status != "delivered" && messages[i].status != "read" { messages[i].status = "relay"; persist() }
     }
 
     /// Сменить статус задания — у себя и у всех, кому оно было отправлено.

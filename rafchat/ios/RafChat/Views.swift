@@ -21,6 +21,9 @@ struct RafChatApp: App {
             }
             .environmentObject(node)
             .tint(Color(red: 0, green: 0.478, blue: 1))
+            .onOpenURL { u in               // QR-код на листе задания: rafchat://task/<id>
+                if u.scheme == "rafchat", u.host == "task" { node.pendingTask = u.lastPathComponent }
+            }
         }
         .onChange(of: phase) { p in
             // iOS усыпляет свёрнутое приложение: при открытии — снова в сеть, при сворачивании — прощаемся
@@ -142,6 +145,14 @@ struct ChatListView: View {
     @State private var showTasks = false
     @State private var path: [Route] = []
     @State private var showNew = false
+    @State private var taskMissing = false
+
+    private func openPendingTask() {
+        guard let mid = node.pendingTask else { return }
+        node.pendingTask = nil
+        if let m = node.messages.first(where: { $0.id == mid }) { path.append(Route(chat: m.chat, focus: m.id)) }
+        else { taskMissing = true }
+    }
     @State private var showAdd = false
     @State private var showCode = false
     @State private var newCode = ""
@@ -255,6 +266,11 @@ struct ChatListView: View {
                 Text("Это ваш личный код — как номер телефона. Передайте его человеку не из вашей организации (заказчику, поставщику): он добавит вас через ✏️ «Новый чат → Добавить внешний контакт», и вы сможете переписываться и пересылать файлы. Переписка идёт через сервер и зашифрована. Код один на все ваши устройства.")
             }
             .sheet(isPresented: $showSettings) { SetupView(first: false) { showSettings = false; node.restart() } }
+            .onChange(of: node.pendingTask) { _ in openPendingTask() }
+            .onAppear { openPendingTask() }
+            .alert("Задание не найдено", isPresented: $taskMissing) {
+                Button("OK", role: .cancel) {}
+            } message: { Text("Этого задания нет на этом iPhone — оно было отправлено не вам.") }
             .refreshable { node.beacon(ask: true, scan: true) }
         }
     }
@@ -333,6 +349,7 @@ struct ChatView: View {
     @State private var flash: String?
     /// файлы, которые прикрепляют к заданию (ответом на карточку)
     @State private var attachTo: [String: Any]? = nil
+    @State private var forwarding: Msg? = nil
 
     private var title: String {
         chat == Node.all ? "Общий чат" : (node.account(chat)?.title ?? "?")
@@ -343,6 +360,7 @@ struct ChatView: View {
             return "\(Defaults.company) · участников: \(node.accounts.count + 1), в сети: \(node.accounts.filter { $0.online }.count + 1)"
         }
         guard let p = node.account(chat) else { return "" }
+        if let t = node.typing[chat], Date().timeIntervalSince(t) < 6.5 { return "печатает…" }
         if p.ext { return "внешний контакт · код \(fmtCode(p.code)) · через сервер" }
         let kinds = p.plats.isEmpty ? "" : " · " + p.plats.joined(separator: ", ")
         return p.lan ? "в сети" + kinds : (p.relay ? "в сети через интернет" + kinds : "не в сети — сообщение дойдёт, когда появится")
@@ -364,7 +382,11 @@ struct ChatView: View {
                                    onReply: { startReply(m) },
                                    onJump: { id in withAnimation { sv.scrollTo(id, anchor: .center) }; blink(id) },
                                    onAttach: { attachTo = ["id": m.id, "name": m.senderName,
-                                                           "text": "📋 " + (m.taskObj?["title"] as? String ?? "")]; importing = true })
+                                                           "text": "📋 " + (m.taskObj?["title"] as? String ?? "")]; importing = true },
+                                   onForward: {
+                                       if m.file != nil && m.local == nil { return }
+                                       forwarding = m
+                                   })
                                 .id(m.id)
                                 .overlay(RoundedRectangle(cornerRadius: 18).fill(Color.yellow.opacity(flash == m.id ? 0.35 : 0)).allowsHitTesting(false))
                         }
@@ -462,9 +484,36 @@ struct ChatView: View {
             }.environmentObject(node)
         }
         .quickLookPreview($preview)
+        .confirmationDialog("Переслать", isPresented: Binding(get: { forwarding != nil }, set: { if !$0 { forwarding = nil } }),
+                            titleVisibility: .visible) {
+            Button("Общий чат") { forward(to: Node.all) }
+            ForEach(forwardTargets) { a in
+                Button(a.title + (a.ext ? "  🌐" : "")) { forward(to: a.id) }
+            }
+            Button("Отмена", role: .cancel) { forwarding = nil }
+        }
+        .onChange(of: text) { t in if !t.trimmingCharacters(in: .whitespaces).isEmpty { node.sendTyping(chat) } }
         .onAppear { node.visibleChat = chat; node.markRead(chat) }
         .onDisappear { node.visibleChat = nil }
         .onChange(of: msgs.count) { _ in node.markRead(chat) }
+    }
+
+    private var forwardTargets: [Account] {
+        var seen = Set<String>()
+        return (node.visibleChats + node.accounts.sorted { $0.name.lowercased() < $1.name.lowercased() })
+            .filter { $0.id != chat && seen.insert($0.id).inserted }
+    }
+
+    /// Переслать сообщение (текст, файл, задание) в другой чат.
+    private func forward(to: String) {
+        guard let m = forwarding else { return }
+        forwarding = nil
+        let who = m.fwd ?? (m.mine ? Profile.name : m.senderName)
+        var task = m.taskObj
+        if task != nil { task?["status"] = TaskStatus.new }
+        node.openChatWith(to)
+        _ = node.send(chat: to, text: m.text, file: m.local.map { URL(fileURLWithPath: $0) }, fileName: m.file?.name,
+                      task: task, fwd: who)
     }
 
     private func blink(_ id: String) {
@@ -498,6 +547,7 @@ struct Bubble: View {
     var onReply: () -> Void = {}
     var onJump: (String) -> Void = { _ in }
     var onAttach: () -> Void = {}
+    var onForward: () -> Void = {}
     @EnvironmentObject var node: Node
 
     private var statusText: String {
@@ -505,6 +555,7 @@ struct Bubble: View {
         if m.status == "queued" { return " 🕓" }
         if m.status == "relay" { return " ✓ на сервере" }
         if m.status == "delivered" { return " ✓✓" }
+        if m.status == "read" { return " ✓✓ прочитано " + timeText(m.readAt > 0 ? m.readAt : m.ts) }
         let p = m.status.split(separator: "/")
         if p.count == 2 { return p[0] == p[1] && p[1] != "0" ? " ✓✓" : " ✓ \(p[0])/\(p[1])" }
         return ""
@@ -519,6 +570,9 @@ struct Bubble: View {
             VStack(alignment: .leading, spacing: 4) {
                 if showName && !m.mine {
                     Text(m.senderName).font(.footnote.bold()).foregroundColor(avatarColor(m.sender))
+                }
+                if let w = m.fwd {
+                    Text("↪ Переслано от \(w)").font(.caption.italic()).foregroundColor(mu)
                 }
                 if let r = m.replyObj {
                     Button { onJump(r["id"] as? String ?? "") } label: {
@@ -545,6 +599,7 @@ struct Bubble: View {
             .fixedSize(horizontal: false, vertical: true)
             .contextMenu {
                 Button { onReply() } label: { Label("Ответить", systemImage: "arrowshape.turn.up.left") }
+                Button { onForward() } label: { Label("Переслать", systemImage: "arrowshape.turn.up.right") }
                 if !m.text.isEmpty && m.task == nil {
                     Button { UIPasteboard.general.string = m.text } label: { Label("Копировать текст", systemImage: "doc.on.doc") }
                 }
