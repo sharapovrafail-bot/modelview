@@ -2,7 +2,7 @@
 
 # Программы для цеха ЧПУ · Software for CNC shops
 
-**RafChat** — рабочий чат и файлы для цеха · **RafCAD View** — быстрый просмотр STEP/STL/DXF/DWG · **RafLink** — телефон ↔ ПК по Wi-Fi
+**RafCAD View** — быстрый просмотр STEP/STL/DXF/DWG · **RafLink** — телефон ↔ ПК по Wi-Fi
 
 **STZ** — расчёт зубчатых передач, наладка 5К32А и 525, симулятор УП Fanuc, передача УП на станок
 
@@ -13,36 +13,6 @@
 ⭐ Если программы пригодились — поставьте звезду, это помогает другим их найти.
 
 </div>
-
----
-
-## 💬 RafChat — чат для цеха и офиса
-
-![RafChat](docs/img/rafchat-light.png)
-
-Как WhatsApp, только свой: переписка и файлы идут **напрямую по локальной сети** организации,
-а вне офиса — через **ваш собственный сервер** с шифрованием. Никаких чужих облаков.
-
-- **Карточки заданий для цеха**: деталь, чертёж/УП, материал, количество, срок, исполнитель;
-  статусы «Новое → В работе → Готово → Принято ОТК / Доработка» кнопками прямо на карточке.
-- **Лист задания с QR-кодом** — распечатать и положить к детали; телефон по QR открывает задание.
-- **Чертежи и модели прямо в переписке**: PDF, DXF, STL — миниатюрой; у STEP — название детали и CAD.
-- **Файлы любого размера** по сети (УП, модели, фото), докачка при обрыве.
-- **Голосовые сообщения**, фото с камеры, смайлики, ответы с цитатой, пересылка, поиск по переписке.
-- **«печатает…»** и **«✓✓ прочитано 14:05»**, напоминания о сроке задания, **отчёт по заданиям в Excel**.
-- Один человек — **один чат на всех его устройствах** (ПК, телефон).
-- **Внешние контакты** (заказчики, поставщики) по личному коду — без доступа к общему чату.
-- **Тёмная тема**, автообновление.
-
-<details><summary>Тёмная тема</summary>
-
-![RafChat — тёмная тема](docs/img/rafchat-dark.png)
-
-</details>
-
-**Скачать:** [Releases → rafchat-latest](https://github.com/sharapovrafail-bot/modelview/releases/tag/rafchat-latest)
-— Windows (`.exe`), Android (`.apk`), Mac (`.dmg`), iPhone (`.ipa` через Sideloadly).
-Подробно: [rafchat/README.md](rafchat/README.md).
 
 ---
 
@@ -112,5 +82,5 @@ Mac — [mac-latest](https://github.com/sharapovrafail-bot/modelview/releases/ta
 Пишите на **rafail@sharapov-cnc.ru** или в [Issues](https://github.com/sharapovrafail-bot/modelview/issues).
 Программы делаются для реального производства — замечания из цеха приветствуются.
 
-<sub>Keywords: CNC, ЧПУ, chat for manufacturing, shop floor messenger, LAN chat, STEP viewer, STL viewer, DXF viewer, DWG viewer,
+<sub>Keywords: CNC, ЧПУ, STEP viewer, STL viewer, DXF viewer, DWG viewer,
 CAD viewer, Fusion 360, SolidWorks, Fanuc, G-code, file transfer phone to PC.</sub>
