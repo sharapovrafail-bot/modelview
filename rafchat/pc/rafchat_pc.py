@@ -37,7 +37,7 @@ import common as C
 from previews import PREVIEW_EXT, STEP_EXT, make_preview, step_info
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.7.0"
+APP_VER = "0.8.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
