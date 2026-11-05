@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Встроено в установщик (как rafchat/defaults.json у ПК и Android).
@@ -41,6 +42,30 @@ struct Peer: Codable, Identifiable, Equatable {
         relaySeen = try c.decodeIfPresent(Double.self, forKey: .relaySeen) ?? 0
     }
 }
+
+/// Человек — имя + отдел/должность; все его устройства (ПК, телефон, Mac, iPhone) — один чат, как в WhatsApp.
+struct Account: Identifiable {
+    var id: String
+    var name: String
+    var dept: String
+    var devices: [Peer]
+    var lan: Bool { devices.contains { $0.lan } }
+    var relay: Bool { devices.contains { $0.relay } }
+    var online: Bool { lan || relay }
+    var title: String { dept.isEmpty ? name : "\(name) · \(dept)" }
+    var plats: [String] {
+        let names = ["android": "телефон", "ios": "iPhone", "pc": "ПК"]
+        return Array(Set(devices.filter { $0.online }.map { names[$0.plat] ?? $0.plat })).sorted()
+    }
+}
+
+func uidOf(_ name: String, _ dept: String) -> String {
+    let k = name.trimmingCharacters(in: .whitespaces).lowercased() + "|" + dept.trimmingCharacters(in: .whitespaces).lowercased()
+    let h = Insecure.SHA1.hash(data: Data(k.utf8)).map { String(format: "%02x", $0) }.joined()
+    return "u" + String(h.prefix(15))
+}
+
+func isUid(_ chat: String) -> Bool { chat != Node.all && chat.count == 16 && chat.hasPrefix("u") }
 
 struct FileMeta: Codable, Equatable {
     var fid: String

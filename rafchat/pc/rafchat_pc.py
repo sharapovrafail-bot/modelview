@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QFil
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.5.5"
+APP_VER = "0.6.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -54,6 +54,16 @@ RELAY_FILE_MAX = 50 * 1024 * 1024       # через сервер — файлы
 RELAY_ONLINE_SEC = 75                   # «в сети через интернет», если опрашивал сервер не позже 75 с назад
 ONLINE_SEC = 15                         # «в сети», если маяк был не позже 15 с назад
 ALL = "all"
+
+
+def uid_of(name: str, dept: str) -> str:
+    """Человек = имя + отдел/должность. Все его устройства (ПК, телефон, Mac, iPhone) — один чат, как в WhatsApp."""
+    key = f"{(name or '').strip().lower()}|{(dept or '').strip().lower()}"
+    return "u" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:15]
+
+
+def is_uid(chat: str) -> bool:
+    return bool(chat) and chat != ALL and chat.startswith("u") and len(chat) == 16
 
 
 def default_downloads() -> Path:
@@ -250,6 +260,7 @@ class Node(QObject):
     # ---------- запуск
     def start(self):
         node = self
+        self._migrate_chats()
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -497,15 +508,62 @@ class Node(QObject):
         self.peers_changed.emit()
 
     def delete_chat(self, key):
-        """Удалить чат: переписку и очередь; личный чат — вместе с участником (вернётся, если появится снова)."""
+        """Удалить чат: переписку и очередь; личный чат — вместе со всеми устройствами человека
+        (вернутся, если он снова появится в сети)."""
         self.store.q("DELETE FROM messages WHERE chat=?", (key,))
         if key != ALL:
-            self.store.q("DELETE FROM outbox WHERE peer=?", (key,))
-            self.store.q("DELETE FROM peers WHERE id=?", (key,))
-            self.cfg.setdefault("hidden", {})[key] = time.time()
+            hidden = self.cfg.setdefault("hidden", {})
+            for dev in self.devices(key) or [key]:
+                self.store.q("DELETE FROM outbox WHERE peer=?", (dev,))
+                self.store.q("DELETE FROM peers WHERE id=?", (dev,))
+                hidden[dev] = time.time()
+                (AVATAR_DIR / f"{dev}.jpg").unlink(missing_ok=True)
             save_cfg(self.cfg)
-            (AVATAR_DIR / f"{key}.jpg").unlink(missing_ok=True)
         self.peers_changed.emit()
+
+    # ---------- люди (учётные записи) поверх устройств
+    @property
+    def my_uid(self):
+        return uid_of(self.cfg.get("name", ""), self.cfg.get("dept", ""))
+
+    def devices(self, uid):
+        """Устройства человека (ПК, телефон…)."""
+        return [p["id"] for p in self.peers() if uid_of(p["name"], p["dept"]) == uid]
+
+    def my_devices(self):
+        """Мои другие устройства: им уходит копия моих сообщений, чтобы переписка была одинаковой везде."""
+        mine = self.my_uid
+        return [p["id"] for p in self.peers() if uid_of(p["name"], p["dept"]) == mine]
+
+    def accounts(self):
+        """Коллеги — по одному на человека, а не на устройство."""
+        mine = self.my_uid
+        acc = {}
+        for p in self.peers():
+            u = uid_of(p["name"], p["dept"])
+            if u == mine:
+                continue
+            a = acc.setdefault(u, dict(id=u, name=p["name"], dept=p["dept"], lan=False, relay=False, online=False,
+                                       last_seen=0, plats=set(), photo=None, devices=[]))
+            a["devices"].append(p["id"])
+            a["lan"] |= p["lan"]
+            a["relay"] |= p["relay"]
+            a["online"] |= p["online"]
+            if p["online"] and p["plat"]:
+                a["plats"].add(p["plat"])
+            a["last_seen"] = max(a["last_seen"], p["last_seen"])
+            if p.get("photo") and (a["photo"] is None or p["online"]):
+                a["photo"] = p["photo"]
+        return list(acc.values())
+
+    def account(self, uid):
+        return next((a for a in self.accounts() if a["id"] == uid), None)
+
+    def _migrate_chats(self):
+        """Переписка, которая хранилась по устройствам, переезжает в чат человека."""
+        for p in self.peers():
+            u = uid_of(p["name"], p["dept"])
+            self.store.q("UPDATE messages SET chat=? WHERE chat=?", (u, p["id"]))
 
     def _upsert(self, d, ip):
         """Запомнить участника (из маяка, сообщения или ответа на /ping). Возвращает (был ли известен, был ли в сети)."""
@@ -521,8 +579,9 @@ class Node(QObject):
                      (d["id"], d.get("name") or (prev[1] if prev else "?"),
                       d.get("dept", prev[2] if prev else "") or "", ip, int(d.get("port") or 47801),
                       d.get("plat", ""), time.time()))
+        if not prev or (prev[1], prev[2]) != (d.get("name") or prev[1], d.get("dept", prev[2]) or ""):
+            self._migrate_chats()
         if not prev:
-            self._merge_dupes(d["id"])
             self._catch_up(d["id"])
         if not was_online:
             self._wake.set()                        # у нас может быть очередь для него
@@ -554,11 +613,16 @@ class Node(QObject):
             self.peers_changed.emit()
 
     def _catch_up(self, pid):
-        """Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки."""
+        """Новое устройство: дослать мои сообщения «Общего чата» и нашу личную переписку за последние сутки."""
         since = now_ms() - 86400 * 1000
-        for mid, ts, text, file, status, reply, task in self.store.q(
-                "SELECT id,ts,text,file,status,reply,task FROM messages WHERE chat=? AND mine=1 AND ts>?", (ALL, since)):
-            m = {"id": mid, "from": self.id, "name": self.cfg["name"], "to": ALL, "ts": ts, "text": text or "",
+        p = self.peer(pid)
+        u = uid_of(p["name"], p["dept"]) if p else None
+        chats = [ALL] + ([u] if u and u != self.my_uid else [])
+        for chat, mid, ts, text, file, status, reply, task in self.store.q(
+                "SELECT chat,id,ts,text,file,status,reply,task FROM messages WHERE mine=1 AND ts>? AND chat IN (%s)"
+                % ",".join("?" * len(chats)), (since, *chats)):
+            m = {"id": mid, "from": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
+                 "uid": self.my_uid, "to": chat, "ts": ts, "text": text or "",
                  "file": json.loads(file) if file else None, "port": TCP_PORT}
             if reply:
                 m["reply"] = json.loads(reply)
@@ -566,7 +630,7 @@ class Node(QObject):
                 m["task"] = json.loads(task)
             self.store.q("INSERT OR IGNORE INTO outbox(peer,msg_id,payload) VALUES(?,?,?)",
                          (pid, mid, json.dumps(m, ensure_ascii=False)))
-            if status and "/" in status:
+            if chat == ALL and status and "/" in status:
                 a, b = status.split("/")
                 self.store.q("UPDATE messages SET status=? WHERE id=?", (f"{a}/{int(b) + 1}", mid))
 
@@ -639,15 +703,15 @@ class Node(QObject):
             fid = uuid.uuid4().hex
             self.store.q("INSERT INTO files(fid,path) VALUES(?,?)", (fid, str(file)))
             fmeta = {"fid": fid, "name": file.name, "size": file.stat().st_size}
-        m = {"id": mid, "from": self.id, "name": self.cfg["name"], "to": chat, "ts": now_ms(), "text": text,
-             "file": fmeta, "port": TCP_PORT}
+        m = {"id": mid, "from": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
+             "uid": self.my_uid, "to": chat, "ts": now_ms(), "text": text, "file": fmeta, "port": TCP_PORT}
         if reply:
             m["reply"] = reply
         if task:
             task = dict(task, status=task.get("status") or TASK_NEW, by=self.cfg["name"], at=m["ts"])
             m["task"] = task
-        targets = [p["id"] for p in self.peers()] if chat == ALL else [chat]
-        status = f"0/{len(targets)}" if chat == ALL else "queued"
+        targets = self._targets(chat)
+        status = f"0/{len([t for t in targets if t not in self.my_devices()])}" if chat == ALL else "queued"
         self.store.q("INSERT INTO messages(id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task) "
                      "VALUES(?,?,?,?,?,?,?,1,?,?,?,?)",
                      (mid, chat, self.id, self.cfg["name"], m["ts"], text, json.dumps(fmeta) if fmeta else None,
@@ -675,11 +739,21 @@ class Node(QObject):
         upd = {"id": uuid.uuid4().hex, "from": self.id, "name": self.cfg["name"], "to": chat, "ts": ts,
                "type": "task", "task_id": mid, "status": status, "port": TCP_PORT,
                "text": f"📋 «{task.get('title', '')}» — {status}", "file": None}
-        targets = [p["id"] for p in self.peers()] if chat == ALL else [chat]
+        targets = self._targets(chat)
         payload = json.dumps(upd, ensure_ascii=False)
         for t in targets:
             self.store.q("INSERT OR IGNORE INTO outbox(peer,msg_id,payload) VALUES(?,?,?)", (t, upd["id"], payload))
         self._wake.set()
+
+    def _targets(self, chat):
+        """Кому отправить: всем (общий чат) или всем устройствам человека и моим другим устройствам."""
+        if chat == ALL:
+            return [p["id"] for p in self.peers()]
+        if is_uid(chat):
+            # устройства, молчащие больше 2 недель (старые установки), не ждём
+            fresh = {p["id"] for p in self.peers() if time.time() - p["last_seen"] < 14 * 86400}
+            return [d for d in dict.fromkeys(self.devices(chat) + self.my_devices()) if d in fresh]
+        return [chat]                                   # старый формат — конкретное устройство
 
     def _outbox_loop(self):
         while self.running:
@@ -687,6 +761,7 @@ class Node(QObject):
             self._wake.clear()
             online = {p["id"]: p for p in self.peers() if p["lan"]}
             relay = bool(self.server_addr())
+            mine_devs = set(self.my_devices())
             for peer_id, mid, payload in self.store.q("SELECT peer,msg_id,payload FROM outbox"):
                 p = online.get(peer_id)
                 ok = False
@@ -700,11 +775,13 @@ class Node(QObject):
                         ok = False
                     if ok:
                         self.store.q("DELETE FROM outbox WHERE peer=? AND msg_id=?", (peer_id, mid))
-                        self._delivered(mid)
+                        if peer_id not in mine_devs:       # копия на моё устройство — не «доставлено»
+                            self._delivered(mid)
                         continue
                 if relay and self._relay_deliver(peer_id, payload):   # иначе — через сервер
                     self.store.q("DELETE FROM outbox WHERE peer=? AND msg_id=?", (peer_id, mid))
-                    self._via_relay(mid)
+                    if peer_id not in mine_devs:
+                        self._via_relay(mid)
 
     def _via_relay(self, mid):
         """Сообщение передано на сервер (✓); «✓✓» — когда получатель подтвердит."""
@@ -837,10 +914,6 @@ class Node(QObject):
             # пока устройство само не выйдет на связь
             if d["id"] in hidden or time.time() - seen > 3 * 86400:
                 return
-            # прежняя установка этого же устройства (то же имя и отдел, что у меня) — не показываем
-            if (d.get("name") or "").strip().lower() == (self.cfg.get("name") or "").strip().lower() and \
-                    (d.get("dept") or "").strip().lower() == (self.cfg.get("dept") or "").strip().lower():
-                return
         if d["id"] in hidden:
             hidden.pop(d["id"], None)
             save_cfg(self.cfg)
@@ -854,8 +927,7 @@ class Node(QObject):
             self.store.q("INSERT INTO peers(id,name,dept,ip,port,plat,last_seen,relay_seen) VALUES(?,?,?,?,?,?,0,?)",
                          (d["id"], d.get("name") or "?", d.get("dept") or "", "", int(d.get("port") or 47801),
                           d.get("plat", ""), seen))
-            if time.time() - seen < RELAY_ONLINE_SEC:
-                self._merge_dupes(d["id"])
+            self._migrate_chats()
             self._catch_up(d["id"])
         if not was and time.time() - seen < RELAY_ONLINE_SEC:
             self._wake.set()
@@ -901,7 +973,7 @@ class Node(QObject):
     def _relay_item(self, m):
         if m.get("type") == "ack":                          # получатель подтвердил — ✓✓
             row = self.store.q("SELECT chat,mine FROM messages WHERE id=?", (m.get("id"),), one=True)
-            if row and row[1] and row[0] != ALL:
+            if row and row[1] and row[0] != ALL and m.get("from") not in self.my_devices():
                 self.store.q("UPDATE messages SET status='delivered' WHERE id=?", (m["id"],))
                 self.message.emit(m["id"], False)
             return
@@ -927,6 +999,8 @@ class Node(QObject):
     def receive(self, m, ip):
         if m.get("from") and m["from"] != self.id:
             d = {"id": m["from"], "name": m.get("name"), "port": m.get("port") or 47801, "plat": m.get("plat", "")}
+            if "dept" in m:
+                d["dept"] = m.get("dept") or ""
             if ip:
                 self._upsert(d, ip)            # пришло сообщение по сети — значит, отправитель в сети
             else:
@@ -944,13 +1018,24 @@ class Node(QObject):
             return
         if self.store.q("SELECT 1 FROM messages WHERE id=?", (m["id"],), one=True):
             return                                  # повтор после обрыва — уже есть
-        chat = ALL if m.get("to") == ALL else m["from"]
+        # чат — это человек (имя + должность), а не его устройство
+        sp = self.peer(m["from"])
+        s_uid = m.get("uid") or (uid_of(sp["name"], sp["dept"]) if sp else uid_of(m.get("name", ""), m.get("dept", "")))
+        mine = s_uid == self.my_uid                 # моё сообщение с другого моего устройства
+        if m.get("to") == ALL:
+            chat = ALL
+        elif mine:
+            chat = m.get("to") if is_uid(m.get("to", "")) else None
+            if not chat or chat == self.my_uid:
+                return
+        else:
+            chat = s_uid
         f = m.get("file")
         reply, task = m.get("reply"), m.get("task")
         self.store.q("INSERT INTO messages(id,chat,sender,sender_name,ts,text,file,mine,status,local,unread,reply,task) "
-                     "VALUES(?,?,?,?,?,?,?,0,?,NULL,1,?,?)",
+                     "VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)",
                      (m["id"], chat, m["from"], m.get("name", "?"), int(m.get("ts") or now_ms()), m.get("text", ""),
-                      json.dumps(f) if f else None, "received",
+                      json.dumps(f) if f else None, int(mine), "delivered" if mine else "received", int(not mine),
                       json.dumps(reply, ensure_ascii=False) if isinstance(reply, dict) else None,
                       json.dumps(task, ensure_ascii=False) if isinstance(task, dict) else None))
         self.message.emit(m["id"], True)
@@ -1907,7 +1992,7 @@ class ChatWindow(QMainWindow):
         cur = self.chat
         self.chats.blockSignals(True)
         self.chats.clear()
-        peers = sorted(self.node.peers(), key=lambda p: (not p["online"], p["name"].lower()))
+        peers = sorted(self.node.accounts(), key=lambda p: (not p["online"], p["name"].lower()))
         online = sum(p["online"] for p in peers)
         entries = [(ALL, "Общий чат", True, avatar("", "", 44, group=True))]
         for p in peers:
@@ -2041,20 +2126,21 @@ class ChatWindow(QMainWindow):
 
     def _update_head(self):
         if self.chat == ALL:
-            peers = self.node.peers()
+            peers = self.node.accounts()
             on = sum(p["online"] for p in peers)
             self.head_av.setPixmap(avatar("", "", 38, group=True))
             self.head_title.setText("Общий чат" + (f" · {company()}" if company() else ""))
             self.head_sub.setText(f"Корпоративный чат · участников: {len(peers) + 1}, в сети: {on + 1}")
         else:
-            p = self.node.peer(self.chat)
+            p = self.node.account(self.chat)
             if not p:
                 return
             self.head_av.setPixmap(avatar(p["name"], p["id"], 38, photo=p.get("photo")))
             self.head_title.setText(p["name"] + (f" · {p['dept']}" if p["dept"] else ""))
             if p["online"]:
-                kind = {"android": " · телефон", "ios": " · iPhone"}.get(p["plat"], "")
-                self.head_sub.setText(("в сети" if p["lan"] else "в сети через интернет") + kind)
+                names = {"android": "телефон", "ios": "iPhone", "pc": "ПК"}
+                kind = ", ".join(sorted(names.get(x, x) for x in p["plats"]))
+                self.head_sub.setText(("в сети" if p["lan"] else "в сети через интернет") + (f" · {kind}" if kind else ""))
             else:
                 seen = datetime.fromtimestamp(p["last_seen"]).strftime("%d.%m %H:%M") if p["last_seen"] else "—"
                 self.head_sub.setText(f"не в сети, был(а) {seen} — сообщения дойдут, когда появится")
@@ -2163,7 +2249,7 @@ class ChatWindow(QMainWindow):
 
     # ---------- задания
     def new_task(self):
-        d = TaskDialog(self.node.peers(), self)
+        d = TaskDialog(self.node.accounts(), self)
         if d.exec() == QDialog.Accepted:
             t = d.value()
             tid = self.node.send(self.chat, task_fallback(t), task=t, reply=self._take_reply())
@@ -2207,7 +2293,7 @@ class ChatWindow(QMainWindow):
     def _chat_title(self, chat):
         if chat == ALL:
             return "Общий чат"
-        p = self.node.peer(chat)
+        p = self.node.account(chat) or self.node.peer(chat)
         return p["name"] if p else "?"
 
     def _show_results(self, items, empty, tasks=False):
@@ -2311,7 +2397,7 @@ class ChatWindow(QMainWindow):
 
     def _tray_icon(self) -> QIcon:
         """Значок у часов с красным кружком непрочитанных."""
-        total = sum(self.node.last_and_unread(k)[1] for k in [ALL] + [p["id"] for p in self.node.peers()])
+        total = sum(self.node.last_and_unread(k)[1] for k in [ALL] + [p["id"] for p in self.node.accounts()])
         pm = C.app_icon_pixmap(64)
         if total:
             p = QPainter(pm)

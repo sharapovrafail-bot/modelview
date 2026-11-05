@@ -99,7 +99,7 @@ object Node {
         thread(name = "rc-beacon", isDaemon = true) { beaconLoop() }
         thread(name = "rc-outbox", isDaemon = true) { outboxLoop() }
         thread(name = "rc-ping", isDaemon = true) { pingLoop() }
-        try { dropSelfGhosts() } catch (_: Exception) {}
+        try { migrateChats() } catch (_: Exception) {}
         Prefs.relayAlt(ctx).let { (p, t) -> if (p > 0) { altPort = p; altTls = t } }
         thread(name = "rc-relay", isDaemon = true) { relayLoop() }
     }
@@ -269,23 +269,42 @@ object Node {
         }
     }
 
-    private fun mergeDupes(pid: String) {
-        val gone = db.mergeDupes(pid)
-        for (old in gone) { avatarFile(old)?.delete(); Prefs.setHidden(ctx, old, true) }
-        if (gone.isNotEmpty()) changed()
-    }
+    // ---------- люди поверх устройств (один чат на человека)
+    fun myUid() = uidOf(Prefs.name(ctx), Prefs.dept(ctx))
+    fun devices(uid: String) = db.peers().filter { uidOf(it.name, it.dept) == uid }.map { it.id }
+    /** Мои другие устройства: им уходит копия моих сообщений, чтобы переписка была одинаковой везде. */
+    fun myDevices() = devices(myUid())
 
-    /** Убрать уже сохранённые прежние установки себя (то же имя и отдел, не в сети). */
-    fun dropSelfGhosts() {
-        val me = Prefs.name(ctx).trim(); val dep = Prefs.dept(ctx).trim()
-        for (p in db.peers()) if (!p.online && p.name.trim().equals(me, true) && p.dept.trim().equals(dep, true)) {
-            db.deleteChat(p.id); Prefs.setHidden(ctx, p.id, true)
+    fun accounts(): List<Account> {
+        val mine = myUid()
+        return db.peers().groupBy { uidOf(it.name, it.dept) }.filterKeys { it != mine }.map { (u, ps) ->
+            val main = ps.maxByOrNull { maxOf(it.lastSeen, it.relaySeen) } ?: ps[0]
+            Account(u, main.name, main.dept, ps)
         }
     }
 
+    fun account(uid: String) = accounts().firstOrNull { it.id == uid }
+
+    /** Фото человека — с любого его устройства. */
+    fun accountPhoto(uid: String): File? = devices(uid).firstNotNullOfOrNull { avatarFile(it) }
+
+    fun migrateChats() {
+        for (p in db.peers()) db.renameChat(p.id, uidOf(p.name, p.dept))
+    }
+
+    private fun targets(chat: String): List<String> {
+        if (chat == ALL) return db.peers().map { it.id }
+        if (!isUid(chat)) return listOf(chat)                 // старый формат — конкретное устройство
+        val now = System.currentTimeMillis()
+        val fresh = db.peers().filter { now - maxOf(it.lastSeen, it.relaySeen) < 14 * 86_400_000L }.map { it.id }.toSet()
+        return (devices(chat) + myDevices()).distinct().filter { it in fresh }
+    }
+
     fun deleteChat(key: String) {
+        if (key != ALL) for (dev in devices(key).ifEmpty { listOf(key) }) {
+            db.deleteChat(dev); avatarFile(dev)?.delete(); Prefs.setHidden(ctx, dev, true)
+        }
         db.deleteChat(key)
-        if (key != ALL) { avatarFile(key)?.delete(); Prefs.setHidden(ctx, key, true) }
         changed()
     }
 
@@ -315,23 +334,28 @@ object Node {
             d.optString("plat", "").ifEmpty { prev?.plat ?: "" },
             System.currentTimeMillis()
         )
-        if (prev == null) { mergeDupes(pid); catchUp(pid) }
+        if (prev == null || prev.name != d.optString("name", prev.name) || prev.dept != d.optString("dept", prev.dept)) migrateChats()
+        if (prev == null) catchUp(pid)
         checkAvatar(pid, d.optString("avh", ""), ip, d.optInt("port", TCP))
         if (!wasOnline) { kick(); changed() }
         return !wasOnline
     }
 
-    /** Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки. */
+    /** Новое устройство: дослать мои сообщения «Общего чата» и нашу личную переписку за последние сутки. */
     private fun catchUp(pid: String) {
         val since = System.currentTimeMillis() - 86_400_000L
-        for (m in db.history(ALL, 500)) {
+        val p = db.peer(pid)
+        val u = p?.let { uidOf(it.name, it.dept) }
+        val msgs = db.history(ALL, 500) + (if (u != null && u != myUid()) db.history(u, 300) else emptyList())
+        for (m in msgs) {
             if (!m.mine || m.ts < since) continue
-            val payload = JSONObject().put("id", m.id).put("from", id).put("name", Prefs.name(ctx)).put("to", ALL)
+            val payload = JSONObject().put("id", m.id).put("from", id).put("name", Prefs.name(ctx)).put("to", m.chat)
+                .put("dept", Prefs.dept(ctx)).put("uid", myUid())
                 .put("ts", m.ts).put("text", m.text).put("file", m.file?.json() ?: JSONObject.NULL).put("port", TCP)
             m.replyObj?.let { payload.put("reply", it) }
             m.taskObj?.let { payload.put("task", it) }
             db.addOutbox(pid, m.id, payload.toString())
-            if (m.status.contains('/')) {
+            if (m.chat == ALL && m.status.contains('/')) {
                 val b = m.status.substringAfter('/').toIntOrNull() ?: 0
                 db.setStatus(m.id, m.status.substringBefore('/') + "/" + (b + 1))
             }
@@ -495,13 +519,15 @@ object Node {
             meta = FileMeta(fid, fileName ?: file.name, file.length())
         }
         val ts = System.currentTimeMillis()
-        val targets = if (chat == ALL) db.peers().map { it.id } else listOf(chat)
-        val status = if (chat == ALL) "0/${targets.size}" else "queued"
+        val targets = targets(chat)
+        val mineDevs = myDevices().toSet()
+        val status = if (chat == ALL) "0/${targets.count { it !in mineDevs }}" else "queued"
         val task = task0?.let { JSONObject(it.toString()).put("status", it.optString("status").ifEmpty { TASK_NEW })
             .put("by", Prefs.name(ctx)).put("at", ts) }
         db.insertMsg(Msg(mid, chat, id, Prefs.name(ctx), ts, text, meta, true, status, file?.path,
             reply?.toString(), task?.toString()), false)
         val pj = JSONObject().put("id", mid).put("from", id).put("name", Prefs.name(ctx)).put("to", chat)
+            .put("dept", Prefs.dept(ctx)).put("uid", myUid())
             .put("ts", ts).put("text", text).put("file", meta?.json() ?: JSONObject.NULL).put("port", TCP)
         if (reply != null) pj.put("reply", reply)
         if (task != null) pj.put("task", task)
@@ -525,8 +551,7 @@ object Node {
         val upd = JSONObject().put("id", uid).put("from", id).put("name", Prefs.name(ctx)).put("to", m.chat).put("ts", ts)
             .put("type", "task").put("task_id", mid).put("status", st).put("port", TCP).put("file", JSONObject.NULL)
             .put("text", "📋 «${t.optString("title")}» — $st").toString()
-        val targets = if (m.chat == ALL) db.peers().map { it.id } else listOf(m.chat)
-        for (x in targets) db.addOutbox(x, uid, upd)
+        for (x in targets(m.chat)) db.addOutbox(x, uid, upd)
         kick()
     }
 
@@ -536,12 +561,13 @@ object Node {
             if (!running) break
             val online = db.peers().filter { it.lan }.associateBy { it.id }
             val relay = serverAddr() != null
+            val mineDevs = myDevices().toSet()          // копия на моё устройство — не «доставлено»
             for ((peer, mid, payload) in db.outbox()) {
                 val p = online[peer]
                 if (p == null) {
                     if (relay && relayDeliver(peer, payload)) {          // не в одной сети — через сервер
                         db.delOutbox(peer, mid)
-                        viaRelay(mid)
+                        if (peer !in mineDevs) viaRelay(mid)
                     }
                     continue
                 }
@@ -563,7 +589,7 @@ object Node {
                     continue
                 }
                 db.delOutbox(peer, mid)
-                delivered(mid)
+                if (peer !in mineDevs) delivered(mid)
             }
         }
     }
@@ -723,15 +749,11 @@ object Node {
         // сервер помнит устройства 60 дней: старые установки и удалённые чаты не показываем, пока не выйдут на связь
         if (prev == null && !nowOnline &&
             (pid in Prefs.hidden(ctx) || System.currentTimeMillis() - seen > 3 * 86_400_000L)) return
-        // прежняя установка этого же телефона (то же имя и отдел, что у меня) — не показываем
-        if (prev == null && !nowOnline &&
-            d.optString("name").trim().equals(Prefs.name(ctx).trim(), true) &&
-            d.optString("dept").trim().equals(Prefs.dept(ctx).trim(), true)) return
         if (nowOnline) Prefs.setHidden(ctx, pid, false)
         val wasOnline = prev?.online == true
         val isNew = db.upsertRelay(pid, d.optString("name", "").ifEmpty { null },
             if (d.has("dept")) d.optString("dept") else null, d.optString("plat", ""), seen)
-        if (isNew) { if (nowOnline) mergeDupes(pid); catchUp(pid) }
+        if (isNew) { migrateChats(); catchUp(pid) }
         checkAvatar(pid, d.optString("avh", ""), null, TCP)
         if (!wasOnline && System.currentTimeMillis() - seen < RELAY_ONLINE_MS) { kick(); changed() }
     }
@@ -766,7 +788,9 @@ object Node {
     private fun relayItem(m: JSONObject) {
         if (m.optString("type") == "ack") {                  // получатель подтвердил — ✓✓
             val mine = db.msg(m.optString("id"))
-            if (mine != null && mine.mine && mine.chat != ALL) { db.setStatus(mine.id, "delivered"); changed() }
+            if (mine != null && mine.mine && mine.chat != ALL && m.optString("from") !in myDevices()) {
+                db.setStatus(mine.id, "delivered"); changed()
+            }
             return
         }
         val from = m.optString("from")
@@ -791,6 +815,7 @@ object Node {
         val from = m.getString("from")
         if (from != id) {
             val d = JSONObject().put("id", from).put("name", m.optString("name", "")).put("port", m.optInt("port", TCP))
+            if (m.has("dept")) d.put("dept", m.optString("dept"))
             // пришло сообщение — значит, отправитель на связи (по сети или через сервер)
             if (ip.isNotEmpty()) upsert(d, ip) else upsertRelay(d, System.currentTimeMillis())
         }
@@ -807,14 +832,23 @@ object Node {
             return
         }
         if (db.hasMsg(mid)) return
-        val chat = if (m.optString("to") == ALL) ALL else from
+        // чат — это человек (имя + должность), а не его устройство
+        val sp = db.peer(from)
+        val sUid = m.optString("uid").ifEmpty { if (sp != null) uidOf(sp.name, sp.dept) else uidOf(m.optString("name"), m.optString("dept")) }
+        val mine = sUid == myUid()                         // моё сообщение с другого моего устройства
+        val to = m.optString("to")
+        val chat = when {
+            to == ALL -> ALL
+            mine -> if (isUid(to) && to != myUid()) to else return
+            else -> sUid
+        }
         val meta = if (m.isNull("file")) null else FileMeta.of(m.optJSONObject("file")?.toString())
         val msg = Msg(mid, chat, from, m.optString("name", "?"), m.optLong("ts", System.currentTimeMillis()),
-            m.optString("text", ""), meta, false, "received", null,
+            m.optString("text", ""), meta, mine, if (mine) "delivered" else "received", null,
             m.optJSONObject("reply")?.toString(), m.optJSONObject("task")?.toString())
-        db.insertMsg(msg, visibleChat != chat)
+        db.insertMsg(msg, !mine && visibleChat != chat)
         changed()
-        if (visibleChat != chat) Notify.message(ctx, msg)
+        if (!mine && visibleChat != chat) Notify.message(ctx, msg)
         if (meta != null && meta.size <= AUTO) download(mid)
     }
 

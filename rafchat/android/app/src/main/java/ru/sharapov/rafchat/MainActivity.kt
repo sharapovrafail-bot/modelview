@@ -147,7 +147,7 @@ class MainActivity : AppCompatActivity() {
         }
         val fmt = java.text.SimpleDateFormat("dd.MM HH:mm", java.util.Locale.US)
         items.forEachIndexed { i, m ->
-            val chatTitle = if (m.chat == Node.ALL) "Общий чат" else Node.db.peer(m.chat)?.name ?: "?"
+            val chatTitle = if (m.chat == Node.ALL) "Общий чат" else Node.account(m.chat)?.name ?: Node.db.peer(m.chat)?.name ?: "?"
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; setPadding(d(16f), d(10f), d(16f), d(10f))
                 setBackgroundResource(android.R.drawable.list_selector_background)
@@ -209,7 +209,7 @@ class MainActivity : AppCompatActivity() {
         val d = dp
         list.removeAllViews()
         if (mode.isNotEmpty()) { showResults(); return }
-        val peers = Node.db.peers().sortedWith(compareBy({ !it.online }, { it.name.lowercase() }))
+        val peers = Node.accounts().sortedWith(compareBy({ !it.online }, { it.name.lowercase() }))
         val rows = ArrayList<Triple<String, String, Boolean>>()
         rows.add(Triple(Node.ALL, "Общий чат", true))
         peers.forEach { rows.add(Triple(it.id, it.title, it.online)) }
@@ -223,7 +223,7 @@ class MainActivity : AppCompatActivity() {
             row.setOnLongClickListener { askDelete(key, title); true }
             if (key == Node.ALL) row.background = GradientDrawableCompat.corp(this)
             row.addView(Ui.avatar(this, title, key, 48f, online && key != Node.ALL, key == Node.ALL,
-                if (key == Node.ALL) null else Node.avatarFile(key)))
+                if (key == Node.ALL) null else Node.accountPhoto(key)))
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             val last = Node.db.last(key)
             val unread = Node.db.unread(key)

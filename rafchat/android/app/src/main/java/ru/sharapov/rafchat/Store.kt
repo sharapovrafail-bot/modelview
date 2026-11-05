@@ -6,6 +6,23 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 
+/** Человек — имя + отдел/должность; все его устройства (ПК, телефон, Mac, iPhone) — один чат, как в WhatsApp. */
+data class Account(val id: String, val name: String, val dept: String, val devices: List<Peer>) {
+    val lan get() = devices.any { it.lan }
+    val relay get() = devices.any { it.relay }
+    val online get() = lan || relay
+    val title get() = if (dept.isNotEmpty()) "$name · $dept" else name
+    val plats get() = devices.filter { it.online }.map { it.plat }.toSet()
+}
+
+fun uidOf(name: String, dept: String): String {
+    val k = name.trim().lowercase() + "|" + dept.trim().lowercase()
+    val h = java.security.MessageDigest.getInstance("SHA-1").digest(k.toByteArray(Charsets.UTF_8))
+    return "u" + h.joinToString("") { "%02x".format(it) }.take(15)
+}
+
+fun isUid(chat: String) = chat != Node.ALL && chat.length == 16 && chat.startsWith("u")
+
 data class Peer(
     val id: String, val name: String, val dept: String, val ip: String, val port: Int,
     val plat: String, val lastSeen: Long, val relaySeen: Long = 0, val avh: String = "",
@@ -129,6 +146,11 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "rafchat.db", null, 4) {
         }
         return out
     }
+
+    /** Переписка, хранившаяся по устройству, переезжает в чат человека. */
+    @Synchronized
+    fun renameChat(from: String, to: String) =
+        writableDatabase.execSQL("UPDATE messages SET chat=? WHERE chat=?", arrayOf(to, from))
 
     @Synchronized
     fun setAvh(id: String, avh: String) =

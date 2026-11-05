@@ -112,9 +112,9 @@ class ChatActivity : AppCompatActivity() {
         head.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_back); setPadding(d(12f), d(12f), d(12f), d(12f)); setOnClickListener { finish() }
         }, LinearLayout.LayoutParams(d(48f), d(48f)))
-        val peer = if (chat == Node.ALL) null else Node.db.peer(chat)
+        val peer = if (chat == Node.ALL) null else Node.account(chat)
         head.addView(Ui.avatar(this, peer?.name ?: "", chat, 40f, false, chat == Node.ALL,
-            if (chat == Node.ALL) null else Node.avatarFile(chat)))
+            if (chat == Node.ALL) null else Node.accountPhoto(chat)))
         val hc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d(12f), 0, 0, 0) }
         title = TextView(this).apply { textSize = 17f; setTypeface(typeface, Typeface.BOLD); setTextColor(Ui.TEXT); maxLines = 1 }
         sub = TextView(this).apply { textSize = 13f; setTextColor(Ui.MUTED); maxLines = 1 }
@@ -288,7 +288,7 @@ class ChatActivity : AppCompatActivity() {
             dlg.show()
         }
         col.addView(dueBtn)
-        val who = field("Исполнитель", "кто делает", list = Node.db.peers().map { it.name }.distinct().sorted())
+        val who = field("Исполнитель", "кто делает", list = Node.accounts().map { it.name }.distinct().sorted())
         val note = field("Примечание", "допуски, квалитет, шероховатость…")
         val files = ArrayList<Pair<java.io.File, String>>()
         collect = files
@@ -400,19 +400,21 @@ class ChatActivity : AppCompatActivity() {
         if (!Node.running) { sub.text = "подключаюсь…"; return }
         Node.db.markRead(chat)
         if (chat == Node.ALL) {
-            val peers = Node.db.peers()
+            val peers = Node.accounts()
             title.text = "Общий чат"
             title.setTextColor(Ui.ORANGE_TEXT)
             sub.text = (if (Ui.COMPANY.isNotEmpty()) "${Ui.COMPANY} · " else "Корпоративный · ") +
                 "участников: ${peers.size + 1}, в сети: ${peers.count { it.online } + 1}"
         } else {
-            val p = Node.db.peer(chat)
+            val p = Node.account(chat)
             title.text = p?.title ?: "?"
+            val kinds = (p?.plats ?: emptySet()).map { mapOf("android" to "телефон", "ios" to "iPhone", "pc" to "ПК")[it] ?: it }
+                .sorted().joinToString(", ")
             sub.text = when {
                 p?.lan == true -> "в сети"
                 p?.relay == true -> "в сети через интернет"
                 else -> "не в сети — сообщения дойдут, когда появится"
-            }
+            } + (if (p?.online == true && kinds.isNotEmpty()) " · $kinds" else "")
         }
         val history = Node.db.history(chat)
         // перерисовываем переписку, только если в ней что-то изменилось (иначе мешаем набору текста)

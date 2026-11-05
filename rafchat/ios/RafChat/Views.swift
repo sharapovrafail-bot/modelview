@@ -142,12 +142,12 @@ struct ChatListView: View {
     @State private var showTasks = false
     @State private var path: [Route] = []
 
-    private var sortedPeers: [Peer] {
-        node.peers.sorted { ($0.online ? 0 : 1, $0.name.lowercased()) < ($1.online ? 0 : 1, $1.name.lowercased()) }
+    private var sortedPeers: [Account] {
+        node.accounts.sorted { ($0.online ? 0 : 1, $0.name.lowercased()) < ($1.online ? 0 : 1, $1.name.lowercased()) }
     }
 
     private func chatTitle(_ chat: String) -> String {
-        chat == Node.all ? "Общий чат" : (node.peers.first { $0.id == chat }?.name ?? "?")
+        chat == Node.all ? "Общий чат" : (node.account(chat)?.name ?? node.peers.first { $0.id == chat }?.name ?? "?")
     }
 
     var body: some View {
@@ -190,8 +190,8 @@ struct ChatListView: View {
                         }
                     } footer: {
                         VStack(alignment: .leading, spacing: 4) {
-                            let on = node.peers.filter { $0.online }.count
-                            Text("В сети: \(on) из \(node.peers.count)" + (node.queued > 0 ? " · в очереди: \(node.queued)" : ""))
+                            let on = node.accounts.filter { $0.online }.count
+                            Text("В сети: \(on) из \(node.accounts.count)" + (node.queued > 0 ? " · в очереди: \(node.queued)" : ""))
                             if let ok = node.relayOk { Text(ok ? "Сервер: на связи ✓" : "Сервер: нет связи") }
                             Text("iPhone получает сообщения, пока RafChat открыт. Недоставленное ждёт у коллег и придёт сразу после открытия.")
                             Text("RafChat · Автор: Рафаил Шарапов · rafail@sharapov-cnc.ru").padding(.top, 8)
@@ -291,15 +291,16 @@ struct ChatView: View {
     @State private var attachTo: [String: Any]? = nil
 
     private var title: String {
-        chat == Node.all ? "Общий чат" : (node.peers.first { $0.id == chat }?.title ?? "?")
+        chat == Node.all ? "Общий чат" : (node.account(chat)?.title ?? "?")
     }
 
     private var subtitle: String {
         if chat == Node.all {
-            return "\(Defaults.company) · участников: \(node.peers.count + 1), в сети: \(node.peers.filter { $0.online }.count + 1)"
+            return "\(Defaults.company) · участников: \(node.accounts.count + 1), в сети: \(node.accounts.filter { $0.online }.count + 1)"
         }
-        guard let p = node.peers.first(where: { $0.id == chat }) else { return "" }
-        return p.lan ? "в сети" : (p.relay ? "в сети через интернет" : "не в сети — сообщение дойдёт, когда появится")
+        guard let p = node.account(chat) else { return "" }
+        let kinds = p.plats.isEmpty ? "" : " · " + p.plats.joined(separator: ", ")
+        return p.lan ? "в сети" + kinds : (p.relay ? "в сети через интернет" + kinds : "не в сети — сообщение дойдёт, когда появится")
     }
 
     var body: some View {
@@ -408,7 +409,7 @@ struct ChatView: View {
             }
         }
         .sheet(isPresented: $newTask) {
-            TaskSheet(names: node.peers.map { $0.name }) { t, files in
+            TaskSheet(names: node.accounts.map { $0.name }) { t, files in
                 newTask = false
                 let tid = node.send(chat: chat, text: taskFallback(t), reply: takeReply(), task: t)
                 let rp: [String: Any] = ["id": tid, "name": Profile.name, "text": "📋 " + (t["title"] as? String ?? "")]

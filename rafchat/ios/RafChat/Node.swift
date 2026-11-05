@@ -55,6 +55,7 @@ final class Node: ObservableObject {
 
     func start() {
         guard Profile.isSetUp, !running else { return }
+        migrateChats()
         let org = Profile.org.trimmingCharacters(in: .whitespaces)
         key = SymmetricKey(data: SHA256.hash(data: Data(("RafChat:" + org).utf8)))
         ekey = SymmetricKey(data: SHA256.hash(data: Data(("RafChat-e2e:" + org).utf8)))
@@ -187,7 +188,8 @@ final class Node: ObservableObject {
         let p = Peer(id: pid, name: name, dept: dept, ip: ip, port: (d["port"] as? Int) ?? Int(Node.tcpPort),
                      plat: plat, lastSeen: Date().timeIntervalSince1970, relaySeen: prev?.relaySeen ?? 0)
         if let i = peers.firstIndex(where: { $0.id == pid }) { peers[i] = p } else { peers.append(p) }
-        if prev == nil { mergeDupes(pid); catchUp(pid) }
+        if prev == nil || prev?.name != name || prev?.dept != dept { migrateChats() }
+        if prev == nil { catchUp(pid) }
         if !wasOnline {
             store.save("peers.json", peers)
             kick()
@@ -195,12 +197,15 @@ final class Node: ObservableObject {
         return !wasOnline
     }
 
-    /// Новый участник: дослать ему мои сообщения «Общего чата» за последние сутки.
+    /// Новое устройство: дослать мои сообщения «Общего чата» и нашу личную переписку за последние сутки.
     private func catchUp(_ pid: String) {
         let since = Int64(Date().timeIntervalSince1970 * 1000) - 86_400_000
-        for i in messages.indices where messages[i].mine && messages[i].chat == Node.all && messages[i].ts > since {
+        let u = peers.first(where: { $0.id == pid }).map { uidOf($0.name, $0.dept) } ?? ""
+        let chats: Set<String> = u.isEmpty || u == myUid ? [Node.all] : [Node.all, u]
+        for i in messages.indices where messages[i].mine && chats.contains(messages[i].chat) && messages[i].ts > since {
             let m = messages[i]
-            var payload: [String: Any] = ["id": m.id, "from": id, "name": Profile.name, "to": Node.all, "ts": m.ts,
+            var payload: [String: Any] = ["id": m.id, "from": id, "name": Profile.name, "dept": Profile.dept, "uid": myUid,
+                                          "to": m.chat, "ts": m.ts,
                                           "text": m.text, "file": m.file?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
             if let r = m.replyObj { payload["reply"] = r }
             if let t = m.taskObj { payload["task"] = t }
@@ -208,7 +213,7 @@ final class Node: ObservableObject {
                !outbox.contains(where: { $0.peer == pid && $0.msgId == m.id }) {
                 outbox.append(OutItem(peer: pid, msgId: m.id, payload: ps))
                 let parts = m.status.split(separator: "/")
-                if parts.count == 2, let b = Int(parts[1]) { messages[i].status = "\(parts[0])/\(b + 1)" }
+                if m.chat == Node.all, parts.count == 2, let b = Int(parts[1]) { messages[i].status = "\(parts[0])/\(b + 1)" }
             }
         }
         persist()
@@ -352,8 +357,9 @@ final class Node: ObservableObject {
             meta = FileMeta(fid: fid, name: fileName ?? file.lastPathComponent, size: size)
         }
         let ts = Int64(Date().timeIntervalSince1970 * 1000)
-        let targets = chat == Node.all ? peers.map { $0.id } : [chat]
-        let status = chat == Node.all ? "0/\(targets.count)" : "queued"
+        let tg = targets(chat)
+        let mineDevs = Set(myDevices)
+        let status = chat == Node.all ? "0/\(tg.filter { !mineDevs.contains($0) }.count)" : "queued"
         var task = task0
         if task != nil {
             if (task?["status"] as? String ?? "").isEmpty { task?["status"] = TaskStatus.new }
@@ -362,12 +368,13 @@ final class Node: ObservableObject {
         messages.append(Msg(id: mid, chat: chat, sender: id, senderName: Profile.name, ts: ts, text: text, file: meta,
                             mine: true, status: status, local: file?.path, unread: false,
                             reply: Msg.json(reply), task: Msg.json(task)))
-        var payload: [String: Any] = ["id": mid, "from": id, "name": Profile.name, "to": chat, "ts": ts, "text": text,
+        var payload: [String: Any] = ["id": mid, "from": id, "name": Profile.name, "dept": Profile.dept, "uid": myUid,
+                                      "to": chat, "ts": ts, "text": text,
                                       "file": meta?.dict ?? NSNull(), "port": Int(Node.tcpPort)]
         if let r = reply { payload["reply"] = r }
         if let t = task { payload["task"] = t }
         if let pd = try? JSONSerialization.data(withJSONObject: payload), let ps = String(data: pd, encoding: .utf8) {
-            for t in targets { outbox.append(OutItem(peer: t, msgId: mid, payload: ps)) }
+            for t in tg { outbox.append(OutItem(peer: t, msgId: mid, payload: ps)) }
         }
         persist()
         kick()
@@ -381,8 +388,8 @@ final class Node: ObservableObject {
         while gen == g {
             wake.lock(); _ = wake.wait(until: Date().addingTimeInterval(3)); wake.unlock()
             if gen != g { break }
-            let (items, online) = DispatchQueue.main.sync {
-                (outbox, Dictionary(peers.filter { $0.lan }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }))
+            let (items, online, mineDevs) = DispatchQueue.main.sync {
+                (outbox, Dictionary(peers.filter { $0.lan }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }), Set(myDevices))
             }
             let relay = serverAddr() != nil
             for it in items {
@@ -390,7 +397,7 @@ final class Node: ObservableObject {
                     if relay && relayDeliver(it.peer, it.payload) {          // иначе — через сервер
                         DispatchQueue.main.async {
                             self.outbox.removeAll { $0.peer == it.peer && $0.msgId == it.msgId }
-                            self.viaRelay(it.msgId)
+                            if !mineDevs.contains(it.peer) { self.viaRelay(it.msgId) }
                         }
                     }
                     continue
@@ -404,7 +411,7 @@ final class Node: ObservableObject {
                 if Node.syncStatus(req) == 200 {
                     DispatchQueue.main.async {
                         self.outbox.removeAll { $0.peer == it.peer && $0.msgId == it.msgId }
-                        self.delivered(it.msgId)
+                        if !mineDevs.contains(it.peer) { self.delivered(it.msgId) }    // копия на моё устройство — не «доставлено»
                     }
                 }
             }
@@ -448,9 +455,13 @@ final class Node: ObservableObject {
         DispatchQueue.main.async {
             if from != self.id && !ip.isEmpty {
                 // пришло сообщение — значит, отправитель в сети (даже если его маяки до нас не доходят)
-                self.upsert(["name": m["name"] as? String ?? "", "port": m["port"] as? Int ?? Int(Node.tcpPort)], from, ip)
+                var d: [String: Any] = ["name": m["name"] as? String ?? "", "port": m["port"] as? Int ?? Int(Node.tcpPort)]
+                if let dp = m["dept"] as? String { d["dept"] = dp }
+                self.upsert(d, from, ip)
             } else if from != self.id {
-                self.upsertRelay(["id": from, "name": m["name"] as? String ?? ""], Date().timeIntervalSince1970)
+                var d: [String: Any] = ["id": from, "name": m["name"] as? String ?? ""]
+                if let dp = m["dept"] as? String { d["dept"] = dp }
+                self.upsertRelay(d, Date().timeIntervalSince1970)
             }
             if m["type"] as? String == "task" {                 // коллега сменил статус задания
                 let tid = m["task_id"] as? String ?? ""
@@ -465,11 +476,19 @@ final class Node: ObservableObject {
                 return
             }
             if self.messages.contains(where: { $0.id == mid }) { return }
-            let chat = to == Node.all ? Node.all : from
+            // чат — это человек (имя + должность), а не его устройство
+            let sp = self.peers.first { $0.id == from }
+            var sUid = m["uid"] as? String ?? ""
+            if sUid.isEmpty { sUid = sp.map { uidOf($0.name, $0.dept) } ?? uidOf(m["name"] as? String ?? "", m["dept"] as? String ?? "") }
+            let mine = sUid == self.myUid                  // моё сообщение с другого моего устройства
+            let chat: String
+            if to == Node.all { chat = Node.all }
+            else if mine { guard isUid(to), to != self.myUid else { return }; chat = to }
+            else { chat = sUid }
             let msg = Msg(id: mid, chat: chat, sender: from, senderName: m["name"] as? String ?? "?",
                           ts: (m["ts"] as? NSNumber)?.int64Value ?? Int64(Date().timeIntervalSince1970 * 1000),
-                          text: m["text"] as? String ?? "", file: meta, mine: false, status: "received", local: nil,
-                          unread: self.visibleChat != chat,
+                          text: m["text"] as? String ?? "", file: meta, mine: mine, status: mine ? "delivered" : "received",
+                          local: nil, unread: !mine && self.visibleChat != chat,
                           reply: Msg.json(m["reply"] as? [String: Any]), task: Msg.json(m["task"] as? [String: Any]))
             self.messages.append(msg)
             self.persist()
@@ -763,7 +782,8 @@ extension Node {
         if m["type"] as? String == "ack" {                    // получатель подтвердил — ✓✓
             let mid = m["id"] as? String ?? ""
             DispatchQueue.main.async {
-                if let i = self.messages.firstIndex(where: { $0.id == mid }), self.messages[i].mine, self.messages[i].chat != Node.all {
+                if let i = self.messages.firstIndex(where: { $0.id == mid }), self.messages[i].mine, self.messages[i].chat != Node.all,
+                   !self.myDevices.contains(m["from"] as? String ?? "") {
                     self.messages[i].status = "delivered"; self.persist()
                 }
             }
@@ -792,13 +812,12 @@ extension Node {
         let name = d["name"] as? String ?? "", dept = d["dept"] as? String ?? ""
         if !nowOnline {
             if Profile.hidden.contains(pid) || now - seen > 3 * 86400 { return }
-            if name.lowercased() == Profile.name.lowercased() && dept.lowercased() == Profile.dept.lowercased() { return }
         } else {
             var h = Profile.hidden; h.remove(pid); Profile.hidden = h
         }
         peers.append(Peer(id: pid, name: name.isEmpty ? "?" : name, dept: dept, ip: "", port: Int(Node.tcpPort),
                           plat: d["plat"] as? String ?? "", lastSeen: 0, relaySeen: seen))
-        if nowOnline { mergeDupes(pid) }
+        migrateChats()
         catchUp(pid)
         store.save("peers.json", peers)
         kick()
@@ -845,22 +864,60 @@ extension Node {
                                   "task_id": mid, "status": st, "port": Int(Node.tcpPort), "file": NSNull(),
                                   "text": "📋 «\(t["title"] as? String ?? "")» — \(st)"]
         if let pd = try? JSONSerialization.data(withJSONObject: upd), let ps = String(data: pd, encoding: .utf8) {
-            for p in (chat == Node.all ? peers.map { $0.id } : [chat]) { outbox.append(OutItem(peer: p, msgId: uid, payload: ps)) }
+            for p in targets(chat) { outbox.append(OutItem(peer: p, msgId: uid, payload: ps)) }
         }
         persist()
         kick()
     }
 
-    /// Удалить чат: переписку и очередь; личный — вместе с участником (вернётся, если выйдет на связь).
+    /// Удалить чат: переписку и очередь; личный — вместе со всеми устройствами человека (вернутся, если выйдут на связь).
     func deleteChat(_ key: String) {
         messages.removeAll { $0.chat == key }
         if key != Node.all {
-            outbox.removeAll { $0.peer == key }
-            peers.removeAll { $0.id == key }
-            var h = Profile.hidden; h.insert(key); Profile.hidden = h
+            let devs = devices(key).isEmpty ? [key] : devices(key)
+            var h = Profile.hidden
+            for d in devs { outbox.removeAll { $0.peer == d }; peers.removeAll { $0.id == d }; h.insert(d) }
+            Profile.hidden = h
             store.save("peers.json", peers)
         }
         persist()
+    }
+
+    // ---------- люди поверх устройств (один чат на человека)
+    var myUid: String { uidOf(Profile.name, Profile.dept) }
+    func devices(_ uid: String) -> [String] { peers.filter { uidOf($0.name, $0.dept) == uid }.map { $0.id } }
+    /// Мои другие устройства: им уходит копия моих сообщений, чтобы переписка была одинаковой везде.
+    var myDevices: [String] { devices(myUid) }
+
+    var accounts: [Account] {
+        let mine = myUid
+        let groups = Dictionary(grouping: peers) { uidOf($0.name, $0.dept) }
+        return groups.compactMap { u, ps -> Account? in
+            guard u != mine, let main = ps.max(by: { max($0.lastSeen, $0.relaySeen) < max($1.lastSeen, $1.relaySeen) }) else { return nil }
+            return Account(id: u, name: main.name, dept: main.dept, devices: ps)
+        }
+    }
+
+    func account(_ uid: String) -> Account? { accounts.first { $0.id == uid } }
+
+    /// Переписка, хранившаяся по устройству, переезжает в чат человека.
+    func migrateChats() {
+        var changed = false
+        for p in peers {
+            let u = uidOf(p.name, p.dept)
+            for i in messages.indices where messages[i].chat == p.id { messages[i].chat = u; changed = true }
+        }
+        if changed { persist() }
+    }
+
+    func targets(_ chat: String) -> [String] {
+        if chat == Node.all { return peers.map { $0.id } }
+        if !isUid(chat) { return [chat] }                     // старый формат — конкретное устройство
+        let now = Date().timeIntervalSince1970
+        let fresh = Set(peers.filter { now - max($0.lastSeen, $0.relaySeen) < 14 * 86400 }.map { $0.id })
+        var out: [String] = []
+        for d in devices(chat) + myDevices where fresh.contains(d) && !out.contains(d) { out.append(d) }
+        return out
     }
 
     func search(_ q: String) -> [Msg] {
