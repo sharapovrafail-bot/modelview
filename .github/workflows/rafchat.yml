@@ -52,7 +52,7 @@ jobs:
         working-directory: rafchat/pc
         run: |
           python make_version.py
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --collect-submodules qrcode --hidden-import openpyxl --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." --add-data "../assets/corp_pattern.png:." --add-data "../assets/corp_logo.png:." rafchat_pc.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.ico --version-file version_info.txt --collect-all ifaddr --collect-submodules cryptography --collect-submodules paramiko --collect-submodules qrcode --collect-all pypdfium2 --collect-all pypdfium2_raw --hidden-import openpyxl --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." --add-data "../assets/corp_pattern.png:." --add-data "../assets/corp_logo.png:." rafchat_pc.py
       - name: Проверка запуском и снимок окна
         working-directory: rafchat/pc
         shell: pwsh
@@ -192,7 +192,7 @@ jobs:
           python -c "from PIL import Image; Image.open('../assets/icon/icon-3d.png').save('rafchat.icns')"
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name RafChat --icon rafchat.icns \
             --osx-bundle-identifier ru.sharapov.rafchat --collect-all ifaddr --collect-submodules cryptography \
-            --collect-submodules paramiko --collect-submodules qrcode --hidden-import openpyxl --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" \
+            --collect-submodules paramiko --collect-submodules qrcode --collect-all pypdfium2 --collect-all pypdfium2_raw --hidden-import openpyxl --add-data "../server/rafchat_relay.py:server" --add-data "../server/install.sh:server" \
             --add-data "../defaults.json:." --add-data "../assets/chat_pattern.svg:." --add-data "../assets/icon/rafchat_icon.png:." \
             --add-data "../assets/corp_pattern.png:." --add-data "../assets/corp_logo.png:." rafchat_pc.py
           VER=$(python -c "import re;print(re.search(r'APP_VER = \"([^\"]+)\"', open('rafchat_pc.py').read()).group(1))")

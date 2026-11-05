@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QDia
                                QVBoxLayout, QWidget)
 
 import common as C
+from previews import PREVIEW_EXT, STEP_EXT, make_preview, step_info
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
 APP_VER = "0.7.0"
@@ -1997,6 +1998,26 @@ def write_task_sheet(path: Path, m, chat_name):
     p.end()
 
 
+def drawing_thumb(path: Path, fid: str, side: int = 260) -> QPixmap | None:
+    """Миниатюра PDF/DXF/STL — считается один раз и хранится в папке программы."""
+    d = DATA_DIR / "thumbs"
+    cache = d / f"{fid}.png"
+    if cache.is_file():
+        pm = QPixmap(str(cache))
+    else:
+        img = make_preview(path, side)
+        if img is None:
+            return None
+        d.mkdir(parents=True, exist_ok=True)
+        img.save(str(cache))
+        pm = QPixmap.fromImage(img)
+    if pm.isNull():
+        return None
+    pm = pm.scaled(side * 2, side * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    pm.setDevicePixelRatio(2)
+    return pm
+
+
 def image_thumb(path: str, side: int) -> QPixmap | None:
     """Миниатюра фото (длинная сторона ≤ side) со скруглёнными углами; поворот по EXIF учитывается."""
     from PySide6.QtGui import QImageReader, QPainterPath
@@ -2070,7 +2091,8 @@ class Bubble(QFrame):
         f = m["file"]
         self.thumb = None
         self._photo = False
-        if f and Path(f["name"]).suffix.lower() in IMAGE_EXT:
+        self._drawing = bool(f) and Path(f["name"]).suffix.lower() in PREVIEW_EXT
+        if f and (Path(f["name"]).suffix.lower() in IMAGE_EXT or self._drawing):
             # фото показываем прямо в переписке (как в WhatsApp); щелчок — открыть крупно
             self.thumb = QLabel()
             self.thumb.setCursor(Qt.PointingHandCursor)
@@ -2159,13 +2181,24 @@ class Bubble(QFrame):
             local = Path(m["local"]) if m["local"] else None
             have = local is not None and local.exists()
             self.finfo.setText(human(f["size"]))
-            if self.thumb is not None and have and not self._photo:
+            if self.thumb is not None and have and self._drawing and not getattr(self, "_drawn", False):
+                self._drawn = True                         # миниатюра чертежа/модели, имя файла остаётся
+                pm = drawing_thumb(local, f["fid"])
+                if pm is not None:
+                    self.thumb.setPixmap(pm)
+                    self.thumb.setToolTip("Открыть " + f["name"])
+                    self.thumb.show()
+            elif self.thumb is not None and have and not self._photo:
                 pm = image_thumb(str(local), 300)
                 if pm is not None:
                     self.thumb.setPixmap(pm)
                     self.thumb.show()
                     self.frow.hide()                       # у фото — только картинка и время
                     self._photo = True
+            if have and Path(f["name"]).suffix.lower() in STEP_EXT and not getattr(self, "_stepinfo", None):
+                self._stepinfo = step_info(local) or "STEP"
+            if getattr(self, "_stepinfo", None):
+                self.finfo.setText(human(f["size"]) + " · " + self._stepinfo)
             if is_voice(f):
                 self.finfo.setText(fmt_secs(f.get("voice")) if f.get("voice") is not None else human(f["size"]))
                 playing = have and _playing["path"] == str(local)
