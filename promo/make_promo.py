@@ -60,6 +60,16 @@ def shot(path, max_w, max_h, zoom):
     return s, mask
 
 
+def fit(d, lines, weight, size, max_w):
+    """Уменьшить шрифт, чтобы самая длинная строка влезла по ширине."""
+    while size > 30:
+        f = font(weight, size)
+        if max(d.textlength(ln, font=f) for ln in lines.split("\n")) <= max_w:
+            return f
+        size -= 4
+    return font(weight, size)
+
+
 def text_block(d, cx, y, lines, f, fill, spacing=1.18):
     for ln in lines.split("\n"):
         w = d.textlength(ln, font=f)
@@ -80,20 +90,31 @@ def scene_frame(W, H, idx, t, dur):
         fs = 108 if vert else 96
         y = H * (0.36 if vert else 0.30)
         d.rectangle((W / 2 - 60, y - 60, W / 2 + 60, y - 50), fill=ORANGE)
-        y = text_block(d, W / 2, y + (1 - ease) * 40, title, font("ExtraBold", fs), WHITE)
-        text_block(d, W / 2, y + 40, sub, font("Medium", 46 if vert else 42), MUTED)
+        y = text_block(d, W / 2, y + (1 - ease) * 40, title, fit(d, title, "ExtraBold", fs, W - 120), WHITE)
+        text_block(d, W / 2, y + 40, sub, fit(d, sub, "Medium", 46 if vert else 42, W - 100), MUTED)
         if idx == len(SCENES) - 1:
             pulse = 1 + 0.04 * math.sin(t * 5)
             bw, bh = int(560 * pulse), int(110 * pulse)
             by = H * (0.72 if vert else 0.78)
             d.rounded_rectangle((W / 2 - bw / 2, by - bh / 2, W / 2 + bw / 2, by + bh / 2), radius=bh // 2, fill=ORANGE)
-            text_block(d, W / 2, by - 30, "⭐ поставьте звезду", font("Bold", 44), WHITE)
+            text_block(d, W / 2, by - 30, "поставьте звезду", font("Bold", 44), WHITE)
         return im
     # экран программы с медленным приближением
     zoom = 1.0 + 0.06 * (t / dur)
     if vert:
-        s, m = shot(pic, W - 80, H * 0.52, zoom)
-        sx, sy = (W - s.width) // 2, int(H * 0.40 + (1 - ease) * 80)
+        # на вертикальном экране — крупно: окно программы по высоте, медленная панорама слева направо
+        full = Image.open(IMG / pic).convert("RGB")
+        hh = int(H * 0.50 * zoom)
+        k = hh / full.height
+        big = full.resize((int(full.width * k), hh), Image.LANCZOS)
+        ww = W - 80
+        if big.width > ww:
+            x = int((big.width - ww) * min(1.0, t / max(dur - FADE, 0.1)))
+            big = big.crop((x, 0, x + ww, hh))
+        s = big
+        m = Image.new("L", s.size, 0)
+        ImageDraw.Draw(m).rounded_rectangle((0, 0, s.width, s.height), radius=28, fill=255)
+        sx, sy = (W - s.width) // 2, int(H * 0.38 + (1 - ease) * 80)
     else:
         s, m = shot(pic, W * 0.60, H - 140, zoom)
         sx, sy = int(W * 0.37 + (1 - ease) * 80), (H - s.height) // 2
@@ -105,8 +126,8 @@ def scene_frame(W, H, idx, t, dur):
     if vert:
         y = int(H * 0.11)
         d.rounded_rectangle((W / 2 - 70, y - 40, W / 2 + 70, y - 30), radius=5, fill=ORANGE)
-        y = text_block(d, W / 2, y + (1 - ease) * 30, title, font("ExtraBold", 92), WHITE)
-        text_block(d, W / 2, y + 26, sub, font("Medium", 48), MUTED)
+        y = text_block(d, W / 2, y + (1 - ease) * 30, title, fit(d, title, "ExtraBold", 92, W - 100), WHITE)
+        text_block(d, W / 2, y + 26, sub, fit(d, sub, "Medium", 48, W - 100), MUTED)
     else:
         x0 = 90
         y = int(H * 0.34)
