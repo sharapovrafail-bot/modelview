@@ -9,6 +9,7 @@ struct RafChatApp: App {
     @StateObject private var node = Node.shared
     @Environment(\.scenePhase) private var phase
     @State private var setUp = Profile.isSetUp
+    @AppStorage("theme") private var theme = "auto"
 
     var body: some Scene {
         WindowGroup {
@@ -20,7 +21,9 @@ struct RafChatApp: App {
                 }
             }
             .environmentObject(node)
+            .environmentObject(Voice.shared)
             .tint(Color(red: 0, green: 0.478, blue: 1))
+            .preferredColorScheme(theme == "dark" ? .dark : (theme == "light" ? .light : nil))
             .onOpenURL { u in               // QR-код на листе задания: rafchat://task/<id>
                 if u.scheme == "rafchat", u.host == "task" { node.pendingTask = u.lastPathComponent }
             }
@@ -200,7 +203,8 @@ struct ChatListView: View {
                         NavigationLink(value: Route(chat: Node.all)) {
                             row(key: Node.all, title: "Общий чат", online: true, group: true)
                         }
-                        .listRowBackground(RoundedRectangle(cornerRadius: 12).fill(Color(red: 1, green: 0.945, blue: 0.878))
+                        .listRowBackground(RoundedRectangle(cornerRadius: 12).fill(Color(UIColor { $0.userInterfaceStyle == .dark
+                            ? UIColor(red: 0.2, green: 0.14, blue: 0.06, alpha: 1) : UIColor(red: 1, green: 0.945, blue: 0.878, alpha: 1) }))
                             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(red: 1, green: 0.82, blue: 0.6))))
                         ForEach(sortedPeers) { p in
                             NavigationLink(value: Route(chat: p.id)) {
@@ -350,6 +354,8 @@ struct ChatView: View {
     /// файлы, которые прикрепляют к заданию (ответом на карточку)
     @State private var attachTo: [String: Any]? = nil
     @State private var forwarding: Msg? = nil
+    @EnvironmentObject var voice: Voice
+    @State private var micDenied = false
 
     private var title: String {
         chat == Node.all ? "Общий чат" : (node.account(chat)?.title ?? "?")
@@ -394,7 +400,9 @@ struct ChatView: View {
                 }
                 .background(
                     Image(chat == Node.all ? "corp_pattern" : "chat_pattern").resizable(resizingMode: .tile)
-                        .background(Color(red: 0.925, green: 0.933, blue: 0.949))
+                        .background(Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.06, alpha: 1)
+                                                               : UIColor(red: 0.925, green: 0.933, blue: 0.949, alpha: 1) }))
+                        .opacity(1)
                 )
                 .onAppear {
                     if let f = focus {
@@ -428,7 +436,14 @@ struct ChatView: View {
                     Image(systemName: "paperclip").font(.system(size: 22)).frame(width: 36, height: 38)
                 }
                 Button { newTask = true } label: { Text("📋").font(.system(size: 21)).frame(width: 32, height: 38) }
-                TextField("Сообщение", text: $text, axis: .vertical)
+                Button { toggleVoice() } label: {
+                    Image(systemName: voice.recording ? "stop.fill" : "mic").font(.system(size: 20))
+                        .foregroundColor(voice.recording ? .white : .accentColor).frame(width: 34, height: 34)
+                        .background(Circle().fill(voice.recording ? Color.red : Color.clear))
+                }
+                TextField(voice.recording ? "🔴 Запись \(fmtSecs(voice.seconds)) — нажмите ⏹, чтобы отправить" : "Сообщение",
+                          text: $text, axis: .vertical)
+                    .disabled(voice.recording)
                     .lineLimit(1...6)
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 20).fill(Color(.systemGray6)))
@@ -493,9 +508,23 @@ struct ChatView: View {
             Button("Отмена", role: .cancel) { forwarding = nil }
         }
         .onChange(of: text) { t in if !t.trimmingCharacters(in: .whitespaces).isEmpty { node.sendTyping(chat) } }
+        .alert("Нет доступа к микрофону", isPresented: $micDenied) { Button("OK", role: .cancel) {} } message: {
+            Text("Разрешите микрофон: Настройки → RafChat → Микрофон.")
+        }
+        .onDisappear { _ = voice.stop(keep: false); voice.stopPlay() }
         .onAppear { node.visibleChat = chat; node.markRead(chat) }
         .onDisappear { node.visibleChat = nil }
         .onChange(of: msgs.count) { _ in node.markRead(chat) }
+    }
+
+    private func toggleVoice() {
+        if !voice.recording {
+            voice.start { ok in if !ok { micDenied = true } }
+            return
+        }
+        if let r = voice.stop(keep: true) {
+            _ = node.send(chat: chat, text: "", file: r.0, fileName: r.0.lastPathComponent, reply: takeReply(), voice: r.1)
+        }
     }
 
     private var forwardTargets: [Account] {
@@ -549,6 +578,7 @@ struct Bubble: View {
     var onAttach: () -> Void = {}
     var onForward: () -> Void = {}
     @EnvironmentObject var node: Node
+    @ObservedObject private var vo = Voice.shared
 
     private var statusText: String {
         guard m.mine else { return "" }
@@ -634,12 +664,12 @@ struct Bubble: View {
                 ForEach(Array((TaskStatus.next[st] ?? []).enumerated()), id: \.offset) { _, pair in
                     Button(pair.0) { node.taskUpdate(m.id, pair.1) }
                         .font(.subheadline.bold()).padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(m.mine ? Color.white : Color(red: 0.9, green: 0.94, blue: 1)))
+                        .background(RoundedRectangle(cornerRadius: 10).fill(m.mine ? Color.white : Color.accentColor.opacity(0.14)))
                         .foregroundColor(.accentColor)
                 }
                 Button("📎 Файл") { onAttach() }
                     .font(.subheadline.bold()).padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(m.mine ? Color.white : Color(red: 0.9, green: 0.94, blue: 1)))
+                    .background(RoundedRectangle(cornerRadius: 10).fill(m.mine ? Color.white : Color.accentColor.opacity(0.14)))
                     .foregroundColor(.accentColor)
             }.buttonStyle(.plain).padding(.top, 2)
         }.frame(minWidth: 240, alignment: .leading)
@@ -647,7 +677,25 @@ struct Bubble: View {
 
     @ViewBuilder private func fileRow(_ f: FileMeta) -> some View {
         let ext = (f.name as NSString).pathExtension.lowercased()
-        if let local = m.local, ["jpg", "jpeg", "png", "heic", "webp", "gif"].contains(ext),
+        if f.isVoice {
+            if let local = m.local {
+                Button { Voice.shared.toggle(m.id, local) } label: {
+                    Label(Voice.shared.playingId == m.id ? "🎤 \(fmtSecs(f.voice))" : "🎤 Голосовое \(fmtSecs(f.voice))",
+                          systemImage: Voice.shared.playingId == m.id ? "stop.fill" : "play.fill")
+                        .font(.body.bold()).foregroundColor(fg)
+                }.buttonStyle(.plain)
+            } else {
+                Button("🎤 Голосовое \(fmtSecs(f.voice)) · скачать") { node.download(m.id) }.font(.body.bold()).foregroundColor(fg)
+            }
+        } else if let local = m.local, ["pdf", "dxf"].contains(ext), let img = Previews.thumb(f.fid, local, f.name) {
+            VStack(alignment: .leading, spacing: 4) {
+                Image(uiImage: img).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 260)
+                    .border(Color(.systemGray3), width: 1)
+                    .onTapGesture { preview = URL(fileURLWithPath: local) }
+                Text(f.name).font(.subheadline.bold()).foregroundColor(fg)
+                Text(human(f.size)).font(.caption).foregroundColor(mu)
+            }
+        } else if let local = m.local, ["jpg", "jpeg", "png", "heic", "webp", "gif"].contains(ext),
            let img = UIImage(contentsOfFile: local) {
             // фото — прямо в переписке, нажатие — открыть крупно
             Image(uiImage: img).resizable().scaledToFit().frame(maxWidth: 240, maxHeight: 300)
@@ -663,6 +711,8 @@ struct Bubble: View {
                     if let p = node.progress[m.id], m.local == nil {
                         ProgressView(value: Double(p.0), total: Double(max(p.1, 1)))
                         Text("\(human(p.0)) из \(human(p.1))").font(.caption).foregroundColor(mu)
+                    } else if let local = m.local, ["step", "stp"].contains(ext) {
+                        Text(human(f.size) + " · " + Previews.stepInfo(local)).font(.caption).foregroundColor(mu)
                     } else {
                         Text(human(f.size)).font(.caption).foregroundColor(mu)
                     }
@@ -778,6 +828,7 @@ struct SetupView: View {
     @State private var extra = Profile.extra
     @State private var server = Profile.server
     @State private var err = ""
+    @AppStorage("theme") private var theme = "auto"
 
     var body: some View {
         NavigationStack {
@@ -796,6 +847,13 @@ struct SetupView: View {
                     TextField("например: Иван Петров", text: $name).textContentType(.name)
                 }
                 Section("Отдел или участок (необязательно)") { TextField("например: Цех ЧПУ", text: $dept) }
+                if !first {
+                    Section("Тема оформления") {
+                        Picker("Тема", selection: $theme) {
+                            Text("Как в системе").tag("auto"); Text("Светлая").tag("light"); Text("Тёмная").tag("dark")
+                        }.pickerStyle(.segmented)
+                    }
+                }
                 Section {
                     TextField("узнайте у коллег", text: $org).autocorrectionDisabled().textInputAutocapitalization(.never)
                 } header: { Text("Код организации — одинаковый у всех") } footer: {

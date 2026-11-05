@@ -399,7 +399,7 @@ final class Node: ObservableObject {
 
     @discardableResult
     func send(chat: String, text: String, file: URL? = nil, fileName: String? = nil,
-              reply: [String: Any]? = nil, task task0: [String: Any]? = nil, fwd: String? = nil) -> String {
+              reply: [String: Any]? = nil, task task0: [String: Any]? = nil, fwd: String? = nil, voice: Int? = nil) -> String {
         let mid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         var meta: FileMeta?
         if let file = file {
@@ -408,6 +408,7 @@ final class Node: ObservableObject {
             store.save("files.json", files)
             let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
             meta = FileMeta(fid: fid, name: fileName ?? file.lastPathComponent, size: size)
+            meta?.voice = voice
         }
         let ts = Int64(Date().timeIntervalSince1970 * 1000)
         let tg = targets(chat)

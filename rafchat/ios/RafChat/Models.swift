@@ -86,11 +86,14 @@ struct FileMeta: Codable, Equatable {
     var relay: Bool = false
     /// файл от внешнего контакта лежит в «почтовом ящике» с этим кодом
     var xorg: String = ""
+    /// голосовое сообщение: длительность, сек (nil — обычный файл)
+    var voice: Int? = nil
 
     var dict: [String: Any] {
         var d: [String: Any] = ["fid": fid, "name": name, "size": size]
         if relay { d["relay"] = true }
         if !xorg.isEmpty { d["xorg"] = xorg }
+        if let v = voice { d["voice"] = v }
         return d
     }
 
@@ -105,13 +108,16 @@ struct FileMeta: Codable, Equatable {
         size = try c.decodeIfPresent(Int64.self, forKey: .size) ?? 0
         relay = try c.decodeIfPresent(Bool.self, forKey: .relay) ?? false
         xorg = try c.decodeIfPresent(String.self, forKey: .xorg) ?? ""
+        voice = try c.decodeIfPresent(Int.self, forKey: .voice)
     }
 
     static func from(_ any: Any?) -> FileMeta? {
         guard let d = any as? [String: Any], let fid = d["fid"] as? String, let name = d["name"] as? String
         else { return nil }
         let size = (d["size"] as? NSNumber)?.int64Value ?? 0
-        return FileMeta(fid: fid, name: name, size: size, relay: d["relay"] as? Bool ?? false, xorg: d["xorg"] as? String ?? "")
+        var fm = FileMeta(fid: fid, name: name, size: size, relay: d["relay"] as? Bool ?? false, xorg: d["xorg"] as? String ?? "")
+        fm.voice = (d["voice"] as? NSNumber)?.intValue
+        return fm
     }
 }
 
@@ -226,6 +232,9 @@ enum Profile {
         d.set(p, forKey: "relay_alt_port"); d.set(tls, forKey: "relay_alt_tls")
     }
 
+    /// Тема оформления: «auto» — как в системе, «light», «dark».
+    static var theme: String { get { d.string(forKey: "theme") ?? "auto" } set { d.set(newValue, forKey: "theme") } }
+
     /// Внешние контакты: код → {name, dept}.
     static var contacts: [String: [String: String]] {
         get {
@@ -300,9 +309,18 @@ enum TaskStatus {
 }
 
 /// Коротко о сообщении — для цитаты в ответе и результатов поиска.
+extension FileMeta {
+    var isVoice: Bool {
+        voice != nil || (name.hasPrefix("Голосовое") && ["wav", "m4a", "aac", "mp3", "ogg", "opus"].contains((name as NSString).pathExtension.lowercased()))
+    }
+}
+
+func fmtSecs(_ n: Int?) -> String { let v = max(n ?? 0, 0); return String(format: "%d:%02d", v / 60, v % 60) }
+
 func snippet(_ m: Msg, _ n: Int = 70) -> String {
     let t: String
     if let task = m.taskObj { t = "📋 " + (task["title"] as? String ?? "задание") }
+    else if let f = m.file, m.text.isEmpty, f.isVoice { t = "🎤 Голосовое " + fmtSecs(f.voice) }
     else if let f = m.file, m.text.isEmpty { t = "📎 " + f.name }
     else { t = m.text.replacingOccurrences(of: "\n", with: " ") }
     return t.count <= n ? t : String(t.prefix(n - 1)) + "…"
