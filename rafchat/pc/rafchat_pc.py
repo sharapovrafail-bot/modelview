@@ -761,13 +761,15 @@ class Node(QObject):
 
     # ---------- отправка
     def send(self, chat: str, text: str = "", file: Path | None = None, reply: dict | None = None,
-             task: dict | None = None, fwd: str | None = None) -> str:
+             task: dict | None = None, fwd: str | None = None, voice: int | None = None) -> str:
         mid = uuid.uuid4().hex
         fmeta = None
         if file is not None:
             fid = uuid.uuid4().hex
             self.store.q("INSERT INTO files(fid,path) VALUES(?,?)", (fid, str(file)))
             fmeta = {"fid": fid, "name": file.name, "size": file.stat().st_size}
+            if voice is not None:
+                fmeta["voice"] = int(voice)
         m = {"id": mid, "from": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
              "uid": self.my_uid, "to": chat, "ts": now_ms(), "text": text, "file": fmeta, "port": TCP_PORT}
         if is_ext(chat):            # внешнему контакту: обратный адрес — мой код; моим устройствам — кто это
@@ -1453,6 +1455,30 @@ def save_cfg(cfg: dict):
     (DATA_DIR / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=1), "utf-8")
 
 
+EXTRA_COLORS = {
+    "light": dict(chat_bg="#ECEEF2", quote="#EEF1F5", corp_bg="#FFF1E0", corp_line="#FFD199", corp_text="#D96F00",
+                  pattern=0.42, corp_pattern=1.0),
+    "dark": dict(chat_bg="#0E0F12", quote="#2C2C2E", corp_bg="#33240F", corp_line="#6B4A1E", corp_text="#FF9F0A",
+                 pattern=0.16, corp_pattern=0.22),
+}
+
+
+def apply_theme(cfg) -> bool:
+    """Тема: «auto» — как в Windows/macOS, «light», «dark». Возвращает, тёмная ли."""
+    mode = cfg.get("theme", "auto")
+    dark = mode == "dark"
+    if mode == "auto":
+        try:
+            dark = QApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+        except Exception:
+            dark = False
+    k = "dark" if dark else "light"
+    P.update(C.PALETTES[k])
+    P.update(EXTRA_COLORS[k])
+    P["dark"] = dark
+    return dark
+
+
 def chat_qss() -> str:
     return C.qss() + f"""
     QFrame#sidebar {{ background: {P['surface']}; border-right: 1px solid {P['line']}; }}
@@ -1477,6 +1503,10 @@ def chat_qss() -> str:
     QListWidget#chats::item {{ border-radius: 12px; margin: 1px 6px; }}
     QListWidget#chats::item:selected {{ background: {P['wash']}; }}
     QListWidget#chats::item:hover:!selected {{ background: {P['hover']}; }}
+    QListWidget {{ background: {P['surface']}; border: 0; }}
+    QPlainTextEdit, QTextEdit, QSpinBox, QDateEdit {{ background: {P['sub']}; color: {P['text']}; border: 0;
+                                                      border-radius: 10px; }}
+    QMessageBox, QDialog {{ background: {P['bg']}; }}
     """
 
 
@@ -1592,7 +1622,7 @@ class MsgsArea(QWidget):
             pm.fill(Qt.transparent)
             if f.is_file():
                 p = QPainter(pm)
-                p.setOpacity(0.42)
+                p.setOpacity(P.get("pattern", 0.42))
                 QSvgRenderer(QByteArray(f.read_bytes())).render(p, QRectF(0, 0, 480, 480))
                 p.end()
             self.tile = pm
@@ -1600,7 +1630,9 @@ class MsgsArea(QWidget):
 
     def paintEvent(self, ev):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#ECEEF2"))
+        p.fillRect(self.rect(), QColor(P.get("chat_bg", "#ECEEF2")))
+        if getattr(self, "corp", False):
+            p.setOpacity(P.get("corp_pattern", 1.0))
         p.drawTiledPixmap(self.rect(), self._tile())
         p.end()
 
@@ -1620,7 +1652,7 @@ class ChatRow(QWidget):
         if caption:                                   # «Общий чат»: оранжевая подложка, подпись организации
             self.setObjectName("corp_row")
             self.setAttribute(Qt.WA_StyledBackground, True)
-            self.setStyleSheet("QWidget#corp_row { background: #FFF1E0; border: 1px solid #FFD199; border-radius: 12px; }"
+            self.setStyleSheet(f"QWidget#corp_row {{ background: {P['corp_bg']}; border: 1px solid {P['corp_line']}; border-radius: 12px; }}"
                                "QWidget#corp_row QLabel { background: transparent; }")
         lay.setSpacing(10)
         av = QLabel()
@@ -1639,7 +1671,7 @@ class ChatRow(QWidget):
         t.setText(QFontMetrics(f).elidedText(title, Qt.ElideRight, 170 if when else 210))
         t.setToolTip(title)
         if caption:
-            t.setStyleSheet("font-weight:700; font-size:15px; color:#D96F00")
+            t.setStyleSheet(f"font-weight:700; font-size:15px; color:{P['corp_text']}")
         top.addWidget(t, 1)
         w = QLabel(when)
         w.setStyleSheet(f"color:{P['muted']}; font-size:12px")
@@ -1647,7 +1679,7 @@ class ChatRow(QWidget):
         col.addLayout(top)
         if caption:
             cp = QLabel(caption)
-            cp.setStyleSheet("color:#D96F00; font-size:11px; font-weight:600")
+            cp.setStyleSheet(f"color:{P['corp_text']}; font-size:11px; font-weight:600")
             cp.setWordWrap(True)
             cp.setToolTip(caption)
             col.addWidget(cp)
@@ -1669,12 +1701,126 @@ class ChatRow(QWidget):
 
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+AUDIO_EXT = {".wav", ".m4a", ".aac", ".mp3", ".ogg", ".opus"}
+
+
+def is_voice(f) -> bool:
+    return bool(f) and (f.get("voice") is not None or
+                        (f.get("name", "").startswith("Голосовое") and Path(f["name"]).suffix.lower() in AUDIO_EXT))
+
+
+def fmt_secs(n) -> str:
+    n = int(n or 0)
+    return f"{n // 60}:{n % 60:02d}"
+
+
+class VoiceRecorder:
+    """Запись голоса с микрофона в WAV (16 кГц, моно) — без дополнительных программ.
+    Windows — встроенная служба записи (winmm/MCI), macOS/Linux — sounddevice, если установлен."""
+
+    def __init__(self):
+        self.path = None
+        self.t0 = 0.0
+        self._sd = None
+
+    @staticmethod
+    def _mci(cmd):
+        import ctypes
+        buf = ctypes.create_unicode_buffer(256)
+        err = ctypes.windll.winmm.mciSendStringW(cmd, buf, 255, 0)
+        if err:
+            eb = ctypes.create_unicode_buffer(256)
+            ctypes.windll.winmm.mciGetErrorStringW(err, eb, 255)
+            raise RuntimeError(eb.value or f"ошибка {err}")
+        return buf.value
+
+    def start(self, path: Path):
+        self.path = path
+        if IS_WIN:
+            try:
+                self._mci("close rcvoice")
+            except Exception:
+                pass
+            self._mci("open new type waveaudio alias rcvoice")
+            self._mci("set rcvoice bitspersample 16 samplespersec 16000 channels 1 bytespersec 32000 alignment 2")
+            self._mci("record rcvoice")
+        else:
+            try:
+                import sounddevice
+            except ImportError:
+                raise RuntimeError("Запись голоса на этом компьютере пока не поддерживается.")
+            self._frames = []
+            self._sd = sounddevice.RawInputStream(samplerate=16000, channels=1, dtype="int16",
+                                                  callback=lambda d, n, t, st: self._frames.append(bytes(d)))
+            self._sd.start()
+        self.t0 = time.time()
+
+    def stop(self, keep=True) -> int:
+        secs = int(round(time.time() - self.t0))
+        if IS_WIN:
+            try:
+                self._mci("stop rcvoice")
+                if keep:
+                    self._mci(f'save rcvoice "{self.path}"')
+            finally:
+                self._mci("close rcvoice")
+        elif self._sd is not None:
+            self._sd.stop()
+            self._sd.close()
+            self._sd = None
+            if keep:
+                import wave
+                with wave.open(str(self.path), "wb") as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(16000)
+                    w.writeframes(b"".join(self._frames))
+        return secs
+
+
+_playing = {"path": None, "proc": None}
+
+
+def play_audio(path: Path) -> bool:
+    """Проиграть/остановить. Возвращает, играет ли теперь."""
+    if _playing["path"] == str(path):
+        stop_audio()
+        return False
+    stop_audio()
+    if IS_WIN and path.suffix.lower() == ".wav":
+        import winsound
+        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+    elif IS_MAC:
+        import subprocess
+        _playing["proc"] = subprocess.Popen(["afplay", str(path)])
+    else:
+        open_local(path)
+        return False
+    _playing["path"] = str(path)
+    return True
+
+
+def stop_audio():
+    if IS_WIN:
+        try:
+            import winsound
+            winsound.PlaySound(None, 0)
+        except Exception:
+            pass
+    if _playing["proc"] is not None:
+        try:
+            _playing["proc"].terminate()
+        except Exception:
+            pass
+    _playing.update(path=None, proc=None)
 
 
 def snippet(m: dict, n=70) -> str:
     """Коротко о сообщении — для цитаты в ответе и результатов поиска."""
     if m.get("task"):
         t = "📋 " + m["task"].get("title", "задание")
+    elif m.get("file") and is_voice(m["file"]) and not m.get("text"):
+        t = "🎤 Голосовое " + fmt_secs(m["file"].get("voice"))
     elif m.get("file") and not m.get("text"):
         t = "📎 " + m["file"]["name"]
     else:
@@ -1903,7 +2049,7 @@ class Bubble(QFrame):
             rp = m["reply"]
             q = QFrame()
             q.setCursor(Qt.PointingHandCursor)
-            q.setStyleSheet(f"QFrame {{ background: {'rgba(255,255,255,0.18)' if me else '#EEF1F5'};"
+            q.setStyleSheet(f"QFrame {{ background: {'rgba(255,255,255,0.18)' if me else P['quote']};"
                             f" border-left: 3px solid {'#FFFFFF' if me else P['accent']}; border-radius: 6px; }}"
                             "QLabel { background: transparent; border: 0; }")
             ql = QVBoxLayout(q)
@@ -1943,7 +2089,7 @@ class Bubble(QFrame):
             row.addWidget(ic)
             col = QVBoxLayout()
             col.setSpacing(1)
-            nm = QLabel(f["name"])
+            nm = QLabel("🎤 Голосовое сообщение" if is_voice(f) else f["name"])
             nm.setWordWrap(True)
             nm.setMaximumWidth(300)
             nm.setStyleSheet(f"font-weight:650; color:{'#FFFFFF' if me else P['text']}")
@@ -2020,7 +2166,13 @@ class Bubble(QFrame):
                     self.thumb.show()
                     self.frow.hide()                       # у фото — только картинка и время
                     self._photo = True
-            if self._photo:
+            if is_voice(f):
+                self.finfo.setText(fmt_secs(f.get("voice")) if f.get("voice") is not None else human(f["size"]))
+                playing = have and _playing["path"] == str(local)
+                self.fbtn.setText(("⏹ Остановить" if playing else "▶ Слушать") if have else
+                                  ("" if m["mine"] else "Скачать"))
+                self.fbtn.setVisible(bool(self.fbtn.text()))
+            elif self._photo:
                 self.fbtn.hide()
             elif m["mine"]:
                 self.fbtn.setText("Показать в папке" if have else "")
@@ -2144,6 +2296,13 @@ class Bubble(QFrame):
 
     def _file_action(self):
         local = Path(self.m["local"]) if self.m["local"] else None
+        if local and local.exists() and is_voice(self.m["file"]):
+            on = play_audio(local)
+            self.fbtn.setText("⏹ Остановить" if on else "▶ Слушать")
+            if on:
+                secs = (self.m["file"].get("voice") or 60) + 1
+                QTimer.singleShot(secs * 1000, lambda: self.refresh(self.m))
+            return
         if local and local.exists():
             if self.thumb is not None:
                 open_local(local)
@@ -2271,6 +2430,11 @@ class ChatWindow(QMainWindow):
         gm.addAction("Фото профиля…", self.choose_photo)
         gm.addAction("Мой код для внешних контактов…", self.show_my_code)
         gm.addAction("Отчёт по заданиям в Excel…", self.task_report)
+        tm = gm.addMenu("Тема оформления")
+        for key, name in (("auto", "Как в системе"), ("light", "Светлая"), ("dark", "Тёмная")):
+            act = tm.addAction(name, lambda k=key: self.set_theme(k))
+            act.setCheckable(True)
+            act.setChecked(self.cfg.get("theme", "auto") == key)
         gm.addAction("Папка с файлами", lambda: open_local(self._downloads()))
         gm.addSeparator()
         gm.addAction(f"О программе RafChat {APP_VER}", self.about)
@@ -2361,7 +2525,7 @@ class ChatWindow(QMainWindow):
         rb = QHBoxLayout(self.reply_bar)
         rb.setContentsMargins(16, 6, 10, 0)
         rq = QFrame()
-        rq.setStyleSheet(f"QFrame {{ border-left: 3px solid {P['accent']}; background: #EEF1F5; border-radius: 6px; }}"
+        rq.setStyleSheet(f"QFrame {{ border-left: 3px solid {P['accent']}; background: {P['quote']}; border-radius: 6px; }}"
                          "QLabel { background: transparent; border: 0; }")
         rql = QVBoxLayout(rq)
         rql.setContentsMargins(8, 4, 8, 4)
@@ -2393,6 +2557,12 @@ class ChatWindow(QMainWindow):
         tk = button("📋", "icon", tip="Новое задание (карточка для цеха)", fn=self.new_task)
         tk.setStyleSheet("font-size:20px")
         cl.addWidget(tk, 0, Qt.AlignBottom)
+        self.mic_btn = button("🎤", "icon", tip="Голосовое сообщение: нажмите — запись, ещё раз — отправить",
+                              fn=self.toggle_voice)
+        self.mic_btn.setStyleSheet("font-size:20px")
+        cl.addWidget(self.mic_btn, 0, Qt.AlignBottom)
+        self.rec = None
+        self._rec_timer = QTimer(self, interval=500, timeout=self._rec_tick)
         self.input = QPlainTextEdit()
         self.input.setObjectName("input")
         self.input.setPlaceholderText("Сообщение…   (Enter — отправить, Shift+Enter — новая строка)")
@@ -2452,7 +2622,7 @@ class ChatWindow(QMainWindow):
             last, unread = self.node.last_and_unread(key)
             if last:
                 who = "Вы: " if last["mine"] else (f"{last['sender_name']}: " if key == ALL else "")
-                preview = who + (("📎 " + last["file"]["name"]) if last["file"] and not last["text"] else last["text"])
+                preview = who + snippet(last, 200)
                 when = datetime.fromtimestamp(last["ts"] / 1000)
                 when = when.strftime("%H:%M") if when.date() == datetime.now().date() else when.strftime("%d.%m")
             else:
@@ -2654,7 +2824,7 @@ class ChatWindow(QMainWindow):
                 self.node.mark_read(self.chat)
         if new and not m["mine"]:
             if not (self.isActiveWindow() and m["chat"] == self.chat):
-                body = ("📎 " + m["file"]["name"]) if m["file"] and not m["text"] else m["text"]
+                body = snippet(m, 200) if m["file"] and not m["text"] else m["text"]
                 where = "Общий чат · " if m["chat"] == ALL else ""
                 self._notify_chat = m["chat"]
                 self.tray.showMessage(f"{where}{m['sender_name']}", body[:200], self._tray_icon(), 6000)
@@ -2684,6 +2854,67 @@ class ChatWindow(QMainWindow):
     def _grow(self):
         lines = max(1, min(6, int(self.input.document().size().height())))
         self.input.setFixedHeight(min(42 + (lines - 1) * 20, 150))
+
+    # ---------- голосовые сообщения
+    def toggle_voice(self):
+        if self.rec is None:
+            d = Path(DATA_DIR) / "voice"
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / f"Голосовое_{datetime.now():%Y-%m-%d_%H-%M-%S}.wav"
+            r = VoiceRecorder()
+            try:
+                r.start(path)
+            except Exception as e:
+                QMessageBox.warning(self, "RafChat", f"Не удалось включить микрофон: {e}\n\n"
+                                    "Проверьте, что микрофон подключён и разрешён в «Параметры → "
+                                    "Конфиденциальность → Микрофон».")
+                return
+            self.rec = r
+            self._rec_chat = self.chat
+            self.mic_btn.setText("⏹")
+            self.mic_btn.setStyleSheet(f"font-size:20px; background:{P['err']}; border-radius:19px")
+            self.input.setEnabled(False)
+            self._rec_timer.start()
+            self._rec_tick()
+            return
+        r, self.rec = self.rec, None
+        self._rec_timer.stop()
+        self.mic_btn.setText("🎤")
+        self.mic_btn.setStyleSheet("font-size:20px")
+        self.input.setEnabled(True)
+        self.input.setPlaceholderText("Сообщение…   (Enter — отправить, Shift+Enter — новая строка)")
+        try:
+            secs = r.stop(keep=True)
+        except Exception as e:
+            QMessageBox.warning(self, "RafChat", f"Запись не сохранилась: {e}")
+            return
+        if secs < 1 or not r.path.is_file():
+            return
+        self.node.send(self._rec_chat, "", r.path, reply=self._take_reply(), voice=secs)
+
+    def cancel_voice(self):
+        if self.rec is not None:
+            r, self.rec = self.rec, None
+            self._rec_timer.stop()
+            try:
+                r.stop(keep=False)
+            except Exception:
+                pass
+            self.mic_btn.setText("🎤")
+            self.mic_btn.setStyleSheet("font-size:20px")
+            self.input.setEnabled(True)
+            self.input.setPlaceholderText("Сообщение…   (Enter — отправить, Shift+Enter — новая строка)")
+
+    def _rec_tick(self):
+        if self.rec is not None:
+            self.input.setPlaceholderText(f"🔴 Запись {fmt_secs(time.time() - self.rec.t0)} — нажмите ⏹, чтобы отправить, "
+                                          "Esc — отменить")
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape and self.rec is not None:
+            self.cancel_voice()
+            return
+        super().keyPressEvent(ev)
 
     def send_text(self):
         t = self.input.toPlainText().strip()
@@ -3017,6 +3248,19 @@ class ChatWindow(QMainWindow):
         self.node.stop()
         self.tray.hide()
         QApplication.quit()
+
+    def set_theme(self, key):
+        if self.cfg.get("theme", "auto") == key:
+            return
+        self.cfg["theme"] = key
+        save_cfg(self.cfg)
+        if QMessageBox.question(self, "RafChat", "Тема поменяется после перезапуска RafChat. Перезапустить сейчас?") \
+                != QMessageBox.Yes:
+            return
+        from PySide6.QtCore import QProcess
+        args = ([] if getattr(sys, "frozen", False) else [str(Path(__file__).resolve())]) + ["--wait"]
+        QProcess.startDetached(sys.executable, args)
+        self.quit()
 
     # ---------- новый чат / внешние контакты
     def new_chat(self):
@@ -3508,6 +3752,10 @@ def main():
     f = QFont("Segoe UI Variable Text") if IS_WIN else (QApplication.font() if IS_MAC else QFont("Inter"))
     f.setPixelSize(15)
     app.setFont(f)
+    if "--wait" in args:                    # перезапуск после смены темы: дождаться выхода прежней копии
+        import time as _t
+        _t.sleep(2)
+    apply_theme(load_cfg())
     app.setStyleSheet(chat_qss())
 
     single = f"RafChat-{TCP_PORT}"
