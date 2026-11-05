@@ -15,7 +15,7 @@ for x in range(0, W, 64):
 for y in range(0, H, 64):
     d.line((0, y, W, y), fill=(30, 42, 64))
 # по краям — окна программ (видны на телевизоре и ПК)
-for name, box in [("rafcadview.png", (60, 380, 760)), ("stz-simulyator.png", (1800, 380, 700))]:
+for name, box in [("rafcadview.png", (30, 470, 520)), ("stz-simulyator.png", (2010, 470, 520))]:
     s = Image.open(ROOT / "docs/img" / name).convert("RGB")
     k = box[2] / s.width
     s = s.resize((box[2], int(s.height * k)), Image.LANCZOS)
@@ -23,7 +23,7 @@ for name, box in [("rafcadview.png", (60, 380, 760)), ("stz-simulyator.png", (18
     im.paste(s, (box[0], box[1]))
 # затемнение центра, чтобы текст читался
 ov = Image.new("L", (W, H), 0)
-ImageDraw.Draw(ov).rounded_rectangle((440, 470, 2120, 970), radius=60, fill=230)
+ImageDraw.Draw(ov).rounded_rectangle((560, 480, 2000, 960), radius=60, fill=235)
 ov = ov.filter(ImageFilter.GaussianBlur(60))
 im = Image.composite(Image.new("RGB", (W, H), (12, 18, 30)), im, ov)
 d = ImageDraw.Draw(im)
