@@ -34,7 +34,7 @@ def center(text, y, f, fill):
 
 
 d.rounded_rectangle((W / 2 - 80, 548, W / 2 + 80, 560), radius=6, fill=(255, 138, 0))
-center("Программы для цеха ЧПУ", 585, ImageFont.truetype(F.format("ExtraBold"), 112), (255, 255, 255))
+center("Программы для цеха ЧПУ", 585, ImageFont.truetype(F.format("ExtraBold"), 96), (255, 255, 255))
 center("бесплатно · без подписок и лицензий", 735, ImageFont.truetype(F.format("Medium"), 52), (170, 182, 202))
 center("STEP · DXF · DWG · симулятор УП Fanuc · расчёт зубьев · наладка станков", 815,
        ImageFont.truetype(F.format("SemiBold"), 40), (255, 138, 0))
