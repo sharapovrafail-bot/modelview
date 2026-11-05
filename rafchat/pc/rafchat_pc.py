@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QDia
 import common as C
 from common import P, button, card, glyph, human, label, open_local, show_in_folder, type_icon
 
-APP_VER = "0.6.1"
+APP_VER = "0.7.0"
 APP_AUTHOR = "Рафаил Шарапов"
 APP_EMAIL = "rafail@sharapov-cnc.ru"
 APP_COPYRIGHT = "© 2026 Рафаил Шарапов"
@@ -209,7 +209,7 @@ class Store:
                     self.db.execute("ALTER TABLE peers ADD COLUMN " + col)
                 except sqlite3.OperationalError:
                     pass
-            for col in ("reply TEXT", "task TEXT"):          # ответ на сообщение; карточка задания
+            for col in ("reply TEXT", "task TEXT", "fwd TEXT", "read_at INT"):  # ответ; задание; переслано; прочитано
                 try:
                     self.db.execute("ALTER TABLE messages ADD COLUMN " + col)
                 except sqlite3.OperationalError:
@@ -232,6 +232,7 @@ class Node(QObject):
     message = Signal(str, bool)              # id сообщения, новое ли (а не смена статуса)
     task_changed = Signal(str, str, str)     # id задания, кто сменил, новый статус
     file_progress = Signal(str, int, int)    # id сообщения, принято, всего
+    typing = Signal(str, str)                # чат, кто печатает
 
     def __init__(self, cfg: dict):
         super().__init__()
@@ -760,7 +761,7 @@ class Node(QObject):
 
     # ---------- отправка
     def send(self, chat: str, text: str = "", file: Path | None = None, reply: dict | None = None,
-             task: dict | None = None) -> str:
+             task: dict | None = None, fwd: str | None = None) -> str:
         mid = uuid.uuid4().hex
         fmeta = None
         if file is not None:
@@ -774,23 +775,104 @@ class Node(QObject):
             m.update(xcode=self.cfg["mycode"], xpeer={"code": chat[1:], "name": c.get("name", ""), "dept": c.get("dept", "")})
         if reply:
             m["reply"] = reply
+        if fwd:
+            m["fwd"] = fwd
         if task:
             task = dict(task, status=task.get("status") or TASK_NEW, by=self.cfg["name"], at=m["ts"])
             m["task"] = task
         targets = self._targets(chat)
         status = f"0/{len([t for t in targets if t not in self.my_devices()])}" if chat == ALL else "queued"
-        self.store.q("INSERT INTO messages(id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task) "
-                     "VALUES(?,?,?,?,?,?,?,1,?,?,?,?)",
+        self.store.q("INSERT INTO messages(id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd) "
+                     "VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?)",
                      (mid, chat, self.id, self.cfg["name"], m["ts"], text, json.dumps(fmeta) if fmeta else None,
                       status, str(file) if file else None,
                       json.dumps(reply, ensure_ascii=False) if reply else None,
-                      json.dumps(task, ensure_ascii=False) if task else None))
+                      json.dumps(task, ensure_ascii=False) if task else None, fwd))
         payload = json.dumps(m, ensure_ascii=False)
         for t in targets:
             self.store.q("INSERT OR IGNORE INTO outbox(peer,msg_id,payload) VALUES(?,?,?)", (t, mid, payload))
         self.message.emit(mid, True)
         self._wake.set()
         return mid
+
+    # ---------- «прочитано» и «печатает…» (только личные чаты)
+    def _ctl(self, chat, kind, ref_id, **extra):
+        """Служебное сообщение. Его id — id уже существующего сообщения, поэтому старые версии
+        программы считают его повтором и молча пропускают."""
+        m = {"type": kind, "id": ref_id, "from": self.id, "name": self.cfg["name"], "dept": self.cfg.get("dept", ""),
+             "uid": self.my_uid, "to": chat, "ts": now_ms(), "port": TCP_PORT, "text": "", "file": None}
+        if is_ext(chat):
+            m["xcode"] = self.cfg["mycode"]
+        m.update(extra)
+        return m
+
+    def send_seen(self, chat):
+        """Сообщить собеседнику (и своим устройствам), что его сообщения прочитаны."""
+        if chat == ALL or not chat:
+            return
+        r = self.store.q("SELECT id,ts FROM messages WHERE chat=? AND mine=0 ORDER BY ts DESC LIMIT 1", (chat,), one=True)
+        if not r:
+            return
+        key = "seen:" + chat
+        if self.__dict__.setdefault("_seen_sent", {}).get(key) == r[0]:
+            return
+        self._seen_sent[key] = r[0]
+        payload = json.dumps(self._ctl(chat, "seen", r[0], upto=r[1]), ensure_ascii=False)
+        for t in self._targets(chat):
+            self.store.q("INSERT OR REPLACE INTO outbox(peer,msg_id,payload) VALUES(?,?,?)", (t, key, payload))
+        self._wake.set()
+
+    def send_typing(self, chat):
+        """«Печатает…» — без очереди: только тем, кто сейчас на связи."""
+        if chat == ALL or is_ext(chat) or time.time() - self.__dict__.get("_typing_at", 0) < 4:
+            return
+        self._typing_at = time.time()
+        r = self.store.q("SELECT id FROM messages WHERE chat=? ORDER BY ts DESC LIMIT 1", (chat,), one=True)
+        if not r:
+            return
+        m = self._ctl(chat, "typing", r[0])
+        devs = [d for d in self.devices(chat) if d in {p["id"] for p in self.peers() if p["online"]}]
+
+        def go():
+            for d in devs:
+                p = self.peer(d)
+                try:
+                    if p and p["lan"]:
+                        c, _r = self._request(p, "POST", "/msg", json.dumps(m, ensure_ascii=False).encode(), timeout=3)
+                        c.close()
+                    elif self.server_addr():
+                        self._relay_send(d, m)
+                except Exception:
+                    pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def _on_ctl(self, m, ext):
+        """Пришло «прочитано» или «печатает…»."""
+        if ext:
+            chat, mine = "x" + norm_code(m.get("xcode", "")), False
+        else:
+            sp = self.peer(m.get("from", ""))
+            s_uid = m.get("uid") or (uid_of(sp["name"], sp["dept"]) if sp else uid_of(m.get("name", ""), m.get("dept", "")))
+            mine = s_uid == self.my_uid
+            chat = m.get("to") if mine else s_uid
+        if not chat or chat == ALL:
+            return
+        if m["type"] == "typing":
+            if not mine:
+                self.typing.emit(chat, m.get("name", ""))
+            return
+        upto = int(m.get("upto") or 0)
+        if mine:                                    # прочитал на другом своём устройстве
+            self.store.q("UPDATE messages SET unread=0 WHERE chat=? AND ts<=? AND unread=1", (chat, upto))
+            self.peers_changed.emit()
+            return
+        rows = self.store.q("SELECT id FROM messages WHERE chat=? AND mine=1 AND ts<=? AND (status IS NULL OR status!='read')",
+                            (chat, upto))
+        if rows:
+            self.store.q("UPDATE messages SET status='read', read_at=? WHERE chat=? AND mine=1 AND ts<=? "
+                         "AND (status IS NULL OR status!='read')", (int(m.get("ts") or now_ms()), chat, upto))
+            for (i,) in rows:
+                self.message.emit(i, False)
 
     def task_update(self, mid: str, status: str):
         """Сменить статус задания (у себя и у всех, кому оно было отправлено)."""
@@ -868,7 +950,7 @@ class Node(QObject):
             return
         if row[0] == ALL:
             return self._delivered(mid)
-        if row[1] != "delivered":
+        if row[1] not in ("delivered", "read"):
             self.store.q("UPDATE messages SET status='relay' WHERE id=?", (mid,))
             self.message.emit(mid, False)
 
@@ -1139,12 +1221,14 @@ class Node(QObject):
         if m.get("type") == "ack":                          # получатель подтвердил — ✓✓
             row = self.store.q("SELECT chat,mine FROM messages WHERE id=?", (m.get("id"),), one=True)
             if row and row[1] and row[0] != ALL and m.get("from") not in self.my_devices():
-                self.store.q("UPDATE messages SET status='delivered' WHERE id=?", (m["id"],))
+                self.store.q("UPDATE messages SET status='delivered' WHERE id=? AND status!='read'", (m["id"],))
                 self.message.emit(m["id"], False)
             return
         if not m.get("id") or not m.get("from") or m["from"] == self.id:
             return
         self.receive(m, None)
+        if m.get("type") in ("seen", "typing"):
+            return
         self._relay_send(m["from"], {"type": "ack", "id": m["id"], "from": self.id})
 
     def _delivered(self, mid):
@@ -1152,6 +1236,8 @@ class Node(QObject):
         if not row:
             return
         chat, st = row
+        if st == "read":
+            return
         if chat == ALL and "/" in (st or ""):
             a, b = st.split("/")
             st = f"{int(a) + 1}/{b}"
@@ -1162,6 +1248,14 @@ class Node(QObject):
 
     # ---------- приём
     def receive(self, m, ip, ext=False):
+        if m.get("type") in ("seen", "typing") and m.get("from") != self.id:
+            if ip and not ext:
+                d = {"id": m["from"], "name": m.get("name"), "port": m.get("port") or 47801, "plat": m.get("plat", "")}
+                if "dept" in m:
+                    d["dept"] = m.get("dept") or ""
+                self._upsert(d, ip)
+            self._on_ctl(m, ext)
+            return
         if ext:                                     # письмо от внешнего контакта (не из организации)
             code = norm_code(m.get("xcode", ""))
             c = self.contacts().setdefault(code, {"name": m.get("name", ""), "dept": ""})
@@ -1292,7 +1386,7 @@ class Node(QObject):
 
     # ---------- чтение для интерфейса
     def msg(self, mid):
-        r = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task FROM messages "
+        r = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd,read_at FROM messages "
                          "WHERE id=?", (mid,), one=True)
         return self._row(r) if r else None
 
@@ -1300,34 +1394,36 @@ class Node(QObject):
     def _row(r):
         return dict(id=r[0], chat=r[1], sender=r[2], sender_name=r[3], ts=r[4], text=r[5] or "",
                     file=json.loads(r[6]) if r[6] else None, mine=bool(r[7]), status=r[8], local=r[9],
-                    reply=json.loads(r[10]) if r[10] else None, task=json.loads(r[11]) if r[11] else None)
+                    reply=json.loads(r[10]) if r[10] else None, task=json.loads(r[11]) if r[11] else None,
+                    fwd=r[12] if len(r) > 12 else None, read_at=r[13] if len(r) > 13 else None)
 
     def search(self, text: str, limit=100):
         """Поиск по всей переписке: текст, имена файлов, задания."""
         pat = "%" + text.lower().replace("%", "").replace("_", "") + "%"
-        rows = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task FROM messages "
+        rows = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd,read_at FROM messages "
                             "WHERE lowr(text) LIKE ? OR lowr(file) LIKE ? OR lowr(task) LIKE ? OR lowr(sender_name) LIKE ? "
                             "ORDER BY ts DESC LIMIT ?", (pat, pat, pat, pat, limit))
         return [self._row(r) for r in rows]
 
     def tasks(self, limit=200):
-        rows = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task FROM messages "
+        rows = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd,read_at FROM messages "
                             "WHERE task IS NOT NULL ORDER BY ts DESC LIMIT ?", (limit,))
         return [self._row(r) for r in rows]
 
     def history(self, chat, limit=500):
-        rows = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task FROM messages "
+        rows = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd,read_at FROM messages "
                             "WHERE chat=? ORDER BY ts DESC LIMIT ?", (chat, limit))
         return [self._row(r) for r in reversed(rows)]
 
     def last_and_unread(self, chat):
-        last = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task FROM messages "
+        last = self.store.q("SELECT id,chat,sender,sender_name,ts,text,file,mine,status,local,reply,task,fwd,read_at FROM messages "
                             "WHERE chat=? ORDER BY ts DESC LIMIT 1", (chat,), one=True)
         unread = self.store.q("SELECT COUNT(*) FROM messages WHERE chat=? AND unread=1", (chat,), one=True)[0]
         return (self._row(last) if last else None), unread
 
     def mark_read(self, chat):
         self.store.q("UPDATE messages SET unread=0 WHERE chat=? AND unread=1", (chat,))
+        self.send_seen(chat)
 
     def queued_count(self):
         return self.store.q("SELECT COUNT(*) FROM outbox", one=True)[0]
@@ -1610,6 +1706,151 @@ def due_info(due: str):
     return f"до {d:%d.%m} (осталось {left} дн.)", False
 
 
+def safe_name(s: str) -> str:
+    return "".join(ch for ch in s if ch not in '\\/:*?"<>|').strip() or "задание"
+
+
+def write_task_report(path: Path, items, chat_title, period):
+    """Отчёт по заданиям: лист «Задания» и лист «Итоги»."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Задания"
+    head = ["Создано", "Деталь / что сделать", "Чертёж / УП", "Материал", "Кол-во, шт", "Срок", "Исполнитель",
+            "Статус", "Кто изменил статус", "Когда", "Чат", "Автор", "Просрочено"]
+    ws.append(head)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="007AFF")
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+    fills = {TASK_NEW: "E5E5EA", TASK_WORK: "FFE0B2", TASK_DONE: "CCE4FF", TASK_OK: "D4F5DC", TASK_REWORK: "FFD6D3"}
+    for m in sorted(items, key=lambda m: m["ts"]):
+        t = m["task"]
+        st = t.get("status") or TASK_NEW
+        late = due_info(t["due"])[1] and st not in (TASK_DONE, TASK_OK) if t.get("due") else False
+        qty = t.get("qty")
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            pass
+        ws.append([datetime.fromtimestamp(m["ts"] / 1000), t.get("title", ""), t.get("drawing", ""), t.get("material", ""),
+                   qty or "", t.get("due", ""), t.get("who", ""), st, t.get("by", ""),
+                   datetime.fromtimestamp((t.get("at") or m["ts"]) / 1000), chat_title(m["chat"]),
+                   "Я" if m["mine"] else m["sender_name"], "да" if late else ""])
+        r = ws.max_row
+        ws.cell(r, 8).fill = PatternFill("solid", fgColor=fills.get(st, "FFFFFF"))
+        if late:
+            ws.cell(r, 13).font = Font(bold=True, color="FF3B30")
+        for col in (1, 10):
+            ws.cell(r, col).number_format = "DD.MM.YYYY HH:MM"
+    for i, w in enumerate([16, 34, 20, 18, 10, 12, 18, 14, 18, 16, 22, 16, 11], 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    s2 = wb.create_sheet("Итоги")
+    s2.append([f"Отчёт RafChat по заданиям — {period}"])
+    s2["A1"].font = Font(bold=True, size=14)
+    s2.append([f"Сформирован {datetime.now():%d.%m.%Y %H:%M}"])
+    s2.append([])
+    s2.append(["Статус", "Заданий"])
+    for st in (TASK_NEW, TASK_WORK, TASK_DONE, TASK_OK, TASK_REWORK):
+        s2.append([st, sum(1 for m in items if (m["task"].get("status") or TASK_NEW) == st)])
+    s2.append(["Всего", len(items)])
+    s2.append(["Просрочено", sum(1 for m in items if m["task"].get("due") and due_info(m["task"]["due"])[1]
+                                 and m["task"].get("status") not in (TASK_DONE, TASK_OK))])
+    s2.append([])
+    s2.append(["Исполнитель", "Всего", "Готово / принято", "В работе", "Доработка"])
+    who = {}
+    for m in items:
+        k = m["task"].get("who") or "— не указан"
+        w = who.setdefault(k, [0, 0, 0, 0])
+        st = m["task"].get("status") or TASK_NEW
+        w[0] += 1
+        w[1] += st in (TASK_DONE, TASK_OK)
+        w[2] += st == TASK_WORK
+        w[3] += st == TASK_REWORK
+    for k, w in sorted(who.items()):
+        s2.append([k] + w)
+    for r in (4, 13):
+        for c in s2[r]:
+            c.font = Font(bold=True)
+    s2.column_dimensions["A"].width = 26
+    for c in "BCDE":
+        s2.column_dimensions[c].width = 16
+    wb.save(str(path))
+
+
+def write_task_sheet(path: Path, m, chat_name):
+    """Лист задания (А5) с QR-кодом: телефон с RafChat открывает по нему задание."""
+    import qrcode
+    from PySide6.QtCore import QMarginsF
+    from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter
+    t = m["task"]
+    pw = QPdfWriter(str(path))
+    pw.setPageSize(QPageSize(QPageSize.A5))
+    pw.setPageLayout(QPageLayout(QPageSize(QPageSize.A5), QPageLayout.Portrait, QMarginsF(12, 12, 12, 12)))
+    pw.setResolution(300)
+    p = QPainter(pw)
+    W = pw.width()
+    y = 0
+    f = QFont("Arial")
+    f.setPixelSize(64)
+    f.setBold(True)
+    p.setFont(f)
+    r = p.boundingRect(QRectF(0, y, W, 2000), Qt.TextWordWrap, t.get("title", ""))
+    p.drawText(r, Qt.TextWordWrap, t.get("title", ""))
+    y = r.bottom() + 40
+    f.setPixelSize(40)
+    f.setBold(False)
+    p.setFont(f)
+    rows = [("Чертёж / УП", t.get("drawing")), ("Материал", t.get("material")),
+            ("Количество", f"{t['qty']} шт" if t.get("qty") else ""), ("Срок", t.get("due")),
+            ("Исполнитель", t.get("who")), ("Статус", t.get("status") or TASK_NEW),
+            ("Выдал", m["sender_name"] + datetime.fromtimestamp(m["ts"] / 1000).strftime("  %d.%m.%Y")),
+            ("Чат", chat_name)]
+    for k, v in rows:
+        if not v:
+            continue
+        f.setBold(False)
+        p.setFont(f)
+        p.setPen(QColor("#666666"))
+        p.drawText(QRectF(0, y, W * 0.32, 60), Qt.AlignLeft, k)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("#000000"))
+        rr = p.boundingRect(QRectF(W * 0.32, y, W * 0.68, 1000), Qt.TextWordWrap, str(v))
+        p.drawText(rr, Qt.TextWordWrap, str(v))
+        y = max(y + 60, rr.bottom() + 14)
+    if t.get("note"):
+        f.setBold(False)
+        p.setFont(f)
+        rr = p.boundingRect(QRectF(0, y + 10, W, 1000), Qt.TextWordWrap, t["note"])
+        p.drawText(rr, Qt.TextWordWrap, t["note"])
+        y = rr.bottom() + 20
+    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data("rafchat://task/" + m["id"])
+    qr.make(fit=True)
+    mx = qr.get_matrix()
+    side = int(min(W * 0.55, pw.height() - y - 160))
+    cell = side / len(mx)
+    x0 = (W - side) / 2
+    y0 = pw.height() - side - 130
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor("#000000"))
+    for i, row in enumerate(mx):
+        for j, v in enumerate(row):
+            if v:
+                p.drawRect(QRectF(x0 + j * cell, y0 + i * cell, cell + 0.6, cell + 0.6))
+    f.setPixelSize(32)
+    f.setBold(False)
+    p.setFont(f)
+    p.setPen(QColor("#444444"))
+    p.drawText(QRectF(0, y0 + side + 20, W, 100), Qt.AlignHCenter | Qt.TextWordWrap,
+               "Наведите камеру телефона — откроется задание в RafChat")
+    p.end()
+
+
 def image_thumb(path: str, side: int) -> QPixmap | None:
     """Миниатюра фото (длинная сторона ≤ side) со скруглёнными углами; поворот по EXIF учитывается."""
     from PySide6.QtGui import QImageReader, QPainterPath
@@ -1654,6 +1895,10 @@ class Bubble(QFrame):
             lay.addWidget(n)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
+        if m.get("fwd"):
+            fl = QLabel("↪ Переслано от " + m["fwd"])
+            fl.setStyleSheet(f"font-style:italic; font-size:12px; color:{'rgba(255,255,255,0.8)' if me else P['muted']}")
+            lay.addWidget(fl)
         if m.get("reply"):                                 # цитата сообщения, на которое ответили
             rp = m["reply"]
             q = QFrame()
@@ -1756,6 +2001,9 @@ class Bubble(QFrame):
                 st = "  ✓ на сервере"
             elif s == "delivered":
                 st = "  ✓✓"
+            elif s == "read":
+                ra = datetime.fromtimestamp((m.get("read_at") or m["ts"]) / 1000).strftime("%H:%M")
+                st = f"  ✓✓ прочитано {ra}"
             elif "/" in s:
                 a, b = s.split("/")
                 st = "  ✓✓" if a == b and b != "0" else f"  ✓ {a} из {b}"
@@ -1858,15 +2106,22 @@ class Bubble(QFrame):
                     fn=lambda: self.win.attach_to_task(self.m))
         fb.setStyleSheet("min-height:32px; font-size:14px; padding:2px 10px")
         self.task_btns.addWidget(fb)
+        qb = button("🖨 QR", "tinted", tip="Лист задания с QR-кодом: распечатать и положить к детали",
+                    fn=lambda: self.win.print_task(self.m))
+        qb.setStyleSheet("min-height:32px; font-size:14px; padding:2px 10px")
+        self.task_btns.addWidget(qb)
         self.task_btns.addStretch(1)
 
     def _menu(self, pos):
         mn = QMenu(self)
         a_reply = mn.addAction("Ответить")
+        a_fwd = mn.addAction("Переслать…")
         a_copy = mn.addAction("Копировать текст") if self.m["text"] and not self.m.get("task") else None
         act = mn.exec(self.mapToGlobal(pos))
         if act is a_reply:
             self.win.start_reply(self.m)
+        elif act is a_fwd:
+            self.win.forward(self.m)
         elif a_copy is not None and act is a_copy:
             QApplication.clipboard().setText(self.m["text"])
 
@@ -2015,6 +2270,7 @@ class ChatWindow(QMainWindow):
         gm.addAction("Установить сервер на VPS…", self.setup_server)
         gm.addAction("Фото профиля…", self.choose_photo)
         gm.addAction("Мой код для внешних контактов…", self.show_my_code)
+        gm.addAction("Отчёт по заданиям в Excel…", self.task_report)
         gm.addAction("Папка с файлами", lambda: open_local(self._downloads()))
         gm.addSeparator()
         gm.addAction(f"О программе RafChat {APP_VER}", self.about)
@@ -2162,7 +2418,14 @@ class ChatWindow(QMainWindow):
         node.message.connect(self._on_message)
         node.file_progress.connect(self._on_progress)
         node.task_changed.connect(self._task_changed)
+        node.typing.connect(self._on_typing)
+        self._typing_until = 0.0
+        self._typing_timer = QTimer(self, singleShot=True, interval=6500, timeout=self._update_head)
+        self.input.textChanged.connect(lambda: self.node.send_typing(self.chat) if self.input.toPlainText().strip() else None)
         self._tray()
+        self._remind_timer = QTimer(self, interval=10 * 60 * 1000, timeout=self.check_deadlines)
+        self._remind_timer.start()
+        QTimer.singleShot(20_000, self.check_deadlines)
         self._refresh_timer = QTimer(self, singleShot=True, interval=300, timeout=self.fill_chats)
         self.fill_chats()
         self.open_chat(ALL)
@@ -2313,7 +2576,15 @@ class ChatWindow(QMainWindow):
         self._refresh_timer.start()
         self.input.setFocus()
 
+    def _on_typing(self, chat, name):
+        if chat == self.chat:
+            self.head_sub.setText("печатает…")
+            self._typing_timer.start()
+        self._typing_chat = chat
+
     def _update_head(self):
+        if getattr(self, "_typing_timer", None) and self._typing_timer.isActive() and getattr(self, "_typing_chat", None) == self.chat:
+            return
         if self.chat == ALL:
             peers = self.node.accounts()
             on = sum(p["online"] for p in peers)
@@ -2462,6 +2733,122 @@ class ChatWindow(QMainWindow):
             rp = {"id": m["id"], "name": m["sender_name"], "text": "📋 " + m["task"].get("title", "задание")}
             for p in paths:
                 self.node.send(m["chat"], "", Path(p), reply=rp)
+
+    # ---------- пересылка
+    def forward(self, m):
+        f = m.get("file")
+        path = Path(m["local"]) if m.get("local") else None
+        if f and not (path and path.is_file()):
+            QMessageBox.information(self, "RafChat", "Сначала скачайте файл — потом его можно переслать.")
+            return
+        d = QDialog(self)
+        d.setWindowTitle("Переслать")
+        d.resize(380, 520)
+        lay = QVBoxLayout(d)
+        lay.addWidget(label("Кому переслать:", "small"))
+        lst = QListWidget()
+        lst.setObjectName("chats")
+        it = QListWidgetItem(QIcon(avatar("", "", 44, group=True)), "Общий чат")
+        it.setData(ROLE, ALL)
+        lst.addItem(it)
+        seen = set()
+        for p in self.node.visible_chats() + sorted(self.node.accounts(), key=lambda a: a["name"].lower()):
+            if p["id"] in seen or p["id"] == m["chat"]:
+                continue
+            seen.add(p["id"])
+            it = QListWidgetItem(QIcon(self._peer_avatar(p)),
+                                 p["name"] + (f" · {p['dept']}" if p["dept"] else "") + ("  🌐" if p.get("ext") else ""))
+            it.setData(ROLE, p["id"])
+            lst.addItem(it)
+        lay.addWidget(lst, 1)
+        chosen = []
+        lst.itemClicked.connect(lambda it: (chosen.append(it.data(ROLE)), d.accept()))
+        d.exec()
+        if not chosen:
+            return
+        to = chosen[0]
+        who = m.get("fwd") or (self.cfg["name"] if m["mine"] else m["sender_name"])
+        task = dict(m["task"], status=TASK_NEW) if m.get("task") else None
+        self.node.open_chat_with(to)
+        self.node.send(to, m["text"], path if f else None, task=task, fwd=who)
+        self.open_chat(to)
+        self.fill_chats()
+
+    # ---------- напоминания о сроке задания
+    def check_deadlines(self):
+        if not hasattr(self, "tray"):
+            return
+        me = self.cfg["name"].strip().lower()
+        today = datetime.now().date()
+        done = self.cfg.setdefault("reminded", {})
+        changed = False
+        for m in self.node.tasks(500):
+            t = m["task"]
+            if t.get("status") in (TASK_DONE, TASK_OK) or not t.get("due"):
+                continue
+            if not (m["mine"] or (t.get("who") or "").strip().lower() == me):
+                continue
+            try:
+                due = datetime.strptime(t["due"], "%d.%m.%Y").date()
+            except ValueError:
+                continue
+            left = (due - today).days
+            kind = "late" if left < 0 else ("today" if left == 0 else ("tomorrow" if left == 1 else None))
+            if not kind or done.get(m["id"] + ":" + kind):
+                continue
+            done[m["id"] + ":" + kind] = int(time.time())
+            changed = True
+            txt = {"tomorrow": "Срок — завтра", "today": "Срок — сегодня", "late": "Срок прошёл!"}[kind]
+            self._notify_chat = m["chat"]
+            self.tray.showMessage(f"⏰ {txt}: {t.get('title', '')}",
+                                  f"Статус: {t.get('status') or TASK_NEW}" + (f" · исполнитель: {t['who']}" if t.get("who") else ""),
+                                  self._tray_icon(), 10000)
+        if changed:
+            save_cfg(self.cfg)
+
+    # ---------- отчёт в Excel
+    def task_report(self):
+        items = self.node.tasks(5000)
+        if not items:
+            QMessageBox.information(self, "RafChat", "Заданий пока нет.")
+            return
+        months = sorted({datetime.fromtimestamp(m["ts"] / 1000).strftime("%m.%Y") for m in items},
+                        key=lambda x: (x[3:], x[:2]), reverse=True)
+        d = QDialog(self)
+        d.setWindowTitle("Отчёт по заданиям")
+        f = QFormLayout(d)
+        cb = QComboBox()
+        cb.addItems(months + ["Все задания"])
+        f.addRow("Месяц (по дате создания):", cb)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(d.accept)
+        bb.rejected.connect(d.reject)
+        f.addRow(bb)
+        if d.exec() != QDialog.Accepted:
+            return
+        mon = cb.currentText()
+        if mon != "Все задания":
+            items = [m for m in items if datetime.fromtimestamp(m["ts"] / 1000).strftime("%m.%Y") == mon]
+        name = f"Задания {mon.replace('.', '-') if mon != 'Все задания' else 'все'}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчёт", str(self._downloads() / name), "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            write_task_report(Path(path), items, self._chat_title, mon)
+        except Exception as e:
+            QMessageBox.warning(self, "RafChat", f"Не удалось сохранить отчёт: {e}")
+            return
+        open_local(Path(path))
+
+    # ---------- лист задания с QR-кодом
+    def print_task(self, m):
+        dest = self._downloads() / f"Задание {safe_name(m['task'].get('title', 'задание'))[:40]}.pdf"
+        try:
+            write_task_sheet(dest, m, self._chat_title(m["chat"]))
+        except Exception as e:
+            QMessageBox.warning(self, "RafChat", f"Не удалось сделать лист: {e}")
+            return
+        open_local(dest)
 
     def show_tasks(self):
         self.search.blockSignals(True)
