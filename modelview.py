@@ -158,7 +158,9 @@ class Api:
         import base64
         import webview
         ext = os.path.splitext(name)[1].lower().lstrip(".")
-        kinds = {"pdf": "PDF", "png": "Изображение PNG", "stl": "STL", "obj": "OBJ"}
+        kinds = {"pdf": "PDF", "png": "Изображение PNG", "jpg": "Изображение JPG", "stl": "STL", "obj": "OBJ", "ply": "PLY",
+                 "glb": "glTF (GLB)", "3mf": "3MF", "dxf": "Чертёж DXF", "dwg": "Чертёж DWG", "svg": "SVG", "step": "STEP", "stp": "STEP",
+                 "iges": "IGES", "igs": "IGES", "brep": "BREP"}
         types = (f"{kinds.get(ext, ext.upper())} (*.{ext})", "Все файлы (*.*)") if ext else ("Все файлы (*.*)",)
         res = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=name, file_types=types)
         if not res:

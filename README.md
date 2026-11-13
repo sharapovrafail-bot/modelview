@@ -25,7 +25,8 @@
 - Дерево сборки, сечение, измерения, габариты, центр масс, режимы отображения.
 - **Эскизы моделей в Проводнике Windows** — вместо значков картинка детали.
 - **Ведомость заготовок / карта нарезки**: круг, квадрат, шестигранник, труба, лист; масса, хлысты, пропил.
-- **Чертёж** нескольких моделей одним PDF, техпроцесс, экспорт.
+- **Чертёж** нескольких моделей одним PDF, техпроцесс.
+- **Сохранить как** и **экспорт** в STL, OBJ, 3MF, GLB, PLY, DXF (в т.ч. DWG → DXF), SVG, PDF, PNG, JPG.
 
 **Скачать:** [Releases](https://github.com/sharapovrafail-bot/modelview/releases) — Windows `RafCADView-Setup-*.exe`,
 Mac — [mac-latest](https://github.com/sharapovrafail-bot/modelview/releases/tag/mac-latest) (Apple M и Intel).

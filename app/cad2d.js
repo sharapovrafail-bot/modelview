@@ -603,6 +603,7 @@ export function buildDrawing(doc, opts = {}) {
 						}
 					}
 					const mesh = textMesh(lines, hex(color), opt);
+					mesh.userData.textInfo = { lines, h: opt.h, ha: opt.ha || 0, vRef: opt.vRef, color };
 					const lm = mul(em, trs(anchor.x, anchor.y, rot, 1, 1));
 					mesh.matrixAutoUpdate = false;
 					mesh.matrix.set(lm[0] * S, lm[2] * S, 0, lm[4] * S, lm[1] * S, lm[3] * S, 0, lm[5] * S, 0, 0, 1, 0.001, 0, 0, 0, 1);

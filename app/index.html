@@ -296,10 +296,13 @@
       <div class="glass panel">
         <div class="panel-head"><i data-icon="export" class="accent"></i><span>Экспорт</span></div>
         <div class="pad stack">
+          <button class="wide primary-btn" id="expSaveAs"><i data-icon="export"></i>Сохранить как… (исходный файл)</button>
+          <div class="muted small" id="expSaveAsHint">Копия открытого файла под новым именем — без изменений и потерь (Ctrl+Shift+S).</div>
+          <label class="muted small" for="expFmt">Экспорт в формат</label>
+          <select id="expFmt" class="wide"></select>
+          <button class="wide" id="expGo"><i data-icon="export"></i>Экспортировать</button>
+          <div class="muted small" id="expHint">Экспортируются видимые детали (скрытые в дереве — нет).</div>
           <button class="wide" id="expPng"><i data-icon="camera"></i>Снимок PNG</button>
-          <button class="wide" id="expStl"><i data-icon="export"></i>Сохранить как STL</button>
-          <button class="wide" id="expObj"><i data-icon="export"></i>Сохранить как OBJ</button>
-          <div class="muted small">Экспортируются видимые детали.</div>
         </div>
       </div>
     </div>

@@ -1,0 +1,47 @@
+# Сборка RafCAD View для Windows на компьютере GitHub: RafCADView-Setup-<версия>.exe
+# (PyInstaller + обработчик эскизов RafCADThumbs.dll на MSVC + Inno Setup) → релиз v<версия> и win-latest.
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'modelview.py', 'server.py', 'thumbs.py', 'thumbnailer/**', 'build/**', 'VERSION', '.github/workflows/windows.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pillow pywebview
+          choco install innosetup -y --no-progress
+      - name: Сборка установщика
+        shell: cmd
+        run: call build\build.bat
+      - name: Версия
+        shell: bash
+        run: echo "VER=$(cat VERSION | tr -d '\r\n')" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rafcad-windows
+          path: RafCADView-Setup-*.exe
+      - name: Релиз
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "v$VER" --yes --cleanup-tag || true
+          gh release create "v$VER" RafCADView-Setup-$VER.exe --title "RafCAD View $VER" \
+            --notes "RafCAD View $VER для Windows 10/11. Новое: «Сохранить как» и экспорт в STL, OBJ, 3MF, GLB, PLY, DXF, SVG, PDF, PNG, JPG." --latest
+          gh release delete win-latest --yes --cleanup-tag || true
+          gh release create win-latest RafCADView-Setup-$VER.exe --title "RafCAD View для Windows (последняя сборка)" \
+            --notes "Автосборка на GitHub Actions." --latest=false

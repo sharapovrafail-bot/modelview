@@ -8,6 +8,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
+import { FORMATS3D, FORMATS2D, FORMATSIMG, export3d, collect2d, writeDxf, writeSvg, writePdf } from './export.js';
 import { faceTriangles, analyzeFace, relate, mergeCoaxialFaces } from './measure-math.js';
 import { compareSoups } from './compare.js';
 import { analyzePart, chooseBlank, buildRoute, describePart, DEFAULT_EQUIPMENT } from './techproc.js';
@@ -1227,6 +1228,7 @@ function showEmpty() {
 }
 
 function renderTabs() {
+	fillExportFormats();
 	fillCompareTargets();
 	const bar = $('docTabs');
 	bar.hidden = docs.length < 2;
@@ -2748,20 +2750,45 @@ function visibleGroup() {
 	}
 	return g;
 }
-$('expStl').onclick = () => {
-	if (!model.object) return;
-	if (model.is2d) { alert('Чертёж 2D нельзя сохранить в STL — сохраните снимок PNG.'); return; }
-	const g = visibleGroup();
-	const data = new STLExporter().parse(g, { binary: true });
-	download(new Blob([data], { type: 'model/stl' }), baseName() + '.stl');
-	disposeObject(g);
-};
-$('expObj').onclick = () => {
-	if (!model.object) return;
-	if (model.is2d) { alert('Чертёж 2D нельзя сохранить в OBJ — сохраните снимок PNG.'); return; }
-	const g = visibleGroup();
-	download(new Blob([new OBJExporter().parse(g)], { type: 'text/plain' }), baseName() + '.obj');
-	disposeObject(g);
+// «Сохранить как» — копия исходного файла; «Экспорт» — запись в выбранный формат
+function fillExportFormats() {
+	const sel = $('expFmt'); if (!sel) return;
+	const keep = sel.value;
+	const list = model.object ? (model.is2d ? FORMATS2D : FORMATS3D).concat(FORMATSIMG) : [];
+	sel.innerHTML = list.map((f) => `<option value="${f.id}">${f.name}</option>`).join('') || '<option>— откройте файл —</option>';
+	if (list.some((f) => f.id === keep)) sel.value = keep;
+	$('expHint').textContent = !model.object ? 'Откройте модель или чертёж.' : model.is2d
+		? 'Чертёж выгружается линиями и надписями видимых слоёв (дуги и сплайны — отрезками). DWG → DXF так тоже можно перевести.'
+		: 'Выгружаются видимые детали сеткой треугольников. STEP/IGES программа записать не может — для них «Сохранить как».';
+	const ext = (model.ext || '').toUpperCase();
+	$('expSaveAsHint').textContent = model.object ? `Копия открытого файла (${ext}) под новым именем — без изменений и потерь (Ctrl+Shift+S).` : 'Откройте файл.';
+}
+$('expSaveAs').onclick = saveAsOriginal;
+async function saveAsOriginal() {
+	if (!model.object || !model.buffer) { alert('Сначала откройте файл.'); return; }
+	await download(new Blob([model.buffer]), model.name || ('модель.' + (model.ext || 'bin')));
+}
+$('expGo').onclick = async () => {
+	if (!model.object) { alert('Сначала откройте файл.'); return; }
+	const id = $('expFmt').value, all = FORMATS3D.concat(FORMATS2D, FORMATSIMG), f = all.find((x) => x.id === id);
+	if (!f) return;
+	showLoading('Экспорт ' + f.ext.toUpperCase() + '…', false);
+	try {
+		let blob;
+		if (id === 'png' || id === 'jpg') {
+			render();
+			blob = await new Promise((r) => canvas.toBlob(r, id === 'jpg' ? 'image/jpeg' : 'image/png', 0.92));
+		} else if (model.is2d) {
+			const d = collect2d(model.object, isShown);
+			blob = id === 'dxf' ? new Blob([writeDxf(d)], { type: 'image/vnd.dxf' }) : id === 'svg' ? writeSvg(d) : writePdf(d, model.name);
+		} else {
+			const g = visibleGroup();
+			if (!g.children.length) throw new Error('Нет видимых деталей');
+			try { blob = await export3d(id, g); } finally { disposeObject(g); }
+		}
+		hideLoading();
+		await download(blob, baseName() + '.' + f.ext);
+	} catch (e) { hideLoading(); alert('Не удалось экспортировать:\n' + (e && e.message || e)); }
 };
 function baseName() { return (model.name || 'модель').replace(/\.[^.]+$/, ''); }
 async function download(blob, name) {
@@ -2803,6 +2830,8 @@ window.addEventListener('keydown', (e) => {
 	if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'range') return;
 	if (e.target.tagName === 'SELECT') return;
 	if (e.ctrlKey && e.code === 'KeyO') { e.preventDefault(); $('fileInput').click(); return; }
+	if (e.ctrlKey && e.shiftKey && e.code === 'KeyS') { e.preventDefault(); saveAsOriginal(); return; }
+	if (e.ctrlKey && !e.shiftKey && e.code === 'KeyE') { e.preventDefault(); showPage('export'); return; }
 	if (e.ctrlKey && e.code === 'KeyW') { e.preventDefault(); if (activeDoc >= 0) closeDoc(activeDoc); return; }
 	if (e.ctrlKey && e.code === 'Tab') {
 		e.preventDefault();
