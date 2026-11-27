@@ -1,8 +1,8 @@
 // Экспорт RafCAD View: «Сохранить как» (исходный файл) и запись в распространённые форматы.
 // 3D: STL (двоичный и текстовый), OBJ, PLY, GLB (glTF 2.0), 3MF.
 // 2D-чертёж: DXF (AutoCAD R12 — откроет любая CAD), SVG, PDF (вектор), PNG/JPG.
-// STEP/IGES/DWG программа записать не может: OpenCascade здесь только читает. Поэтому для них —
-// «Сохранить как» копирует исходный файл, а геометрия STEP/IGES/BREP выгружается сеткой (STL, 3MF, GLB…).
+// STEP: пишется самой программой (writeStep ниже) — плоские грани сливаются, кривые остаются гранёными.
+// Точная копия STEP/IGES/DWG без потерь — «Сохранить как» (копия исходного файла).
 import * as THREE from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
@@ -11,6 +11,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import * as fflate from 'three/addons/libs/fflate.module.js';
 
 export const FORMATS3D = [
+	{ id: 'step', ext: 'step', name: 'STEP (AP214) — для КОМПАС, SolidWorks, Fusion, FreeCAD' },
 	{ id: 'stl', ext: 'stl', name: 'STL — двоичный (3D-печать, CAM)' },
 	{ id: 'stla', ext: 'stl', name: 'STL — текстовый (ASCII)' },
 	{ id: 'obj', ext: 'obj', name: 'OBJ (Wavefront)' },
@@ -30,7 +31,7 @@ export const FORMATSIMG = [
 
 // ------------------------------------------------------------------ 3D
 // group — группа мешей в координатах модели (мм), как visibleGroup() в viewer.js
-export async function export3d(fmt, group) {
+export async function export3d(fmt, group, opts = {}) {
 	switch (fmt) {
 		case 'stl': return new Blob([new STLExporter().parse(group, { binary: true })], { type: 'model/stl' });
 		case 'stla': return new Blob([new STLExporter().parse(group, { binary: false })], { type: 'model/stl' });
@@ -45,6 +46,7 @@ export async function export3d(fmt, group) {
 			finally { kids.forEach((c) => group.add(c)); }
 		}
 		case '3mf': return new Blob([write3mf(group)], { type: 'model/3mf' });
+		case 'step': return new Blob([writeStep(group, opts.name).text], { type: 'model/step' });
 	}
 	throw new Error('Неизвестный формат ' + fmt);
 }
@@ -91,6 +93,204 @@ ${parts.map((p) => `<object id="${p.id}" type="model" name="${esc(p.name)}" pid=
 		'_rels/.rels': enc.encode('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'),
 		'3D/3dmodel.model': enc.encode(model),
 	}, { level: 6 });
+}
+
+// ------------------------------------------------------------------ STEP
+// Запись STEP (ISO 10303-21, AP214) из сеточной модели. OpenCascade в программе только читает,
+// поэтому STEP пишется сами: каждая деталь — тело B-rep из плоских граней. Соседние треугольники,
+// лежащие в одной плоскости, сливаются в одну грань — плоские стороны детали в CAD будут одной гранью,
+// цилиндры и сферы остаются гранёными (как в STL). Замкнутая деталь → твёрдое тело,
+// незамкнутая → поверхностная модель. Открывается в КОМПАС, SolidWorks, Fusion 360, FreeCAD, NX и др.
+export function writeStep(group, name = 'RafCAD View', opts = {}) {
+	const merge = opts.merge !== false;
+	const L = [];
+	let n = 0;
+	const add = (s) => { L.push(`#${++n}=${s};`); return n; };
+	const fx = (v) => { const r = Math.round(v * 1e6) / 1e6; let s = r.toString(); if (!/[.eE]/.test(s)) s += '.'; return s; };
+	const str = (s) => "'" + stepStr(s) + "'";
+	const bodies = [];
+	let closedAll = true, faces = 0, tris = 0;
+	for (const m of meshesOf(group)) {
+		const b = stepBody(m, merge, add, fx, str);
+		if (!b) continue;
+		bodies.push(b); faces += b.faces; tris += b.tris;
+		if (!b.closed) closedAll = false;
+	}
+	if (!bodies.length) throw new Error('Нет видимых деталей для записи');
+	// контекст: мм, радианы, стерадианы, точность 1e-6
+	const lenU = add('(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))');
+	const angU = add('(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))');
+	const solU = add('(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())');
+	const unc = add(`UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-06),#${lenU},'distance_accuracy_value','confusion accuracy')`);
+	const ctx = add(`(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${unc}))GLOBAL_UNIT_ASSIGNED_CONTEXT((#${lenU},#${angU},#${solU}))REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))`);
+	const o = add("CARTESIAN_POINT('',(0.,0.,0.))"), z = add("DIRECTION('',(0.,0.,1.))"), x = add("DIRECTION('',(1.,0.,0.))");
+	const ax = add(`AXIS2_PLACEMENT_3D('',#${o},#${z},#${x})`);
+	// тела: замкнутые — MANIFOLD_SOLID_BREP, иначе всё — оболочками SHELL_BASED_SURFACE_MODEL
+	let items;
+	if (closedAll) items = bodies.map((b) => add(`MANIFOLD_SOLID_BREP(${str(b.name)},#${b.shell})`));
+	else items = bodies.map((b) => add(`SHELL_BASED_SURFACE_MODEL(${str(b.name)},(#${b.shell}))`));
+	const rep = add(`${closedAll ? 'ADVANCED_BREP_SHAPE_REPRESENTATION' : 'MANIFOLD_SURFACE_SHAPE_REPRESENTATION'}(${str(name)},(#${ax},${items.map((i) => '#' + i).join(',')}),#${ctx})`);
+	// изделие
+	const appc = add("APPLICATION_CONTEXT('core data for automotive mechanical design processes')");
+	add(`APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#${appc})`);
+	const pc = add(`PRODUCT_CONTEXT('',#${appc},'mechanical')`);
+	const prod = add(`PRODUCT(${str(name)},${str(name)},'',(#${pc}))`);
+	add(`PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(#${prod}))`);
+	const pdc = add(`PRODUCT_DEFINITION_CONTEXT('part definition',#${appc},'design')`);
+	const pdf = add(`PRODUCT_DEFINITION_FORMATION('','',#${prod})`);
+	const pd = add(`PRODUCT_DEFINITION('design','',#${pdf},#${pdc})`);
+	const pds = add(`PRODUCT_DEFINITION_SHAPE('','',#${pd})`);
+	add(`SHAPE_DEFINITION_REPRESENTATION(#${pds},#${rep})`);
+	const now = new Date().toISOString().slice(0, 19);
+	const head = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('RafCAD View STEP export','${faces} faces from ${tris} triangles'),'2;1');
+FILE_NAME(${str(name)},'${now}',('Rafail Sharapov'),('RafCAD View'),'RafCAD View','RafCAD View','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+`;
+	return { text: head + L.join('\n') + '\nENDSEC;\nEND-ISO-10303-21;\n', bodies: bodies.length, faces, tris, closed: closedAll };
+}
+// STEP-строка: латиница как есть, остальное — \X2\…\X0\ (UTF-16)
+function stepStr(s) {
+	let out = '', buf = '';
+	const flush = () => { if (buf) { out += '\\X2\\' + buf + '\\X0\\'; buf = ''; } };
+	for (const ch of String(s)) {
+		const c = ch.codePointAt(0);
+		if (c >= 32 && c < 127) { flush(); out += ch === "'" ? "''" : ch === '\\' ? '\\\\' : ch; }
+		else if (c < 0x10000) buf += c.toString(16).toUpperCase().padStart(4, '0');
+	}
+	flush();
+	return out;
+}
+function stepBody(m, merge, add, fx, str) {
+	const g = m.geometry, pos = g.attributes.position, idx = g.index;
+	// 1) сварка вершин
+	const key = new Map(), P = [], remap = new Int32Array(pos.count);
+	const v = new THREE.Vector3(); const q = 1e4;
+	for (let i = 0; i < pos.count; i++) {
+		v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+		const k = Math.round(v.x * q) + ',' + Math.round(v.y * q) + ',' + Math.round(v.z * q);
+		let j = key.get(k); if (j === undefined) { j = P.length; key.set(k, j); P.push([v.x, v.y, v.z]); }
+		remap[i] = j;
+	}
+	const T = [];
+	const cnt = idx ? idx.count : pos.count;
+	for (let i = 0; i + 2 < cnt; i += 3) {
+		const a = remap[idx ? idx.getX(i) : i], b = remap[idx ? idx.getX(i + 1) : i + 1], c = remap[idx ? idx.getX(i + 2) : i + 2];
+		if (a === b || b === c || a === c) continue;
+		const n = triNormal(P[a], P[b], P[c]);
+		if (!n) continue;
+		T.push({ v: [a, b, c], n, d: n[0] * P[a][0] + n[1] * P[a][1] + n[2] * P[a][2] });
+	}
+	if (!T.length) return null;
+	// 2) рёбра: «a,b» направленное → треугольник
+	const dir = new Map();
+	T.forEach((t, ti) => { for (let k = 0; k < 3; k++) dir.set(t.v[k] + ',' + t.v[(k + 1) % 3], ti); });
+	let closed = true;
+	for (const k of dir.keys()) { const [a, b] = k.split(','); if (!dir.has(b + ',' + a)) { closed = false; break; } }
+	// 3) группы треугольников в одной плоскости (обход по общим рёбрам)
+	const reg = new Int32Array(T.length).fill(-1); const regions = [];
+	const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+	for (const p of P) for (let k = 0; k < 3; k++) { if (p[k] < lo[k]) lo[k] = p[k]; if (p[k] > hi[k]) hi[k] = p[k]; }
+	const size = Math.max(1e-9, hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+	const dTol = Math.max(1e-5, size * 1e-7);
+	for (let s = 0; s < T.length; s++) {
+		if (reg[s] >= 0) continue;
+		const r = regions.length, list = [s]; reg[s] = r;
+		if (merge) {
+			for (let h = 0; h < list.length; h++) {
+				const t = T[list[h]];
+				for (let k = 0; k < 3; k++) {
+					const o = dir.get(t.v[(k + 1) % 3] + ',' + t.v[k]);
+					if (o === undefined || reg[o] >= 0) continue;
+					const u = T[o];
+					if (u.n[0] * t.n[0] + u.n[1] * t.n[1] + u.n[2] * t.n[2] > 1 - 1e-9 && Math.abs(u.d - T[s].d) < dTol) { reg[o] = r; list.push(o); }
+				}
+			}
+		}
+		regions.push(list);
+	}
+	// 4) запись: точки, вершины, рёбра — общие для соседних граней
+	const pt = new Map(), vx = new Map(), ed = new Map();
+	const vertex = (i) => {
+		let id = vx.get(i); if (id) return id;
+		const p = add(`CARTESIAN_POINT('',(${fx(P[i][0])},${fx(P[i][1])},${fx(P[i][2])}))`); pt.set(i, p);
+		id = add(`VERTEX_POINT('',#${p})`); vx.set(i, id); return id;
+	};
+	const oedge = (a, b) => {
+		const lo = Math.min(a, b), hi = Math.max(a, b), k = lo + ',' + hi;
+		let e = ed.get(k);
+		if (!e) {
+			const va = vertex(lo), vb = vertex(hi);
+			const A = P[lo], B = P[hi], dx = B[0] - A[0], dy = B[1] - A[1], dz = B[2] - A[2], len = Math.hypot(dx, dy, dz);
+			const d = add(`DIRECTION('',(${fx(dx / len)},${fx(dy / len)},${fx(dz / len)}))`);
+			const vec = add(`VECTOR('',#${d},${fx(len)})`);
+			const ln = add(`LINE('',#${pt.get(lo)},#${vec})`);
+			e = add(`EDGE_CURVE('',#${va},#${vb},#${ln},.T.)`); ed.set(k, e);
+		}
+		return add(`ORIENTED_EDGE('',*,*,#${e},${a === lo ? '.T.' : '.F.'})`);
+	};
+	const faceIds = [];
+	const writeFace = (n, loops, p0) => {
+		const o = add(`CARTESIAN_POINT('',(${fx(p0[0])},${fx(p0[1])},${fx(p0[2])}))`);
+		const zd = add(`DIRECTION('',(${fx(n[0])},${fx(n[1])},${fx(n[2])}))`);
+		const xa = perp(n); const xd = add(`DIRECTION('',(${fx(xa[0])},${fx(xa[1])},${fx(xa[2])}))`);
+		const pl = add(`PLANE('',#${add(`AXIS2_PLACEMENT_3D('',#${o},#${zd},#${xd})`)})`);
+		const bounds = loops.map((lp, i) => {
+			const oe = lp.map((a, j) => oedge(a, lp[(j + 1) % lp.length]));
+			const el = add(`EDGE_LOOP('',(${oe.map((x) => '#' + x).join(',')}))`);
+			return add(`${i === 0 ? 'FACE_OUTER_BOUND' : 'FACE_BOUND'}('',#${el},.T.)`);
+		});
+		faceIds.push(add(`ADVANCED_FACE('',(${bounds.map((x) => '#' + x).join(',')}),#${pl},.T.)`));
+	};
+	for (const list of regions) {
+		const t0 = T[list[0]];
+		const loops = list.length > 1 ? regionLoops(list, T, P, t0.n) : null;
+		if (loops) writeFace(t0.n, loops, P[loops[0][0]]);
+		else for (const ti of list) writeFace(T[ti].n, [T[ti].v.slice()], P[T[ti].v[0]]);
+	}
+	const shell = add(`${closed ? 'CLOSED_SHELL' : 'OPEN_SHELL'}('',(${faceIds.map((x) => '#' + x).join(',')}))`);
+	return { shell, closed, name: m.name || 'Деталь', faces: faceIds.length, tris: T.length };
+}
+function triNormal(a, b, c) {
+	const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+	const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, l = Math.hypot(nx, ny, nz);
+	return l > 1e-12 ? [nx / l, ny / l, nz / l] : null;
+}
+function perp(n) {
+	const a = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+	const d = a[0] * n[0] + a[1] * n[1] + a[2] * n[2];
+	const x = [a[0] - d * n[0], a[1] - d * n[1], a[2] - d * n[2]], l = Math.hypot(...x);
+	return [x[0] / l, x[1] / l, x[2] / l];
+}
+// контуры плоской грани из треугольников: внешний первым, затем отверстия; null — если контур неоднозначен
+function regionLoops(list, T, P, n) {
+	const inReg = new Set();
+	for (const ti of list) { const v = T[ti].v; for (let k = 0; k < 3; k++) inReg.add(v[k] + ',' + v[(k + 1) % 3]); }
+	const next = new Map();
+	for (const k of inReg) {
+		const [a, b] = k.split(',');
+		if (inReg.has(b + ',' + a)) continue;
+		if (next.has(a)) return null; // вершина-«бабочка»: два выхода — пишем треугольниками
+		next.set(a, b);
+	}
+	const loops = [], used = new Set();
+	for (const s of next.keys()) {
+		if (used.has(s)) continue;
+		const lp = []; let c = s, guard = 0;
+		while (!used.has(c)) { used.add(c); lp.push(+c); c = next.get(c); if (c === undefined || ++guard > 1e7) return null; }
+		if (c !== s || lp.length < 3) return null;
+		loops.push(lp);
+	}
+	if (!loops.length) return null;
+	// площадь в плоскости грани (со знаком): внешний контур — положительный и самый большой
+	const area = (lp) => { let ax = 0, ay = 0, az = 0; for (let i = 0; i < lp.length; i++) { const a = P[lp[i]], b = P[lp[(i + 1) % lp.length]]; ax += a[1] * b[2] - a[2] * b[1]; ay += a[2] * b[0] - a[0] * b[2]; az += a[0] * b[1] - a[1] * b[0]; } return (ax * n[0] + ay * n[1] + az * n[2]) / 2; };
+	const A = loops.map(area);
+	let oi = 0; for (let i = 1; i < A.length; i++) if (A[i] > A[oi]) oi = i;
+	if (A[oi] <= 0 || A.filter((x) => x > 0).length > 1) return null; // несколько внешних контуров — не одна грань
+	return [loops[oi], ...loops.filter((_, i) => i !== oi)];
 }
 
 // ------------------------------------------------------------------ 2D

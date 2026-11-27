@@ -2759,7 +2759,7 @@ function fillExportFormats() {
 	if (list.some((f) => f.id === keep)) sel.value = keep;
 	$('expHint').textContent = !model.object ? 'Откройте модель или чертёж.' : model.is2d
 		? 'Чертёж выгружается линиями и надписями видимых слоёв (дуги и сплайны — отрезками). DWG → DXF так тоже можно перевести.'
-		: 'Выгружаются видимые детали сеткой треугольников. STEP/IGES программа записать не может — для них «Сохранить как».';
+		: 'Выгружаются видимые детали. STEP: плоские грани — целыми гранями, цилиндры и кривые — гранями-полосками (как в STL). Точная копия открытого STEP/IGES — «Сохранить как».';
 	const ext = (model.ext || '').toUpperCase();
 	$('expSaveAsHint').textContent = model.object ? `Копия открытого файла (${ext}) под новым именем — без изменений и потерь (Ctrl+Shift+S).` : 'Откройте файл.';
 }
@@ -2784,7 +2784,7 @@ $('expGo').onclick = async () => {
 		} else {
 			const g = visibleGroup();
 			if (!g.children.length) throw new Error('Нет видимых деталей');
-			try { blob = await export3d(id, g); } finally { disposeObject(g); }
+			try { blob = await export3d(id, g, { name: baseName() }); } finally { disposeObject(g); }
 		}
 		hideLoading();
 		await download(blob, baseName() + '.' + f.ext);

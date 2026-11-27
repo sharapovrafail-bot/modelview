@@ -41,7 +41,7 @@ jobs:
         run: |
           gh release delete "v$VER" --yes --cleanup-tag || true
           gh release create "v$VER" RafCADView-Setup-$VER.exe --title "RafCAD View $VER" \
-            --notes "RafCAD View $VER для Windows 10/11. Новое: «Сохранить как» и экспорт в STL, OBJ, 3MF, GLB, PLY, DXF, SVG, PDF, PNG, JPG." --latest
+            --notes "RafCAD View $VER для Windows 10/11. Новое: экспорт в STEP (AP214). «Сохранить как» и экспорт в STL, OBJ, 3MF, GLB, PLY, DXF, SVG, PDF, PNG, JPG." --latest
           gh release delete win-latest --yes --cleanup-tag || true
           gh release create win-latest RafCADView-Setup-$VER.exe --title "RafCAD View для Windows (последняя сборка)" \
             --notes "Автосборка на GitHub Actions." --latest=false
