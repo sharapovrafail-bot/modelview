@@ -72,6 +72,37 @@ class Api:
             f.write(base64.b64decode(b64))
         return path
 
+    def save_begin(self, name):
+        """Большие файлы (STEP, STL по сотни МБ) передаются частями: окно «Сохранить как», затем save_append/save_end."""
+        import webview
+        ext = os.path.splitext(name)[1].lower().lstrip(".")
+        res = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=name)
+        if not res:
+            return ""
+        path = res if isinstance(res, str) else res[0]
+        if ext and not path.lower().endswith("." + ext):
+            path += "." + ext
+        self._save_f = open(path, "wb")
+        self._save_path = path
+        return path
+
+    def save_append(self, b64):
+        import base64
+        self._save_f.write(base64.b64decode(b64))
+        return True
+
+    def save_end(self, ok=True):
+        f = getattr(self, "_save_f", None)
+        self._save_f = None
+        if f:
+            f.close()
+            if not ok:
+                try:
+                    os.remove(self._save_path)
+                except OSError:
+                    pass
+        return getattr(self, "_save_path", "")
+
 
 def hook_open_files():
     """Двойной щелчок по файлу, когда RafCAD View уже открыт: macOS шлёт application:openFiles:."""

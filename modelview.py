@@ -172,6 +172,41 @@ class Api:
             f.write(base64.b64decode(b64))
         return path
 
+    def save_begin(self, name):
+        """Большие файлы (STEP, STL по сотни МБ) передаются частями: окно «Сохранить как», затем save_append/save_end."""
+        import webview
+        ext = os.path.splitext(name)[1].lower().lstrip(".")
+        kinds = {"pdf": "PDF", "png": "Изображение PNG", "jpg": "Изображение JPG", "stl": "STL", "obj": "OBJ", "ply": "PLY",
+                 "glb": "glTF (GLB)", "3mf": "3MF", "dxf": "Чертёж DXF", "dwg": "Чертёж DWG", "svg": "SVG", "step": "STEP", "stp": "STEP",
+                 "iges": "IGES", "igs": "IGES", "brep": "BREP"}
+        types = (f"{kinds.get(ext, ext.upper())} (*.{ext})", "Все файлы (*.*)") if ext else ("Все файлы (*.*)",)
+        res = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=name, file_types=types)
+        if not res:
+            return ""
+        path = res if isinstance(res, str) else res[0]
+        if ext and not path.lower().endswith("." + ext):
+            path += "." + ext
+        self._save_f = open(path, "wb")
+        self._save_path = path
+        return path
+
+    def save_append(self, b64):
+        import base64
+        self._save_f.write(base64.b64decode(b64))
+        return True
+
+    def save_end(self, ok=True):
+        f = getattr(self, "_save_f", None)
+        self._save_f = None
+        if f:
+            f.close()
+            if not ok:
+                try:
+                    os.remove(self._save_path)
+                except OSError:
+                    pass
+        return getattr(self, "_save_path", "")
+
 
 def main():
     args = [a for a in sys.argv[1:] if a.strip()]

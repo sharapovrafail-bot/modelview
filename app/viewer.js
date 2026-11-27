@@ -2784,6 +2784,16 @@ $('expGo').onclick = async () => {
 		} else {
 			const g = visibleGroup();
 			if (!g.children.length) throw new Error('Нет видимых деталей');
+			if (id === 'step') {
+				let tri = 0; g.traverse((o) => { if (o.isMesh) tri += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
+				if (tri > 300000) {
+					hideLoading();
+					const mb = Math.round(tri * 0.54 / 1024);
+					if (!confirm(`В модели ${tri.toLocaleString('ru-RU')} треугольников (это скан или сетка).\nSTEP получится около ${mb} МБ, CAD будет открывать его долго.\nДля таких моделей лучше STL или 3MF.\n\nВсё равно записать STEP?`)) { disposeObject(g); return; }
+					showLoading('Экспорт STEP…', false);
+					await new Promise((r) => setTimeout(r, 50));
+				}
+			}
 			try { blob = await export3d(id, g, { name: baseName() }); } finally { disposeObject(g); }
 		}
 		hideLoading();
@@ -2794,8 +2804,26 @@ function baseName() { return (model.name || 'модель').replace(/\.[^.]+$/, 
 async function download(blob, name) {
 	// в программе — обычное окно «Сохранить как», в браузере — скачивание
 	const api = window.pywebview && window.pywebview.api;
+	const b64of = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = () => rej(r.error); r.readAsDataURL(b); });
+	if (api && api.save_begin && blob.size > 4e6) {
+		// большой файл — частями по 4 МБ (иначе мост программы не пропускает сотни мегабайт за раз)
+		let path;
+		try { path = await api.save_begin(name); } catch (e) { alert('Не удалось сохранить файл:\n' + e); return; }
+		if (!path) return;
+		const CH = 4 * 1024 * 1024;
+		try {
+			showLoading('Сохранение…', false);
+			for (let i = 0; i < blob.size; i += CH) {
+				$('loadingText') && ($('loadingText').textContent = `Сохранение… ${Math.round(i / blob.size * 100)} %`);
+				await api.save_append(await b64of(blob.slice(i, i + CH)));
+			}
+			await api.save_end(true);
+		} catch (e) { try { await api.save_end(false); } catch (_) {} alert('Не удалось сохранить файл:\n' + e); }
+		finally { hideLoading(); }
+		return;
+	}
 	if (api && api.save_file) {
-		const b64 = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(blob); });
+		const b64 = await b64of(blob);
 		try { await api.save_file(name, b64); } catch (e) { alert('Не удалось сохранить файл:\n' + e); }
 		return;
 	}

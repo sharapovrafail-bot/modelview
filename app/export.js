@@ -46,7 +46,7 @@ export async function export3d(fmt, group, opts = {}) {
 			finally { kids.forEach((c) => group.add(c)); }
 		}
 		case '3mf': return new Blob([write3mf(group)], { type: 'model/3mf' });
-		case 'step': return new Blob([writeStep(group, opts.name).text], { type: 'model/step' });
+		case 'step': return new Blob(writeStep(group, opts.name).parts, { type: 'model/step' });
 	}
 	throw new Error('Неизвестный формат ' + fmt);
 }
@@ -103,9 +103,10 @@ ${parts.map((p) => `<object id="${p.id}" type="model" name="${esc(p.name)}" pid=
 // незамкнутая → поверхностная модель. Открывается в КОМПАС, SolidWorks, Fusion 360, FreeCAD, NX и др.
 export function writeStep(group, name = 'RafCAD View', opts = {}) {
 	const merge = opts.merge !== false;
-	const L = [];
+	// текст копится кусками ~1 МБ: у больших моделей STEP бывает в сотни мегабайт — одной строкой браузер его не соберёт
+	const parts = []; let buf = [];
 	let n = 0;
-	const add = (s) => { L.push(`#${++n}=${s};`); return n; };
+	const add = (s) => { buf.push(`#${++n}=${s};\n`); if (buf.length >= 20000) { parts.push(buf.join('')); buf = []; } return n; };
 	const fx = (v) => { const r = Math.round(v * 1e6) / 1e6; let s = r.toString(); if (!/[.eE]/.test(s)) s += '.'; return s; };
 	const str = (s) => "'" + stepStr(s) + "'";
 	const bodies = [];
@@ -150,7 +151,8 @@ FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
 ENDSEC;
 DATA;
 `;
-	return { text: head + L.join('\n') + '\nENDSEC;\nEND-ISO-10303-21;\n', bodies: bodies.length, faces, tris, closed: closedAll };
+	parts.push(buf.join(''));
+	return { parts: [head, ...parts, 'ENDSEC;\nEND-ISO-10303-21;\n'], bodies: bodies.length, faces, tris, closed: closedAll };
 }
 // STEP-строка: латиница как есть, остальное — \X2\…\X0\ (UTF-16)
 function stepStr(s) {
@@ -187,9 +189,10 @@ function stepBody(m, merge, add, fx, str) {
 	if (!T.length) return null;
 	// 2) рёбра: «a,b» направленное → треугольник
 	const dir = new Map();
-	T.forEach((t, ti) => { for (let k = 0; k < 3; k++) dir.set(t.v[k] + ',' + t.v[(k + 1) % 3], ti); });
+	const NV = P.length, EK = (a, b) => a * NV + b; // ключ ребра — число (строки на миллионах рёбер съедают гигабайты)
+	T.forEach((t, ti) => { for (let k = 0; k < 3; k++) dir.set(EK(t.v[k], t.v[(k + 1) % 3]), ti); });
 	let closed = true;
-	for (const k of dir.keys()) { const [a, b] = k.split(','); if (!dir.has(b + ',' + a)) { closed = false; break; } }
+	for (const k of dir.keys()) { const a = Math.floor(k / NV), b = k - a * NV; if (!dir.has(EK(b, a))) { closed = false; break; } }
 	// 3) группы треугольников в одной плоскости (обход по общим рёбрам)
 	const reg = new Int32Array(T.length).fill(-1); const regions = [];
 	const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -203,7 +206,7 @@ function stepBody(m, merge, add, fx, str) {
 			for (let h = 0; h < list.length; h++) {
 				const t = T[list[h]];
 				for (let k = 0; k < 3; k++) {
-					const o = dir.get(t.v[(k + 1) % 3] + ',' + t.v[k]);
+					const o = dir.get(EK(t.v[(k + 1) % 3], t.v[k]));
 					if (o === undefined || reg[o] >= 0) continue;
 					const u = T[o];
 					if (u.n[0] * t.n[0] + u.n[1] * t.n[1] + u.n[2] * t.n[2] > 1 - 1e-9 && Math.abs(u.d - T[s].d) < dTol) { reg[o] = r; list.push(o); }
@@ -220,7 +223,7 @@ function stepBody(m, merge, add, fx, str) {
 		id = add(`VERTEX_POINT('',#${p})`); vx.set(i, id); return id;
 	};
 	const oedge = (a, b) => {
-		const lo = Math.min(a, b), hi = Math.max(a, b), k = lo + ',' + hi;
+		const lo = Math.min(a, b), hi = Math.max(a, b), k = EK(lo, hi);
 		let e = ed.get(k);
 		if (!e) {
 			const va = vertex(lo), vb = vertex(hi);
@@ -247,7 +250,7 @@ function stepBody(m, merge, add, fx, str) {
 	};
 	for (const list of regions) {
 		const t0 = T[list[0]];
-		const loops = list.length > 1 ? regionLoops(list, T, P, t0.n) : null;
+		const loops = list.length > 1 ? regionLoops(list, T, P, t0.n, NV) : null;
 		if (loops) writeFace(t0.n, loops, P[loops[0][0]]);
 		else for (const ti of list) writeFace(T[ti].n, [T[ti].v.slice()], P[T[ti].v[0]]);
 	}
@@ -266,13 +269,13 @@ function perp(n) {
 	return [x[0] / l, x[1] / l, x[2] / l];
 }
 // контуры плоской грани из треугольников: внешний первым, затем отверстия; null — если контур неоднозначен
-function regionLoops(list, T, P, n) {
+function regionLoops(list, T, P, n, NV) {
 	const inReg = new Set();
-	for (const ti of list) { const v = T[ti].v; for (let k = 0; k < 3; k++) inReg.add(v[k] + ',' + v[(k + 1) % 3]); }
+	for (const ti of list) { const v = T[ti].v; for (let k = 0; k < 3; k++) inReg.add(v[k] * NV + v[(k + 1) % 3]); }
 	const next = new Map();
 	for (const k of inReg) {
-		const [a, b] = k.split(',');
-		if (inReg.has(b + ',' + a)) continue;
+		const a = Math.floor(k / NV), b = k - a * NV;
+		if (inReg.has(b * NV + a)) continue;
 		if (next.has(a)) return null; // вершина-«бабочка»: два выхода — пишем треугольниками
 		next.set(a, b);
 	}
@@ -280,7 +283,7 @@ function regionLoops(list, T, P, n) {
 	for (const s of next.keys()) {
 		if (used.has(s)) continue;
 		const lp = []; let c = s, guard = 0;
-		while (!used.has(c)) { used.add(c); lp.push(+c); c = next.get(c); if (c === undefined || ++guard > 1e7) return null; }
+		while (!used.has(c)) { used.add(c); lp.push(c); c = next.get(c); if (c === undefined || ++guard > 1e7) return null; }
 		if (c !== s || lp.length < 3) return null;
 		loops.push(lp);
 	}
